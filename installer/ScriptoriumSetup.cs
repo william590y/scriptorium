@@ -4,7 +4,9 @@
 // installer's version), installs Obsidian for the current user if it is missing, and installs EB Garamond and Cormorant
 // Garamond for the current user if they are missing. The Longform plugin is not bundled: if the user ticks it, it is
 // downloaded from its author's official release into the new vault. Every download is pinned by SHA-256. An existing
-// folder is never changed. Targets .NET Framework 4.8, which ships with Windows 10 and 11, so nothing else needs installing.
+// folder is never changed, except a Scriptorium vault, which it can update in place: Scriptorium's own files are replaced
+// (the old ones backed up in .obsidian/scriptorium-backup-<time>), the user's notes and settings are kept.
+// Targets .NET Framework 4.8, which ships with Windows 10 and 11, so nothing else needs installing.
 //
 // The window is drawn like a Scriptorium page: ink on warm paper, set in EB Garamond and Cormorant Garamond (static
 // subsets embedded in this .exe, built by tools/build_fonts.py), with hand-inked buttons, boxes and rules.
@@ -26,6 +28,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -37,6 +40,7 @@ using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -46,8 +50,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Scriptorium")]
 [assembly: AssemblyCompany("williamliaw.com")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 William Liaw. GPL-3.0-or-later.")]
-[assembly: AssemblyVersion("1.0.4.0")]
-[assembly: AssemblyFileVersion("1.0.4.0")]
+[assembly: AssemblyVersion("1.0.5.0")]
+[assembly: AssemblyFileVersion("1.0.5.0")]
 
 namespace ScriptoriumSetup
 {
@@ -58,10 +62,23 @@ namespace ScriptoriumSetup
         [STAThread]
         static int Main(string[] args)
         {
-            // Headless check used by the build script: unpack the embedded vault into a new folder and exit.
+            // Headless check used by the build script: unpack the embedded vault into a new (or empty) folder and exit.
             if (args.Length == 2 && args[0] == "--extract-only")
             {
-                try { Installer.ExtractVault(Path.GetFullPath(args[1]), null); Console.WriteLine("OK " + args[1]); return 0; }
+                try { Installer.ExtractVault(Path.GetFullPath(args[1]), null, true); Console.WriteLine("OK " + args[1]); return 0; }
+                catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
+            }
+            // Headless update (used by the tests): update the Scriptorium vault in that folder in place, without Longform.
+            if (args.Length == 2 && args[0] == "--update-only")
+            {
+                try
+                {
+                    string vault = Path.GetFullPath(args[1]);
+                    if (Vaults.Classify(vault) != Vaults.Target.Vault) throw new InvalidOperationException("This folder is not a Scriptorium vault: " + vault);
+                    Vaults.Report report = Vaults.Update(vault, null, Console.WriteLine);
+                    Console.WriteLine(Vaults.UpdatedMessage(vault, report));
+                    return 0;
+                }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
             }
             if (Installer.IsWindows) { try { SetProcessDPIAware(); } catch { } }
@@ -123,33 +140,55 @@ namespace ScriptoriumSetup
 
         // ---------- the vault ----------
         // Unpacks the embedded configuration into a fresh staging folder, checks it, then copies it into a folder that
-        // must not exist yet (created here, so an existing folder is never merged into).
-        public static void ExtractVault(string destination, Action<string> log)
+        // must not exist yet (created here, so an existing folder is never merged into) or, with intoEmpty, into an
+        // existing folder that is empty.
+        public static void ExtractVault(string destination, Action<string> log) { ExtractVault(destination, log, false); }
+
+        public static void ExtractVault(string destination, Action<string> log, bool intoEmpty)
         {
-            if (Directory.Exists(destination) || File.Exists(destination))
+            bool existed = Directory.Exists(destination);
+            if (File.Exists(destination) || (existed && !(intoEmpty && Vaults.IsEmptyFolder(destination))))
                 throw new InvalidOperationException("The folder already exists: " + destination + "\nChoose a new folder; nothing was changed.");
             string temp = Path.Combine(Path.GetTempPath(), "scriptorium-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(temp);
             try
             {
-                string zip = Path.Combine(temp, "Scriptorium.zip");
-                using (Stream res = Assembly.GetExecutingAssembly().GetManifestResourceStream("Scriptorium.zip"))
-                {
-                    if (res == null) throw new InvalidOperationException("This installer is damaged: the configuration is missing.");
-                    using (FileStream fs = File.Create(zip)) res.CopyTo(fs);
-                }
-                string staging = Path.Combine(temp, "vault");
-                ZipFile.ExtractToDirectory(zip, staging);
-                if (!File.Exists(Path.Combine(staging, ".obsidian", "appearance.json")))
-                    throw new InvalidOperationException("This installer is damaged: the configuration is incomplete.");
+                string staging = Stage(temp);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination));
-                if (Directory.Exists(destination)) throw new InvalidOperationException("The folder appeared while installing: " + destination);
-                Directory.CreateDirectory(destination);
+                if (existed)
+                {
+                    if (!Vaults.IsEmptyFolder(destination)) throw new InvalidOperationException("The folder is no longer empty: " + destination);
+                }
+                else
+                {
+                    if (Directory.Exists(destination)) throw new InvalidOperationException("The folder appeared while installing: " + destination);
+                    Directory.CreateDirectory(destination);
+                }
                 try { CopyTree(staging, destination); }
-                catch { try { Directory.Delete(destination, true); } catch { } throw; }
+                catch
+                {
+                    try { if (existed) { foreach (string e in Directory.GetFileSystemEntries(destination)) Vaults.DeleteEntry(e); } else Directory.Delete(destination, true); } catch { }
+                    throw;
+                }
                 if (log != null) log("Created the vault in " + destination);
             }
             finally { try { Directory.Delete(temp, true); } catch { } }
+        }
+
+        // Unpacks the embedded configuration into temp\vault and checks it.
+        public static string Stage(string temp)
+        {
+            string zip = Path.Combine(temp, "Scriptorium.zip");
+            using (Stream res = Assembly.GetExecutingAssembly().GetManifestResourceStream("Scriptorium.zip"))
+            {
+                if (res == null) throw new InvalidOperationException("This installer is damaged: the configuration is missing.");
+                using (FileStream fs = File.Create(zip)) res.CopyTo(fs);
+            }
+            string staging = Path.Combine(temp, "vault");
+            ZipFile.ExtractToDirectory(zip, staging);
+            if (!File.Exists(Path.Combine(staging, ".obsidian", "appearance.json")))
+                throw new InvalidOperationException("This installer is damaged: the configuration is incomplete.");
+            return staging;
         }
 
         static void CopyTree(string from, string to)
@@ -164,6 +203,15 @@ namespace ScriptoriumSetup
         // has been verified; on any failure nothing is added to the vault.
         public static void InstallLongform(string vault, string temp, Action<int> progress, CancellationToken cancel)
         {
+            string staging = DownloadLongform(temp, progress, cancel);
+            string dir = Path.Combine(vault, ".obsidian", "plugins", "longform");
+            Directory.CreateDirectory(dir);
+            foreach (Pinned p in Longform) File.Copy(Path.Combine(staging, p.File), Path.Combine(dir, p.File));
+        }
+
+        // Downloads and verifies Longform's three files into temp\longform, and returns that folder.
+        public static string DownloadLongform(string temp, Action<int> progress, CancellationToken cancel)
+        {
             string staging = Path.Combine(temp, "longform");
             Directory.CreateDirectory(staging);
             for (int i = 0; i < Longform.Length; i++)
@@ -172,9 +220,7 @@ namespace ScriptoriumSetup
                 Download(Longform[i], Path.Combine(staging, Longform[i].File),
                          (d, t) => { if (progress != null) progress((int)(100.0 * (k + (t > 0 ? (double)d / t : 0)) / Longform.Length)); }, cancel);
             }
-            string dir = Path.Combine(vault, ".obsidian", "plugins", "longform");
-            Directory.CreateDirectory(dir);
-            foreach (Pinned p in Longform) File.Copy(Path.Combine(staging, p.File), Path.Combine(dir, p.File));
+            return staging;
         }
 
         // ---------- downloads ----------
@@ -272,6 +318,491 @@ namespace ScriptoriumSetup
         {
             UIntPtr result;
             SendMessageTimeout((IntPtr)0xffff, 0x001D /* WM_FONTCHANGE */, UIntPtr.Zero, IntPtr.Zero, 2 /* SMTO_ABORTIFHUNG */, 5000, out result);
+        }
+    }
+
+    // ---------- updating a vault in place ----------
+    // A Scriptorium vault is updated by replacing Scriptorium's own files and keeping the user's: the snippet, the three
+    // bundled plugins' code, the theme, Longform's code (if it was downloaded) and the vault's README are replaced; every
+    // other file of the package is written only if it is missing (settings, data.json, the sample note); the community
+    // plugin list and appearance.json are merged; nothing is ever deleted. Every file that is replaced is first copied to
+    // .obsidian/scriptorium-backup-<time>/, and if anything fails half-way, the vault is put back from that copy.
+    static class Vaults
+    {
+        public enum Target { New, Empty, Vault, Other }
+
+        public sealed class Report { public string From, To, Backup; public int Replaced, Added; }
+
+        sealed class Change
+        {
+            public string Rel, Note;
+            public byte[] Content;
+            public bool Replaces;
+        }
+
+        enum Rule { Replace, Keep, Plugins, Appearance }
+
+        static readonly string[] BundledPlugins = { "scriptorium", "manuscriptum", "typewriter-mode" };
+        static readonly string[] PluginCode = { "main.js", "manifest.json", "styles.css", "LICENSE" };
+
+        public static Target Classify(string path)
+        {
+            if (File.Exists(path)) return Target.Other;
+            if (!Directory.Exists(path)) return Target.New;
+            if (IsScriptoriumVault(path)) return Target.Vault;
+            return IsEmptyFolder(path) ? Target.Empty : Target.Other;
+        }
+
+        public static bool IsScriptoriumVault(string dir)
+        {
+            return File.Exists(Path.Combine(dir, ".obsidian", "plugins", "scriptorium", "manifest.json")) ||
+                   File.Exists(Path.Combine(dir, ".obsidian", "snippets", "manuscript.css"));
+        }
+
+        public static bool IsEmptyFolder(string dir) { return !Directory.EnumerateFileSystemEntries(dir).Any(); }
+
+        // The Scriptorium plugin's version in a vault, or null if it cannot be read.
+        public static string VaultVersion(string dir)
+        {
+            try { return VersionOf(File.ReadAllText(Path.Combine(dir, ".obsidian", "plugins", "scriptorium", "manifest.json"))); }
+            catch { return null; }
+        }
+
+        static string packageVersion;
+
+        // The Scriptorium plugin's version in this installer's package.
+        public static string PackageVersion()
+        {
+            if (packageVersion != null) return packageVersion;
+            try
+            {
+                using (Stream res = Assembly.GetExecutingAssembly().GetManifestResourceStream("Scriptorium.zip"))
+                using (var zip = new ZipArchive(res, ZipArchiveMode.Read))
+                using (var reader = new StreamReader(zip.GetEntry(".obsidian/plugins/scriptorium/manifest.json").Open()))
+                    packageVersion = VersionOf(reader.ReadToEnd());
+            }
+            catch { }
+            return packageVersion;
+        }
+
+        static string VersionOf(string manifest)
+        {
+            var o = MiniJson.Parse(manifest) as MiniJson.Obj;
+            string v = o != null ? o.Get("version") as string : null;
+            return string.IsNullOrEmpty(v) ? null : v;
+        }
+
+        public static string UpdatedMessage(string vault, Report r)
+        {
+            return "Updated Scriptorium in " + vault + " (from " + (r.From ?? "an unknown version") + " to " + (r.To ?? "an unknown version") +
+                   "). Restart Obsidian or reload the vault to load it.";
+        }
+
+        static Rule RuleFor(string rel)
+        {
+            string k = rel.Replace('\\', '/');
+            if (k == ".obsidian/community-plugins.json") return Rule.Plugins;
+            if (k == ".obsidian/appearance.json") return Rule.Appearance;
+            if (k == ".obsidian/snippets/manuscript.css" || k == "README.md" || k.StartsWith(".obsidian/themes/Typewriter/", StringComparison.Ordinal)) return Rule.Replace;
+            foreach (string plugin in BundledPlugins)
+                foreach (string file in PluginCode)
+                    if (k == ".obsidian/plugins/" + plugin + "/" + file) return Rule.Replace;
+            foreach (Pinned p in Installer.Longform)
+                if (k == ".obsidian/plugins/longform/" + p.File) return Rule.Replace;
+            return Rule.Keep;
+        }
+
+        // Updates the vault from the package (and Longform's files in longform, if not null); returns what was done.
+        public static Report Update(string vault, string longform, Action<string> log)
+        {
+            if (log == null) log = line => { };
+            if (!IsScriptoriumVault(vault)) throw new InvalidOperationException("This folder is not a Scriptorium vault: " + vault);
+            var report = new Report { From = VaultVersion(vault) };
+            string temp = Path.Combine(Path.GetTempPath(), "scriptorium-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                string staging = Installer.Stage(temp);
+                report.To = VaultVersion(staging);
+                var changes = new List<Change>();
+                foreach (string file in Directory.GetFiles(staging, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
+                    Plan(vault, file.Substring(staging.Length + 1), File.ReadAllBytes(file), changes, log);
+                if (longform != null)
+                    foreach (Pinned p in Installer.Longform)
+                        Plan(vault, Path.Combine(".obsidian", "plugins", "longform", p.File), File.ReadAllBytes(Path.Combine(longform, p.File)), changes, log);
+                Apply(vault, changes, report, log);
+                return report;
+            }
+            finally { try { Directory.Delete(temp, true); } catch { } }
+        }
+
+        static void Plan(string vault, string rel, byte[] content, List<Change> changes, Action<string> log)
+        {
+            string target = Path.Combine(vault, rel);
+            if (!File.Exists(target)) { changes.Add(new Change { Rel = rel, Content = content }); return; }
+            Rule rule = RuleFor(rel);
+            if (rule == Rule.Keep) return;
+            if (rule == Rule.Replace)
+            {
+                if (!SameBytes(target, content)) changes.Add(new Change { Rel = rel, Content = content, Replaces = true });
+                return;
+            }
+            string note, name = Path.GetFileName(rel);
+            byte[] merged = rule == Rule.Plugins ? MergePlugins(File.ReadAllText(target), content, name, out note)
+                                                 : MergeAppearance(File.ReadAllText(target), name, out note);
+            if (merged != null) changes.Add(new Change { Rel = rel, Content = merged, Replaces = true, Note = note });
+            else if (note != null) log(note);
+        }
+
+        // The vault's list of community plugins, plus any of ours that are missing (its order kept). Null if nothing needs
+        // adding, or if the file is not a JSON list (then note says it was left as it was).
+        static byte[] MergePlugins(string text, byte[] ours, string name, out string note)
+        {
+            note = null;
+            List<object> list;
+            try { list = MiniJson.Parse(text) as List<object>; }
+            catch (FormatException) { list = null; }
+            if (list == null) { note = "Left " + name + " as it was: it is not a valid JSON list."; return null; }
+            var added = new List<string>();
+            foreach (object o in (List<object>)MiniJson.Parse(Encoding.UTF8.GetString(ours)))
+            {
+                var id = o as string;
+                if (id != null && !list.Any(x => x as string == id)) { list.Add(id); added.Add(id); }
+            }
+            if (added.Count == 0) return null;
+            note = "Turned on the community plugin" + (added.Count > 1 ? "s " : " ") + string.Join(", ", added);
+            return Utf8(MiniJson.Write(list));
+        }
+
+        // appearance.json as it is, with the manuscript snippet enabled. Null if it already is, or if the file is not a
+        // JSON object with a list of snippets (then note says it was left as it was).
+        static byte[] MergeAppearance(string text, string name, out string note)
+        {
+            note = null;
+            MiniJson.Obj appearance;
+            try { appearance = MiniJson.Parse(text) as MiniJson.Obj; }
+            catch (FormatException) { appearance = null; }
+            if (appearance == null) { note = "Left " + name + " as it was: it is not a valid JSON object."; return null; }
+            if (!appearance.Has("enabledCssSnippets")) appearance.Add(new KeyValuePair<string, object>("enabledCssSnippets", new List<object> { "manuscript" }));
+            else
+            {
+                var snippets = appearance.Get("enabledCssSnippets") as List<object>;
+                if (snippets == null) { note = "Left " + name + " as it was: its enabledCssSnippets is not a list."; return null; }
+                if (snippets.Any(x => x as string == "manuscript")) return null;
+                snippets.Add("manuscript");
+            }
+            note = "Turned the manuscript snippet back on";
+            return Utf8(MiniJson.Write(appearance));
+        }
+
+        static byte[] Utf8(string s) { return new UTF8Encoding(false).GetBytes(s); }
+
+        static bool SameBytes(string file, byte[] content)
+        {
+            var info = new FileInfo(file);
+            return info.Length == content.Length && File.ReadAllBytes(file).SequenceEqual(content);
+        }
+
+        static void Apply(string vault, List<Change> changes, Report report, Action<string> log)
+        {
+            List<Change> replacing = changes.Where(c => c.Replaces).ToList();
+            string backup = null;
+            if (replacing.Count > 0)
+            {
+                string stamp = "scriptorium-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+                backup = Path.Combine(vault, ".obsidian", stamp);
+                for (int n = 2; Directory.Exists(backup) || File.Exists(backup); n++) backup = Path.Combine(vault, ".obsidian", stamp + "-" + n);
+                try
+                {
+                    foreach (Change c in replacing)
+                    {
+                        string copy = Path.Combine(backup, c.Rel);
+                        Directory.CreateDirectory(Path.GetDirectoryName(copy));
+                        File.Copy(Path.Combine(vault, c.Rel), copy);
+                    }
+                }
+                catch (Exception e)
+                {
+                    DeleteEntry(backup);
+                    throw new InvalidOperationException("The vault's files could not be backed up, so nothing was changed: " + e.Message, e);
+                }
+                report.Backup = backup;
+                log("Backed up " + Count(replacing.Count, "file") + " in " + backup);
+            }
+
+            var written = new List<Change>();
+            var made = new List<string>();
+            Change current = null;
+            try
+            {
+                foreach (Change c in changes)
+                {
+                    current = c;
+                    string target = Path.Combine(vault, c.Rel);
+                    MakeFolders(Path.GetDirectoryName(target), made);
+                    File.WriteAllBytes(target, c.Content);
+                    written.Add(c);
+                }
+            }
+            catch (Exception e)
+            {
+                // Put every file back as it was: replaced files from the backup, new files removed, new folders removed.
+                bool restored = true;
+                if (current != null && !written.Contains(current)) written.Add(current);
+                for (int i = written.Count - 1; i >= 0; i--)
+                {
+                    Change c = written[i];
+                    string target = Path.Combine(vault, c.Rel);
+                    try
+                    {
+                        if (!c.Replaces) { if (File.Exists(target)) File.Delete(target); }
+                        else
+                        {
+                            string copy = Path.Combine(backup, c.Rel);
+                            if (!File.Exists(target) || !SameBytes(target, File.ReadAllBytes(copy))) File.Copy(copy, target, true);
+                        }
+                    }
+                    catch { restored = false; }
+                }
+                for (int i = made.Count - 1; i >= 0; i--) { try { Directory.Delete(made[i]); } catch { } }
+                if (restored && backup != null) DeleteEntry(backup);
+                log(restored ? "The update failed, so every file was put back as it was."
+                             : "The update failed, and some files could not be put back; the originals are in " + backup);
+                throw new InvalidOperationException((restored ? "The update failed and was undone: " : "The update failed: ") + e.Message, e);
+            }
+
+            foreach (Change c in changes) if (c.Note != null) log(c.Note);
+            report.Replaced = replacing.Count;
+            report.Added = changes.Count - replacing.Count;
+            if (report.Replaced > 0) log("Replaced " + Count(report.Replaced, "file"));
+            if (report.Added > 0) log("Added " + Count(report.Added, "missing file"));
+            if (changes.Count == 0) log("Scriptorium's files were already up to date");
+            log("Kept your notes and settings");
+        }
+
+        static string Count(int n, string noun) { return n + " " + noun + (n == 1 ? "" : "s"); }
+
+        // Creates a folder and any missing parents, remembering each one it made (outermost first).
+        static void MakeFolders(string dir, List<string> made)
+        {
+            var missing = new Stack<string>();
+            for (string d = dir; !string.IsNullOrEmpty(d) && !Directory.Exists(d); d = Path.GetDirectoryName(d)) missing.Push(d);
+            while (missing.Count > 0) { string d = missing.Pop(); Directory.CreateDirectory(d); made.Add(d); }
+        }
+
+        // Deletes a file or a folder tree, read-only files included; never throws.
+        public static void DeleteEntry(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) { File.SetAttributes(path, FileAttributes.Normal); File.Delete(path); return; }
+                if (!Directory.Exists(path)) return;
+                foreach (string f in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) File.SetAttributes(f, FileAttributes.Normal);
+                Directory.Delete(path, true);
+            }
+            catch { }
+        }
+    }
+
+    // Just enough JSON for Obsidian's settings files: parses to MiniJson.Obj (keys in order), List<object>, string,
+    // MiniJson.Num (the number's text, unchanged), bool and null; writes the way Obsidian does (JSON.stringify, 2 spaces).
+    static class MiniJson
+    {
+        public sealed class Obj : List<KeyValuePair<string, object>>
+        {
+            public bool Has(string key) { return this.Any(kv => kv.Key == key); }
+            public object Get(string key) { foreach (var kv in this) if (kv.Key == key) return kv.Value; return null; }
+        }
+
+        public sealed class Num { public readonly string Text; public Num(string text) { Text = text; } }
+
+        public static object Parse(string text)
+        {
+            var p = new Parser(text.Length > 0 && text[0] == '﻿' ? text.Substring(1) : text);
+            object value = p.Value();
+            p.Space();
+            if (!p.AtEnd) throw new FormatException("Unexpected text after the JSON value");
+            return value;
+        }
+
+        sealed class Parser
+        {
+            readonly string s;
+            int i;
+            public Parser(string s) { this.s = s; }
+            public bool AtEnd { get { return i >= s.Length; } }
+
+            public void Space() { while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++; }
+
+            char Peek() { if (i >= s.Length) throw new FormatException("Unexpected end of JSON"); return s[i]; }
+
+            void Expect(char c) { if (Peek() != c) throw new FormatException("Expected '" + c + "' at " + i); i++; }
+
+            public object Value()
+            {
+                Space();
+                char c = Peek();
+                if (c == '{') return Object();
+                if (c == '[') return Array();
+                if (c == '"') return String();
+                if (Word("true")) return true;
+                if (Word("false")) return false;
+                if (Word("null")) return null;
+                return Number();
+            }
+
+            bool Word(string w)
+            {
+                if (string.CompareOrdinal(s, i, w, 0, w.Length) != 0) return false;
+                i += w.Length;
+                return true;
+            }
+
+            Obj Object()
+            {
+                var o = new Obj();
+                Expect('{'); Space();
+                if (Peek() == '}') { i++; return o; }
+                while (true)
+                {
+                    Space();
+                    string key = String();
+                    Space(); Expect(':');
+                    o.Add(new KeyValuePair<string, object>(key, Value()));
+                    Space();
+                    if (Peek() == ',') { i++; continue; }
+                    Expect('}');
+                    return o;
+                }
+            }
+
+            List<object> Array()
+            {
+                var a = new List<object>();
+                Expect('['); Space();
+                if (Peek() == ']') { i++; return a; }
+                while (true)
+                {
+                    a.Add(Value());
+                    Space();
+                    if (Peek() == ',') { i++; continue; }
+                    Expect(']');
+                    return a;
+                }
+            }
+
+            string String()
+            {
+                Expect('"');
+                var b = new StringBuilder();
+                while (true)
+                {
+                    char c = Peek(); i++;
+                    if (c == '"') return b.ToString();
+                    if (c < ' ') throw new FormatException("Control character in a string");
+                    if (c != '\\') { b.Append(c); continue; }
+                    char e = Peek(); i++;
+                    switch (e)
+                    {
+                        case '"': b.Append('"'); break;
+                        case '\\': b.Append('\\'); break;
+                        case '/': b.Append('/'); break;
+                        case 'b': b.Append('\b'); break;
+                        case 'f': b.Append('\f'); break;
+                        case 'n': b.Append('\n'); break;
+                        case 'r': b.Append('\r'); break;
+                        case 't': b.Append('\t'); break;
+                        case 'u':
+                            if (i + 4 > s.Length) throw new FormatException("Bad \\u escape");
+                            b.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+                            i += 4;
+                            break;
+                        default: throw new FormatException("Bad escape \\" + e);
+                    }
+                }
+            }
+
+            Num Number()
+            {
+                int start = i;
+                if (i < s.Length && s[i] == '-') i++;
+                int digits = Digits();
+                if (digits == 0 || (digits > 1 && s[start + (s[start] == '-' ? 1 : 0)] == '0')) throw new FormatException("Bad number at " + start);
+                if (i < s.Length && s[i] == '.') { i++; if (Digits() == 0) throw new FormatException("Bad number at " + start); }
+                if (i < s.Length && (s[i] == 'e' || s[i] == 'E'))
+                {
+                    i++;
+                    if (i < s.Length && (s[i] == '+' || s[i] == '-')) i++;
+                    if (Digits() == 0) throw new FormatException("Bad number at " + start);
+                }
+                return new Num(s.Substring(start, i - start));
+            }
+
+            int Digits() { int n = 0; while (i < s.Length && s[i] >= '0' && s[i] <= '9') { i++; n++; } return n; }
+        }
+
+        public static string Write(object value)
+        {
+            var b = new StringBuilder();
+            Write(b, value, "");
+            return b.ToString();
+        }
+
+        static void Write(StringBuilder b, object v, string indent)
+        {
+            string inner = indent + "  ";
+            var o = v as Obj;
+            var a = v as List<object>;
+            if (o != null)
+            {
+                if (o.Count == 0) { b.Append("{}"); return; }
+                b.Append("{\n");
+                for (int k = 0; k < o.Count; k++)
+                {
+                    b.Append(inner); Quote(b, o[k].Key); b.Append(": ");
+                    Write(b, o[k].Value, inner);
+                    b.Append(k < o.Count - 1 ? ",\n" : "\n");
+                }
+                b.Append(indent).Append('}');
+            }
+            else if (a != null)
+            {
+                if (a.Count == 0) { b.Append("[]"); return; }
+                b.Append("[\n");
+                for (int k = 0; k < a.Count; k++)
+                {
+                    b.Append(inner); Write(b, a[k], inner);
+                    b.Append(k < a.Count - 1 ? ",\n" : "\n");
+                }
+                b.Append(indent).Append(']');
+            }
+            else if (v is string) Quote(b, (string)v);
+            else if (v is Num) b.Append(((Num)v).Text);
+            else if (v is bool) b.Append((bool)v ? "true" : "false");
+            else b.Append("null");
+        }
+
+        static void Quote(StringBuilder b, string s)
+        {
+            b.Append('"');
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '"': b.Append("\\\""); break;
+                    case '\\': b.Append("\\\\"); break;
+                    case '\b': b.Append("\\b"); break;
+                    case '\f': b.Append("\\f"); break;
+                    case '\n': b.Append("\\n"); break;
+                    case '\r': b.Append("\\r"); break;
+                    case '\t': b.Append("\\t"); break;
+                    default:
+                        if (c < ' ') b.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                        else b.Append(c);
+                        break;
+                }
+            }
+            b.Append('"');
         }
     }
 
@@ -668,18 +1199,60 @@ namespace ScriptoriumSetup
     // ---------- controls drawn in ink ----------
     interface IInked { void PaintTo(Graphics g); }
 
+    // A window drawn as a sheet of paper: the setup window and the update question.
+    interface IPage
+    {
+        Bitmap Paper { get; }
+        Size PageSize { get; }
+        void PaintPage(Graphics g);
+    }
+
     static class Sheet
     {
         // Paints the part of the window's paper that lies under a control, so every control sits on the same sheet.
         public static void Under(Control c, Graphics g)
         {
-            var form = c.FindForm() as SetupForm;
-            if (form == null) { g.Clear(Ink.Paper); return; }
-            Point at = form.PointToPage(c);
+            var page = c.FindForm() as IPage;
+            if (page == null) { g.Clear(Ink.Paper); return; }
+            Point at = Offset(c);
+            var form = page;
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
             g.PixelOffsetMode = PixelOffsetMode.Half;
             g.DrawImage(form.Paper, new Rectangle(0, 0, c.Width, c.Height), at.X, at.Y, c.Width, c.Height, GraphicsUnit.Pixel);
         }
+
+        // Where a control sits on its window's page.
+        public static Point Offset(Control c)
+        {
+            var p = Point.Empty;
+            for (Control x = c; x != null && !(x is Form); x = x.Parent) p.Offset(x.Left, x.Top);
+            return p;
+        }
+
+        // A sheet of paper for a page, made once for its size.
+        public static Bitmap Paper(ref Bitmap paper, Size size)
+        {
+            if (paper == null || paper.Size != size) { if (paper != null) paper.Dispose(); paper = Ink.MakePaper(Math.Max(1, size.Width), Math.Max(1, size.Height)); }
+            return paper;
+        }
+
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        // Windows 11: a paper-coloured title bar with ink text (DWMWA_BORDER_COLOR 34, CAPTION_COLOR 35, TEXT_COLOR 36).
+        // Older versions of Windows ignore these, and so do we.
+        public static void TitleBar(IntPtr handle)
+        {
+            try
+            {
+                int border = ColorRef(Ink.Edge), caption = ColorRef(Ink.Paper), text = ColorRef(Ink.Black);
+                DwmSetWindowAttribute(handle, 34, ref border, 4);
+                DwmSetWindowAttribute(handle, 35, ref caption, 4);
+                DwmSetWindowAttribute(handle, 36, ref text, 4);
+            }
+            catch { }
+        }
+
+        static int ColorRef(Color c) { return c.R | (c.G << 8) | (c.B << 16); }
     }
 
     // Static text: wrapped, set on baselines, optionally centred, letter-spaced or in small capitals.
@@ -1060,7 +1633,7 @@ namespace ScriptoriumSetup
         float RuleY(int k) { return (float)Math.Round(k * LineHeight + 2 * Ink.S); }
     }
 
-    class SetupForm : Form
+    class SetupForm : Form, IPage
     {
         readonly TextBox pathBox = new TextBox();
         readonly InkButton browse = new InkButton("Browse…", false);
@@ -1076,8 +1649,10 @@ namespace ScriptoriumSetup
         Bitmap paper;
         float ornamentY, ruleY;
         bool finished;   // the install succeeded: the choices made are shown in full ink, as a record
-
-        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+        // What the folder is (a new folder, an empty one, a Scriptorium vault, anything else), checked as the path is typed.
+        Vaults.Target target = Vaults.Target.New;
+        readonly System.Windows.Forms.Timer detect = new System.Windows.Forms.Timer { Interval = 350 };
+        int detectSeq;
 
         public SetupForm() : this(false) { }
 
@@ -1101,7 +1676,7 @@ namespace ScriptoriumSetup
             intro = new InkLabel("This creates a new vault with the Scriptorium configuration and a Lorem\u00A0Ipsum sample note.",
                                  Typefaces.Make(Typefaces.Text, 17f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
             folderLabel = new InkLabel("New vault folder", Typefaces.Make(Typefaces.Semi, 16f, FontStyle.Regular), Ink.Black, false) { SmallCaps = true, Tracking = 0.06f };
-            folderHint = new InkLabel("The folder must not exist yet. An existing folder is never changed.",
+            folderHint = new InkLabel("A new or empty folder, or a Scriptorium vault to update. Other folders are never changed.",
                                       Typefaces.Make(Typefaces.Text, 16f, FontStyle.Italic), Ink.Muted, false);
             status = new InkLabel("Ready.", Typefaces.Make(Typefaces.Text, 16f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2, Leading = 1.3f };
 
@@ -1112,13 +1687,7 @@ namespace ScriptoriumSetup
             pathBox.EnabledChanged += (s, e) => { pathBox.Visible = pathBox.Enabled; Invalidate(); };
             browse.Name = "browse"; browse.Click += OnBrowse;
 
-            bool hasFonts = FontsInstalled();
-            fontsBox.Text = hasFonts ? "EB Garamond and Cormorant Garamond are already installed"
-                                     : "Install the fonts it uses for me (EB Garamond, Cormorant Garamond)";
-            fontsBox.Checked = !hasFonts; fontsBox.Enabled = !hasFonts;
-            bool hasObsidian = ObsidianInstalled();
-            obsidianBox.Text = hasObsidian ? "Obsidian is already installed" : "Download and install Obsidian 1.15.0 for me";
-            obsidianBox.Checked = !hasObsidian; obsidianBox.Enabled = !hasObsidian;
+            ShowInstalled(FontsInstalled(), ObsidianInstalled());
             fontsBox.Name = "fonts"; obsidianBox.Name = "obsidian"; longformBox.Name = "longform"; openBox.Name = "open";
             longformBox.Text = "Download the Longform plugin from its official release"; longformBox.Checked = true;
             openBox.Text = "Open Obsidian when done"; openBox.Checked = true;
@@ -1136,6 +1705,58 @@ namespace ScriptoriumSetup
             LayoutPage();
             FormClosing += OnClosing;
             ResumeLayout(false);
+            if (!preview)
+            {
+                detect.Tick += (s, e) => Detect();
+                pathBox.TextChanged += (s, e) => { detect.Stop(); detect.Start(); };
+                detect.Start();
+            }
+        }
+
+        void ShowInstalled(bool hasFonts, bool hasObsidian)
+        {
+            fontsBox.Text = hasFonts ? "EB Garamond and Cormorant Garamond are already installed"
+                                     : "Install the fonts it uses for me (EB Garamond, Cormorant Garamond)";
+            fontsBox.Checked = !hasFonts; fontsBox.Enabled = !hasFonts;
+            obsidianBox.Text = hasObsidian ? "Obsidian is already installed" : "Download and install Obsidian 1.15.0 for me";
+            obsidianBox.Checked = !hasObsidian; obsidianBox.Enabled = !hasObsidian;
+        }
+
+        bool Running { get { return (worker != null && worker.IsAlive) || installedPath != null; } }
+
+        // Looks at the folder (off the UI thread: a network path can be slow) and says what Install or Update will do.
+        void Detect()
+        {
+            detect.Stop();
+            if (Running) return;
+            int seq = ++detectSeq;
+            string text = pathBox.Text.Trim();
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Vaults.Target t = Vaults.Target.New;
+                string version = null;
+                bool valid = true;
+                try
+                {
+                    string full = Path.GetFullPath(text);
+                    t = Vaults.Classify(full);
+                    if (t == Vaults.Target.Vault) version = Vaults.VaultVersion(full);
+                }
+                catch { valid = false; }
+                try { UI(() => { if (seq == detectSeq && !Running && pathBox.Enabled) ShowTarget(t, valid, version); }); } catch { }
+            });
+        }
+
+        void ShowTarget(Vaults.Target t, bool valid, string version)
+        {
+            target = valid ? t : Vaults.Target.New;
+            installButton.Text = valid && t == Vaults.Target.Vault ? "Update" : "Install";
+            if (!valid) Status("That folder path is not valid.", true);
+            else if (t == Vaults.Target.Vault)
+                Status("This is a Scriptorium vault (" + (version ?? "unknown version") + "). Update replaces Scriptorium's files and keeps your notes and settings.");
+            else if (t == Vaults.Target.Empty) Status("This folder is empty: Scriptorium will be installed in it.");
+            else if (t == Vaults.Target.Other) Status("This folder already exists and isn't a Scriptorium vault. Choose a new or empty folder.", true);
+            else Status("Ready.");
         }
 
         bool FontsInstalled() { return !preview && Installer.FontFamilyInstalled("EB Garamond") && Installer.FontFamilyInstalled("Cormorant Garamond"); }
@@ -1145,7 +1766,7 @@ namespace ScriptoriumSetup
         const float PageWidth = 600, PageMargin = 40;
         int bottomY;
         Size pageSize;   // the laid-out page (the client size, unless Windows had to make the window smaller)
-        internal Size PageSize { get { return pageSize; } }
+        public Size PageSize { get { return pageSize; } }
 
         void Place(Control c, float x, ref float y, float width, float after)
         {
@@ -1213,22 +1834,8 @@ namespace ScriptoriumSetup
         }
 
         // The window's sheet of paper, made once for its size.
-        internal Bitmap Paper
-        {
-            get
-            {
-                Size size = PageSize;
-                if (paper == null || paper.Size != size) { if (paper != null) paper.Dispose(); paper = Ink.MakePaper(Math.Max(1, size.Width), Math.Max(1, size.Height)); }
-                return paper;
-            }
-        }
+        public Bitmap Paper { get { return Sheet.Paper(ref paper, PageSize); } }
 
-        internal Point PointToPage(Control c)
-        {
-            var p = Point.Empty;
-            for (Control x = c; x != null && x != this; x = x.Parent) p.Offset(x.Left, x.Top);
-            return p;
-        }
 
         Color AveragePaper(Rectangle r)
         {
@@ -1242,19 +1849,8 @@ namespace ScriptoriumSetup
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            // Windows 11: a paper-coloured title bar with ink text (DWMWA_BORDER_COLOR 34, CAPTION_COLOR 35, TEXT_COLOR 36).
-            // Older versions of Windows ignore these, and so do we.
-            try
-            {
-                int border = ColorRef(Ink.Edge), caption = ColorRef(Ink.Paper), text = ColorRef(Ink.Black);
-                DwmSetWindowAttribute(Handle, 34, ref border, 4);
-                DwmSetWindowAttribute(Handle, 35, ref caption, 4);
-                DwmSetWindowAttribute(Handle, 36, ref text, 4);
-            }
-            catch { }
+            Sheet.TitleBar(Handle);
         }
-
-        static int ColorRef(Color c) { return c.R | (c.G << 8) | (c.B << 16); }
 
         protected override void OnShown(EventArgs e)
         {
@@ -1273,7 +1869,7 @@ namespace ScriptoriumSetup
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void OnPaint(PaintEventArgs e) { PaintPage(e.Graphics); }
 
-        internal void PaintPage(Graphics g)
+        public void PaintPage(Graphics g)
         {
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
             g.PixelOffsetMode = PixelOffsetMode.Half;
@@ -1307,6 +1903,7 @@ namespace ScriptoriumSetup
 
         protected override void Dispose(bool disposing)
         {
+            if (disposing) detect.Dispose();
             if (disposing && paper != null) { paper.Dispose(); paper = null; }
             base.Dispose(disposing);
         }
@@ -1349,27 +1946,36 @@ namespace ScriptoriumSetup
             string dest;
             try { dest = Path.GetFullPath(pathBox.Text.Trim()); }
             catch { MessageBox.Show(this, "That folder path is not valid.", "Scriptorium Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            if (Directory.Exists(dest) || File.Exists(dest))
+            Vaults.Target t;
+            try { t = Vaults.Classify(dest); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Scriptorium Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (t == Vaults.Target.Other)
             {
-                MessageBox.Show(this, "This folder already exists:\n" + dest + "\n\nChoose a new folder name.", "Scriptorium Setup",
-                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "This folder already exists and isn't a Scriptorium vault:\n" + dest + "\n\nChoose a new folder name.",
+                                "Scriptorium Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
+            }
+            if (t == Vaults.Target.Vault)
+            {
+                ShowTarget(t, true, Vaults.VaultVersion(dest));
+                using (var ask = new ConfirmForm(dest)) if (ask.ShowDialog(this) != DialogResult.OK) return;
             }
             bool fonts = fontsBox.Checked && fontsBox.Enabled, obsidian = obsidianBox.Checked && obsidianBox.Enabled,
                  longform = longformBox.Checked, open = openBox.Checked;
             Busy();
-            worker = new Thread(() => Run(dest, fonts, obsidian, longform, open)) { IsBackground = true };
+            worker = new Thread(() => Run(dest, t, fonts, obsidian, longform, open)) { IsBackground = true };
             worker.SetApartmentState(ApartmentState.STA);
             worker.Start();
         }
 
         internal void Busy()
         {
+            detect.Stop();
             foreach (Control c in new Control[] { pathBox, browse, fontsBox, obsidianBox, longformBox, openBox, installButton }) c.Enabled = false;
             details.Clear();
         }
 
-        void Run(string dest, bool fonts, bool obsidian, bool longform, bool open)
+        void Run(string dest, Vaults.Target target, bool fonts, bool obsidian, bool longform, bool open)
         {
             string temp = Path.Combine(Path.GetTempPath(), "scriptorium-setup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(temp);
@@ -1410,8 +2016,9 @@ namespace ScriptoriumSetup
                     if (wanted.Count > 0) Installer.AnnounceFontChange();
                 }
                 cancel.Token.ThrowIfCancellationRequested();
+                if (target == Vaults.Target.Vault) { UpdateVault(dest, temp, longform, open, exe); return; }
                 Status("Creating the vault …"); Progress(0, true);
-                Installer.ExtractVault(dest, Log);
+                Installer.ExtractVault(dest, Log, target == Vaults.Target.Empty);
                 if (longform)
                 {
                     // The vault exists now, so a Longform failure (or a stop) must not fail or undo the install.
@@ -1444,7 +2051,7 @@ namespace ScriptoriumSetup
             }
             catch (OperationCanceledException)
             {
-                Status("Stopped. Nothing was created.");
+                Status(target == Vaults.Target.Vault ? "Stopped. Nothing in the vault was changed." : "Stopped. Nothing was created.");
                 UI(() => ResetControls());
             }
             catch (Exception ex)
@@ -1460,6 +2067,52 @@ namespace ScriptoriumSetup
             {
                 try { Directory.Delete(temp, true); } catch { }
             }
+        }
+
+        // Update: Longform is downloaded first (if ticked), then the vault is updated in one step, backed up and undone on
+        // failure (see Vaults.Update).
+        void UpdateVault(string dest, string temp, bool longform, bool open, string exe)
+        {
+            string longformFiles = null;
+            if (longform)
+            {
+                Status("Downloading Longform …"); Progress(0, false);
+                try
+                {
+                    longformFiles = Installer.DownloadLongform(temp, p => Progress(p, false), cancel.Token);
+                    Log("Downloaded and verified Longform 2.1.0");
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    Log("Longform could not be downloaded, so it was left as it is.");
+                    Log("  (" + ex.Message + ")");
+                }
+            }
+            cancel.Token.ThrowIfCancellationRequested();
+            Status("Updating the vault …"); Progress(0, true);
+            Vaults.Report report = Vaults.Update(dest, longformFiles, line => Log(line));
+            Progress(100, false);
+            installedPath = dest;
+            string message = Vaults.UpdatedMessage(dest, report);
+            UI(() => UpdateDone(message));
+            Log(message);
+            if (open)
+            {
+                try
+                {
+                    if (exe != null) Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false });
+                    else Process.Start("obsidian://open?path=" + Uri.EscapeDataString(dest));
+                }
+                catch (Exception ex) { Log("Could not open Obsidian: " + ex.Message, true); }
+            }
+        }
+
+        internal void UpdateDone(string message)
+        {
+            status.Text = message; status.InkColor = Ink.Muted; status.Invalidate();
+            installButton.Text = "Open folder"; installButton.Enabled = true; closeButton.Text = "Finish";
+            ShowRecord(true);
         }
 
         internal void Done(string dest)
@@ -1492,6 +2145,85 @@ namespace ScriptoriumSetup
         internal InkCheck LongformBox { get { return longformBox; } }
         internal InkProgress Bar { get { return bar; } }
         internal string PreviewPath { get { return pathBox.Text; } }
+        internal void PreviewTarget(Vaults.Target t, string version) { ShowTarget(t, true, version); }
+        internal void PreviewInstalled() { ShowInstalled(true, true); }
+    }
+
+    // The question asked before an update, drawn like the setup window: a heading in rubric, a short pen rule, what will
+    // happen, the vault's path, and two inked buttons (Update is the default; Esc or Cancel says no).
+    class ConfirmForm : Form, IPage
+    {
+        readonly InkLabel heading, body, where;
+        readonly InkButton yes = new InkButton("Update", true), no = new InkButton("Cancel", false);
+        Bitmap paper;
+        Size pageSize;
+        float ruleY;
+        const float PageWidth = 480, PageMargin = 34;
+
+        public ConfirmForm(string vault)
+        {
+            SuspendLayout();
+            Text = "Scriptorium Setup";
+            AutoScaleMode = AutoScaleMode.None;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false; ShowIcon = false;
+            StartPosition = FormStartPosition.CenterParent;
+            BackColor = Ink.Paper; ForeColor = Ink.Black;
+            DoubleBuffered = true;
+            Font = Typefaces.Make(Typefaces.Text, 16f, FontStyle.Regular);
+
+            heading = new InkLabel("Update Scriptorium in this vault?", Typefaces.Make(Typefaces.Display, 31f, FontStyle.Regular), Ink.Red, false) { Above = 0.9f, Below = 0.28f };
+            body = new InkLabel("Your notes and settings stay; Scriptorium's files are replaced (the old ones are backed up in " +
+                                ".obsidian\\scriptorium-backup-…).", Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
+            where = new InkLabel(vault, Typefaces.Make(Typefaces.Text, 15.5f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2 };
+            yes.Name = "confirm-update"; no.Name = "confirm-cancel";
+            yes.DialogResult = DialogResult.OK; no.DialogResult = DialogResult.Cancel;
+            yes.TabIndex = 0; no.TabIndex = 1;
+            AcceptButton = yes; CancelButton = no;
+            Controls.AddRange(new Control[] { heading, body, where, yes, no });
+
+            float s = Ink.S, cw = PageWidth - 2 * PageMargin, y = 16 * s;
+            Place(heading, ref y, cw, 0);
+            ruleY = y + 6 * s; y += 18 * s;
+            Place(body, ref y, cw, 8);
+            Place(where, ref y, cw, 18);
+            int bh = Ink.R(38), right = Ink.R(PageWidth - PageMargin + 3.5f), top = (int)Math.Round(y);
+            no.SetBounds(right - no.PreferredWidth(104), top, no.PreferredWidth(104), bh);
+            yes.SetBounds(no.Left - Ink.R(10) - yes.PreferredWidth(116), top, yes.PreferredWidth(116), bh);
+            pageSize = new Size(Ink.R(PageWidth), top + bh + Ink.R(16));
+            ClientSize = pageSize;
+            ResumeLayout(false);
+        }
+
+        static void Place(InkLabel label, ref float y, float width, float after)
+        {
+            int h = label.HeightFor(Ink.R(width), 0);
+            label.SetBounds(Ink.R(PageMargin), (int)Math.Round(y), Ink.R(width), h);
+            y += h + after * Ink.S;
+        }
+
+        public Size PageSize { get { return pageSize; } }
+        public Bitmap Paper { get { return Sheet.Paper(ref paper, PageSize); } }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Sheet.TitleBar(Handle); }
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+        protected override void OnPaint(PaintEventArgs e) { PaintPage(e.Graphics); }
+
+        public void PaintPage(Graphics g)
+        {
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.DrawImage(Paper, 0, 0, Paper.Width, Paper.Height);
+            Ink.Prepare(g);
+            float s = Ink.S, x0 = PageMargin * s;
+            Ink.Stroke(g, Ink.Ruled(x0, x0 + 74 * s, ruleY, 0.35f * s, 0xB0B0u), 1.25f * s, Ink.A(Ink.Red, 0.55f), 0xB0B1u, 3 * s, 12 * s);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && paper != null) { paper.Dispose(); paper = null; }
+            base.Dispose(disposing);
+        }
     }
 
     // --render <folder>: draws the window, offscreen, in a scripted series of states and saves each as a PNG, plus the
@@ -1512,6 +2244,7 @@ namespace ScriptoriumSetup
                     log.WriteLine("Embedded fonts: " + Typefaces.Embedded + ". " + Typefaces.Report);
                     using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) log.WriteLine("Screen DPI: " + g.DpiX + ", OS: " + Environment.OSVersion);
                     States(dir);
+                    UpdateStates(dir);
                     Animation(dir);
                     Ink.S = 1.5f;
                     using (SetupForm f = Open()) { log.WriteLine("Client size at 150%: " + f.ClientSize); Save(f, dir, "08-ready-150.png"); }
@@ -1539,7 +2272,7 @@ namespace ScriptoriumSetup
                 log.WriteLine("Client size: " + f.ClientSize);
                 Save(f, dir, "01-ready.png");
                 try { f.DrawToBitmapCheck(dir); } catch (Exception e) { log.WriteLine("DrawToBitmap: " + e.Message); }
-                CaptureScreen(f, dir);
+                CaptureScreen(f, dir, "00-window.png");
 
                 f.InstallButton.Hover = true; f.LongformBox.ShowFocus = true;
                 Save(f, dir, "06-hover-focus.png");
@@ -1577,6 +2310,50 @@ namespace ScriptoriumSetup
                 f.Status("Setup failed. See the details below.", true);
                 f.ResetControls();
                 Save(f, dir, "05-error.png");
+            }
+        }
+
+        // Updating a vault: the folder is a Scriptorium vault (the button reads Update), the question, the update done;
+        // and a folder that is neither new, empty nor a vault.
+        static void UpdateStates(string dir)
+        {
+            Ink.S = 1f;
+            string from = Vaults.PackageVersion();   // what Scriptorium Setup 1.0.4 installed
+            using (SetupForm f = Open())
+            {
+                f.PreviewInstalled();
+                f.PreviewTarget(Vaults.Target.Vault, from);
+                Save(f, dir, "09-update-ready.png");
+
+                using (var ask = new ConfirmForm(f.PreviewPath) { StartPosition = FormStartPosition.Manual, Location = new Point(-30000, -30000) })
+                {
+                    ask.Show();
+                    Application.DoEvents();
+                    Save(ask, dir, "10-update-confirm.png");
+                    CaptureScreen(ask, dir, "10-update-confirm-window.png");
+                }
+
+                f.Busy();
+                f.Status("Updating the vault …"); f.Progress(0, true); f.Bar.StopTimer(); f.Bar.Phase = 0.6f;
+                f.Log("Downloaded and verified Longform 2.1.0");
+                Save(f, dir, "11-update-running.png");
+
+                string vault = f.PreviewPath;
+                var report = new Vaults.Report { From = from, To = Vaults.PackageVersion(), Replaced = 9, Added = 0 };
+                f.Log("Backed up 9 files in " + Path.Combine(vault, ".obsidian", "scriptorium-backup-20261111-121500"));
+                f.Log("Turned the manuscript snippet back on");
+                f.Log("Replaced 9 files");
+                f.Log("Kept your notes and settings");
+                string message = Vaults.UpdatedMessage(vault, report);
+                f.Progress(100, false);
+                f.UpdateDone(message);
+                f.Log(message);
+                Save(f, dir, "12-update-done.png");
+            }
+            using (SetupForm f = Open())
+            {
+                f.PreviewTarget(Vaults.Target.Other, null);
+                Save(f, dir, "13-not-a-vault.png");
             }
         }
 
@@ -1623,12 +2400,13 @@ namespace ScriptoriumSetup
 
         // Draws the window's client area the way Windows paints it: the page, then each control with its own paint
         // routine; the native text box is printed by Windows itself (WM_PRINT, via DrawToBitmap).
-        internal static Bitmap Capture(SetupForm f)
+        internal static Bitmap Capture(Form f)
         {
-            var bmp = new Bitmap(f.PageSize.Width, f.PageSize.Height, PixelFormat.Format32bppArgb);
+            var page = (IPage)f;
+            var bmp = new Bitmap(page.PageSize.Width, page.PageSize.Height, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bmp))
             {
-                f.PaintPage(g);
+                page.PaintPage(g);
                 for (int i = f.Controls.Count - 1; i >= 0; i--)   // bottom of the z-order first, as Windows paints them
                 {
                     Control c = f.Controls[i];
@@ -1652,7 +2430,7 @@ namespace ScriptoriumSetup
             return bmp;
         }
 
-        static void Save(SetupForm f, string dir, string name)
+        static void Save(Form f, string dir, string name)
         {
             Application.DoEvents();
             using (Bitmap b = Capture(f)) b.Save(Path.Combine(dir, name), ImageFormat.Png);
@@ -1660,7 +2438,7 @@ namespace ScriptoriumSetup
         }
 
         // The real window on the (CI) desktop, title bar and all, if there is a desktop to draw it on.
-        static void CaptureScreen(SetupForm f, string dir)
+        static void CaptureScreen(Form f, string dir, string name)
         {
             try
             {
@@ -1670,9 +2448,9 @@ namespace ScriptoriumSetup
                 using (var b = new Bitmap(f.Width, f.Height, PixelFormat.Format32bppArgb))
                 {
                     using (Graphics g = Graphics.FromImage(b)) g.CopyFromScreen(f.Location, Point.Empty, f.Size);
-                    b.Save(Path.Combine(dir, "00-window.png"), ImageFormat.Png);
+                    b.Save(Path.Combine(dir, name), ImageFormat.Png);
                 }
-                log.WriteLine("Saved 00-window.png");
+                log.WriteLine("Saved " + name);
             }
             catch (Exception e) { log.WriteLine("Screen capture: " + e.Message); }
             finally { f.TopMost = false; f.Location = new Point(-30000, -30000); Application.DoEvents(); }
