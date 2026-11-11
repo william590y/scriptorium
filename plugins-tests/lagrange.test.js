@@ -458,7 +458,8 @@ test('Settings: junk is replaced by defaults; the shipped data.json is the defau
   const s = L.sanitizeSettings({ provider: 'gpt', penSpeed: 99, loaderTheme: 'steam', anthropicModel: 'claude-2', showPen: 'yes' });
   assert.equal(s.provider, 'anthropic');
   assert.equal(s.penSpeed, 1);
-  assert.equal(s.loaderTheme, 'clockwork');
+  assert.equal(s.loaderTheme, 'random');
+  for (const t of ['clockwork', 'alchemy', 'trebuchet', 'orbit', 'random']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
   assert.equal(s.anthropicModel, 'claude-sonnet-5-5');
   assert.equal(s.showPen, true);
   const shipped = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'data.json'), 'utf8'));

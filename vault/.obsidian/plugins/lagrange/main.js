@@ -66,7 +66,7 @@ const DEFAULT_SETTINGS = {
   openaiBaseUrl: 'http://localhost:11434/v1',
   openaiApiKey: '',
   openaiModel: '',
-  loaderTheme: 'clockwork',           // 'clockwork' | 'alchemy'
+  loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
 };
@@ -79,7 +79,7 @@ function sanitizeSettings(saved) {
     }
   }
   if (!['anthropic', 'openai', 'demo'].includes(s.provider)) s.provider = DEFAULT_SETTINGS.provider;
-  if (!['clockwork', 'alchemy'].includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
+  if (!['random', 'clockwork', 'alchemy', 'trebuchet', 'orbit'].includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
   if (s.anthropicModel !== 'custom' && !ANTHROPIC_MODELS.some(m => m.id === s.anthropicModel)) {
     s.anthropicModel = DEFAULT_SETTINGS.anthropicModel;
   }
@@ -839,36 +839,458 @@ function reviseUserMessage(note, clip, passage, instruction) {
  * ------------------------------------------------------------------------------------------------------------- */
 
 // ==== LAGRANGE LOADER (replaceable) ====
-// The "Lagrange is thinking" animation. The chat shows it from the moment a request is sent until the first words
-// of the reply arrive (or the request fails). Replace everything between this line and the END line below with the
-// real ink-drawn animation; nothing else in this file needs to change.
+// The "Lagrange is thinking" plate. The chat shows it from the moment a request is sent until the first words of the
+// reply arrive (or the request fails). Four engravings, drawn in the page's ink: clockwork (gears and a belted
+// flywheel), alchemy (a flask distilling into a receiver), a trebuchet, and the Earth-Moon system with its five
+// Lagrange points. Settings → Lagrange → Loading animation picks one, or "random" (the default) draws a new one each time.
 //
 // Contract
 //   mountLoader(containerEl, theme) -> { stop() }
-//     containerEl  an empty HTMLElement in the chat log; the loader owns its contents. It sits in a sidebar about
-//                  280-450 px wide; give the animation a fixed height (the placeholder is 1.6em) so the log doesn't jump.
-//     theme        'clockwork' | 'alchemy', from Settings → Lagrange → Loading animation.
-//     stop()       removes the animation and everything it added. Called once; calling it again does nothing.
-//   Draw with currentColor or var(--lagrange-ink), and var(--lagrange-rubric) for the accent, so the light and dark
-//   themes both work; respect prefers-reduced-motion. Use plain DOM (no Obsidian helpers) so the drop-in stays
-//   self-contained; styles go in styles.css under the matching "LAGRANGE LOADER" section.
+//     theme  'random' | 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'
+//     stop() removes the plate and stops its animation. Called once; calling it again does nothing.
+/* Lagrange's loading plates: four ink engravings drawn into an <svg viewBox="0 0 320 240">.
+   drawPlate(svg, name, opts) -> stop(); name is 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'.
+   Colours come from CSS variables (--lg-ink, --lg-ink-soft, --lg-rubric, --lg-wash, --lg-plate) so light and dark
+   themes both work. opts.still draws one frame and does not animate (prefers-reduced-motion). */
+const LagrangePlates = (() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  let uid = 0;
+  const INK = 'var(--lg-ink)', SOFT = 'var(--lg-ink-soft)', RUB = 'var(--lg-rubric)', WASH = 'var(--lg-wash)', PLATE = 'var(--lg-plate)';
+  const mk = (tag, attrs, parent) => {
+    const e = (parent ? parent.ownerDocument : document).createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+
+  function defs(svg, id, seed) {
+    const d = mk('defs', {}, svg);
+    const f = mk('filter', { id: `ink${id}`, x: '-5%', y: '-5%', width: '110%', height: '110%' }, d);
+    mk('feTurbulence', { type: 'fractalNoise', baseFrequency: '0.035', numOctaves: '2', seed: String(seed), result: 'n' }, f);
+    mk('feDisplacementMap', { in: 'SourceGraphic', in2: 'n', scale: '2.4', xChannelSelector: 'R', yChannelSelector: 'G' }, f);
+    const p = mk('pattern', { id: `hatch${id}`, width: '4', height: '4', patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(40)' }, d);
+    mk('line', { x1: 0, y1: 0, x2: 0, y2: 4, stroke: INK, 'stroke-width': '0.7', opacity: '0.55' }, p);
+    const p2 = mk('pattern', { id: `hatchx${id}`, width: '5', height: '5', patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(-35)' }, d);
+    mk('line', { x1: 0, y1: 0, x2: 0, y2: 5, stroke: INK, 'stroke-width': '0.6', opacity: '0.35' }, p2);
+    return d;
+  }
+  const inkAttrs = (id, w = 1.5) => ({ filter: `url(#ink${id})`, stroke: INK, fill: 'none', 'stroke-width': String(w), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+
+  function animate(win, step, still) {
+    if (still) { step(1500); return () => {}; }
+    let on = true, t0 = null;
+    const loop = t => { if (!on) return; if (t0 === null) t0 = t; step(t - t0 + 16); win.requestAnimationFrame(loop); };
+    win.requestAnimationFrame(loop);
+    return () => { on = false; };
+  }
+
+  /* ------------------------------------------------------------------ I. Clockwork */
+  function gearPath(n, r, add = 5, ded = 6) {
+    const pts = [], p = (2 * Math.PI) / n;
+    for (let i = 0; i < n; i++) {
+      const a = i * p;
+      for (const [t, rr] of [[a - p * 0.5, r - ded], [a - p * 0.3, r - ded], [a - p * 0.17, r + add], [a + p * 0.17, r + add], [a + p * 0.3, r - ded]])
+        pts.push([Math.cos(t) * rr, Math.sin(t) * rr]);
+    }
+    return 'M' + pts.map(q => q.map(v => v.toFixed(2)).join(' ')).join('L') + 'Z';
+  }
+  function gear(svg, id, n, m, cx, cy, spokes) {
+    const r = (n * m) / 2;
+    const g = mk('g', { transform: `translate(${cx} ${cy})` }, svg);
+    const rot = mk('g', {}, g);
+    const ink = mk('g', { filter: `url(#ink${id})`, stroke: INK, 'stroke-width': '1.5', 'stroke-linejoin': 'round', fill: 'none' }, rot);
+    mk('path', { d: gearPath(n, r), fill: PLATE }, ink);
+    mk('circle', { r: r - 11, fill: `url(#hatch${id})`, 'stroke-width': '1' }, ink);
+    mk('circle', { r: r - 13 }, ink);
+    for (let i = 0; i < spokes; i++) {
+      const t = (i * 2 * Math.PI) / spokes, w = 0.12;
+      const a1 = [Math.cos(t - w) * 8, Math.sin(t - w) * 8], a2 = [Math.cos(t + w) * 8, Math.sin(t + w) * 8];
+      const b1 = [Math.cos(t - w / 2.5) * (r - 13), Math.sin(t - w / 2.5) * (r - 13)], b2 = [Math.cos(t + w / 2.5) * (r - 13), Math.sin(t + w / 2.5) * (r - 13)];
+      mk('path', { d: `M${a1}L${b1}L${b2}L${a2}Z`, fill: PLATE }, ink);
+    }
+    mk('circle', { r: 9, fill: PLATE }, ink);
+    mk('circle', { r: 3.2, fill: INK }, ink);
+    return { rot, n, cx, cy };
+  }
+  function clockwork(svg, id, win, still) {
+    defs(svg, id, 4);
+    const frame = mk('g', inkAttrs(id, 1), svg);
+    mk('rect', { x: 8, y: 8, width: 304, height: 224, rx: 3, opacity: .6 }, frame);
+    for (const [x, y] of [[18, 18], [302, 18], [18, 222], [302, 222]]) {
+      mk('circle', { cx: x, cy: y, r: 4 }, frame); mk('line', { x1: x - 3, y1: y - 1.5, x2: x + 3, y2: y + 1.5 }, frame);
+    }
+    const m = 5.2;
+    const A = gear(svg, id, 22, m, 128, 132, 5);
+    const phi1 = -0.62, phi2 = 2.62, dB = (22 + 13) * m / 2, dC = (22 + 11) * m / 2;
+    const B = gear(svg, id, 13, m, A.cx + Math.cos(phi1) * dB, A.cy + Math.sin(phi1) * dB, 4);
+    const C = gear(svg, id, 11, m, A.cx + Math.cos(phi2) * dC, A.cy + Math.sin(phi2) * dC, 3);
+    // a flywheel, belted to a pulley on the great wheel's arbor
+    const F = [254, 178], rP = 11, rF = 21;
+    const dx = F[0] - A.cx, dy = F[1] - A.cy, dist = Math.hypot(dx, dy), th = Math.atan2(dy, dx), be = Math.acos((rP - rF) / dist);
+    const tan = s2 => { const p = th + s2 * be; return [[A.cx + Math.cos(p) * rP, A.cy + Math.sin(p) * rP], [F[0] + Math.cos(p) * rF, F[1] + Math.sin(p) * rF]]; };
+    const fw = mk('g', { transform: `translate(${F[0]} ${F[1]})` }, svg);
+    const fwr = mk('g', {}, fw);
+    const fink = mk('g', inkAttrs(id, 1.4), fwr);
+    mk('circle', { r: 29, fill: PLATE }, fink); mk('circle', { r: 25 }, fink);
+    for (let i = 0; i < 6; i++) { const t = i * Math.PI / 3; mk('line', { x1: Math.cos(t) * 7, y1: Math.sin(t) * 7, x2: Math.cos(t) * 25, y2: Math.sin(t) * 25 }, fink); }
+    mk('circle', { r: rF, 'stroke-width': '2.4', opacity: .9 }, fink);
+    mk('circle', { r: 7, fill: `url(#hatch${id})` }, fink);
+    mk('circle', { r: 2.5, fill: INK }, fink);
+    const pul = mk('g', inkAttrs(id, 1.3), A.rot);
+    mk('circle', { r: rP + 2, fill: PLATE }, pul); mk('circle', { r: rP, 'stroke-width': '2.4' }, pul);
+    mk('circle', { r: 5, fill: `url(#hatch${id})` }, pul); mk('line', { x1: 0, y1: -rP + 3, x2: 0, y2: -5 }, pul);
+    mk('circle', { r: 2.6, fill: INK, stroke: 'none' }, pul);
+    const belt = [1, -1].map(s2 => { const [p, q] = tan(s2); return mk('path', { d: `M${p[0].toFixed(2)} ${p[1].toFixed(2)}L${q[0].toFixed(2)} ${q[1].toFixed(2)}`, stroke: INK, 'stroke-width': '1.8', 'stroke-dasharray': '7 3', fill: 'none', filter: `url(#ink${id})` }, svg); });
+    // bracket holding the flywheel's axle to the frame
+    mk('path', { d: `M${F[0]} ${F[1]} L${F[0] + 34} 226 M${F[0]} ${F[1]} L${F[0] - 24} 226`, ...inkAttrs(id, 1.2) }, svg);
+    svg.appendChild(fw);
+    const pA = 2 * Math.PI / A.n, pB = 2 * Math.PI / B.n, pC = 2 * Math.PI / C.n;
+    const mod = (a, b) => ((a % b) + b) % b;
+    const cB = phi1 + Math.PI - pB / 2 + (A.n / B.n) * mod(phi1, pA);
+    const cC = phi2 + Math.PI - pC / 2 + (A.n / C.n) * mod(phi2, pA);
+    const deg = r => (r * 180 / Math.PI).toFixed(3);
+    return animate(win, t => {
+      const a = t * 0.00035;
+      A.rot.setAttribute('transform', `rotate(${deg(a)})`);
+      B.rot.setAttribute('transform', `rotate(${deg(-(A.n / B.n) * a + cB)})`);
+      C.rot.setAttribute('transform', `rotate(${deg(-(A.n / C.n) * a + cC)})`);
+      fwr.setAttribute('transform', `rotate(${deg(a * rP / rF)})`);
+      belt[0].setAttribute('stroke-dashoffset', (-a * rP).toFixed(2));
+      belt[1].setAttribute('stroke-dashoffset', (a * rP).toFixed(2));
+    }, still);
+  }
+
+  /* ------------------------------------------------------------------ II. Alchemy */
+  function alchemy(svg, id, win, still) {
+    const d = defs(svg, id, 9);
+    const cx = 112, cy = 160, R = 50, nh = 11, neckY = cy - Math.sqrt(R * R - nh * nh);
+    const cp = mk('clipPath', { id: `bulb${id}` }, d);
+    mk('circle', { cx, cy, r: R - 1.5 }, cp);
+    const stand = mk('g', inkAttrs(id), svg);
+    mk('path', { d: `M${cx - 46} ${cy + 38} L${cx - 58} 228 M${cx + 46} ${cy + 38} L${cx + 58} 228 M${cx - 52} ${cy + 38} H${cx + 52}` }, stand);
+    mk('path', { d: `M${cx - 16} 228 L${cx - 12} 214 H${cx + 12} L${cx + 16} 228 Z`, fill: `url(#hatch${id})` }, stand);
+    mk('line', { x1: 20, y1: 229, x2: 300, y2: 229, opacity: .7 }, stand);
+    const flame = mk('g', { transform: `translate(${cx} 214)` }, svg);
+    const fl = mk('path', { d: 'M0 0 C-7 -6 -6 -14 0 -24 C6 -14 7 -6 0 0 Z', fill: WASH, stroke: RUB, 'stroke-width': '1.2', filter: `url(#ink${id})` }, flame);
+    const fl2 = mk('path', { d: 'M0 -2 C-3 -6 -3 -10 0 -15 C3 -10 3 -6 0 -2 Z', fill: RUB, opacity: .55 }, flame);
+    const liq = mk('g', { 'clip-path': `url(#bulb${id})` }, svg);
+    const surf = mk('path', { fill: WASH }, liq);
+    const surfH = mk('path', { fill: `url(#hatchx${id})` }, liq);
+    const bubbles = mk('g', {}, liq);
+    const glass = mk('g', inkAttrs(id), svg);
+    mk('path', { d: `M${cx - nh} 52 L${cx - nh} ${neckY} A${R} ${R} 0 1 0 ${cx + nh} ${neckY} L${cx + nh} 52` }, glass);
+    mk('path', { d: `M${cx - nh - 3} 50 H${cx + nh + 3}` }, glass);
+    mk('path', { d: `M${cx - 30} ${cy - 26} q 8 -10 20 -13`, 'stroke-width': '1', opacity: .5 }, glass);
+    mk('rect', { x: cx - nh + 1, y: 40, width: 2 * nh - 2, height: 12, fill: `url(#hatch${id})` }, glass);
+    const tube = `M${cx + 2} 40 C ${cx + 4} 14, ${cx + 70} 10, 238 96`;
+    mk('path', { d: tube, 'stroke-width': '5' }, glass);
+    mk('path', { d: tube, 'stroke-width': '2.4', stroke: PLATE, fill: 'none', 'stroke-linecap': 'round' }, svg);
+    const rx = 250, ry = 222;
+    const flask = `M${rx - 8} 112 V140 L${rx - 34} ${ry - 4} Q${rx - 36} ${ry + 3} ${rx - 28} ${ry + 3} H${rx + 28} Q${rx + 36} ${ry + 3} ${rx + 34} ${ry - 4} L${rx + 8} 140 V112`;
+    const recv = mk('g', inkAttrs(id), svg);
+    mk('path', { d: flask }, recv);
+    mk('path', { d: `M${rx - 11} 111 H${rx + 11}` }, recv);
+    const rclip = mk('clipPath', { id: `recv${id}` }, d);
+    mk('path', { d: flask + ' Z' }, rclip);
+    const rliq = mk('g', { 'clip-path': `url(#recv${id})` }, svg);
+    const rsurf = mk('rect', { x: rx - 40, width: 80, y: 200, height: 40, fill: WASH }, rliq);
+    const rsurfH = mk('rect', { x: rx - 40, width: 80, y: 200, height: 40, fill: `url(#hatchx${id})` }, rliq);
+    const drops = mk('g', {}, svg);
+    const wisps = mk('g', { stroke: SOFT, fill: 'none', 'stroke-width': '1', 'stroke-linecap': 'round', filter: `url(#ink${id})` }, svg);
+    const wisp = [0, 1, 2].map(() => mk('path', { opacity: 0 }, wisps));
+    const B = [], D = [];
+    let lastSpawn = -1e9, lastDrop = -1e9, level = 200, rnd = 7;
+    const rand = () => { rnd = (rnd * 16807) % 2147483647; return rnd / 2147483647; };
+    const surfaceY = cy - 6;
+    return animate(win, t => {
+      let dd = `M${cx - R} ${cy + R + 4} L${cx - R} ${surfaceY}`;
+      for (let x = cx - R; x <= cx + R; x += 4) dd += ` L${x} ${(surfaceY + Math.sin(x * 0.18 + t * 0.004) * 1.6 + Math.sin(x * 0.07 - t * 0.0027) * 1.2).toFixed(2)}`;
+      dd += ` L${cx + R} ${cy + R + 4} Z`;
+      surf.setAttribute('d', dd); surfH.setAttribute('d', dd);
+      fl.setAttribute('transform', `scale(${(1 + Math.sin(t * 0.021) * 0.06).toFixed(3)} ${(1 + Math.sin(t * 0.017 + 1) * 0.12).toFixed(3)})`);
+      fl2.setAttribute('transform', `scale(1 ${(1 + Math.sin(t * 0.025) * 0.15).toFixed(3)})`);
+      if (t - lastSpawn > 140) {
+        lastSpawn = t;
+        B.push({ c: mk('circle', { fill: 'none', stroke: INK, 'stroke-width': '1' }, bubbles), x: cx + (rand() - 0.5) * 60, r: 1 + rand() * 1.5, v: 0.025 + rand() * 0.03, ph: rand() * 6, born: t });
+      }
+      for (let i = B.length - 1; i >= 0; i--) {
+        const b = B[i], age = t - b.born, y = cy + R - 4 - age * b.v;
+        if (y < surfaceY - 3) { b.c.remove(); B.splice(i, 1); continue; }
+        b.c.setAttribute('opacity', y < surfaceY + 1 ? Math.max(0, 1 - (surfaceY + 1 - y) / 4).toFixed(2) : '1');
+        b.c.setAttribute('cx', (b.x + Math.sin(age * 0.006 + b.ph) * 2.5).toFixed(2));
+        b.c.setAttribute('cy', y.toFixed(2));
+        b.c.setAttribute('r', (b.r + age * 0.003).toFixed(2));
+      }
+      if (t - lastDrop > 1400) {
+        lastDrop = t;
+        D.push({ p: mk('path', { d: 'M0 -4 C 2 -1, 2 2, 0 2.5 C -2 2, -2 -1, 0 -4 Z', fill: RUB, opacity: .8 }, drops), born: t, ring: null });
+      }
+      for (let i = D.length - 1; i >= 0; i--) {
+        const q = D[i], a = t - q.born;
+        if (!q.ring) {
+          const y = 100 + a * a * 0.00012 + a * 0.02;
+          if (y >= level) {
+            q.p.remove(); q.ring = mk('ellipse', { cx: rx, cy: level, rx: 1, ry: .4, fill: 'none', stroke: INK, 'stroke-width': '.8' }, drops); q.landed = t;
+            level = level > 176 ? level - 0.6 : 200;
+            rsurf.setAttribute('y', level.toFixed(2)); rsurfH.setAttribute('y', level.toFixed(2));
+          } else q.p.setAttribute('transform', `translate(${rx} ${y.toFixed(2)})`);
+        } else {
+          const k = (t - q.landed) / 500;
+          if (k > 1) { q.ring.remove(); D.splice(i, 1); continue; }
+          q.ring.setAttribute('rx', (1 + k * 12).toFixed(2)); q.ring.setAttribute('ry', (0.4 + k * 2).toFixed(2)); q.ring.setAttribute('opacity', (1 - k).toFixed(2));
+        }
+      }
+      wisp.forEach((w, i) => {
+        const ph = ((t * 0.00025 + i / 3) % 1), y0 = 36 - ph * 26, x0 = cx - 18 + i * 6;
+        w.setAttribute('d', `M${x0} ${y0 + 10} c -6 -4, 6 -8, 0 -12 s 6 -8, 0 -12`);
+        w.setAttribute('opacity', (Math.sin(ph * Math.PI) * 0.55).toFixed(2));
+      });
+    }, still);
+  }
+
+  /* ------------------------------------------------------------------ III. Trebuchet */
+  function trebuchet(svg, id, win, still) {
+    defs(svg, id, 13);
+    const P = [150, 106], LONG = 112, SHORT = 30, SLING = 44, GROUND = 222;
+    const rad = a => a * Math.PI / 180;
+    const ink = inkAttrs(id);
+    const back = mk('g', ink, svg);
+    mk('line', { x1: 12, y1: GROUND + 1, x2: 308, y2: GROUND + 1, opacity: .7 }, back);
+    mk('rect', { x: 64, y: GROUND - 9, width: 176, height: 9, fill: `url(#hatch${id})` }, back);           // base beam
+    for (const x of [86, 218]) { mk('circle', { cx: x, cy: GROUND - 1, r: 9, fill: PLATE }, back); mk('circle', { cx: x, cy: GROUND - 1, r: 2, fill: INK }, back); }
+    mk('path', { d: `M100 ${GROUND - 9} L${P[0] - 3} ${P[1]} M200 ${GROUND - 9} L${P[0] + 3} ${P[1]}` }, back);  // A-frame
+    mk('path', { d: `M118 ${GROUND - 54} H182 M128 ${GROUND - 9} L${P[0]} ${GROUND - 54} L172 ${GROUND - 9}`, 'stroke-width': '1.1' }, back);
+    mk('path', { d: `M136 ${GROUND - 12} H226`, 'stroke-width': '2.2', opacity: .5 }, back);            // trough
+    const winch = mk('g', { transform: `translate(80 ${GROUND - 30})` }, svg);
+    const wrot = mk('g', {}, winch);
+    const wi = mk('g', inkAttrs(id, 1.2), wrot);
+    mk('circle', { r: 11, fill: PLATE }, wi);
+    for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; mk('line', { x1: Math.cos(a) * 3, y1: Math.sin(a) * 3, x2: Math.cos(a) * 17, y2: Math.sin(a) * 17 }, wi); }
+    mk('circle', { r: 3, fill: INK }, wi);
+    mk('path', { d: `M80 ${GROUND - 30} L72 ${GROUND - 9} M80 ${GROUND - 30} L88 ${GROUND - 9}`, ...inkAttrs(id, 1.2) }, svg);
+    const rope = mk('path', { fill: 'none', stroke: INK, 'stroke-width': '.8', opacity: 0 }, svg);
+    const trace = mk('path', { fill: 'none', stroke: RUB, 'stroke-width': '1', 'stroke-dasharray': '1.5 4', 'stroke-linecap': 'round', opacity: 0 }, svg);
+    const ticks = mk('g', { stroke: RUB, 'stroke-width': '.9', opacity: 0 }, svg);
+    const arm = mk('g', {}, svg);
+    const ai = mk('g', ink, arm);
+    mk('path', { d: `M${-SHORT} -3.5 H${LONG} L${LONG} 3.5 H${-SHORT} Z`, fill: `url(#hatch${id})` }, ai);
+    mk('circle', { cx: 0, cy: 0, r: 4, fill: PLATE }, ai);
+    const cw = mk('g', {}, svg);
+    const cwi = mk('g', ink, cw);
+    mk('path', { d: 'M0 0 L-9 12 M0 0 L9 12' }, cwi);
+    mk('path', { d: 'M-15 12 H15 L13 34 H-13 Z', fill: `url(#hatch${id})` }, cwi);
+    mk('circle', { cx: 0, cy: 0, r: 2.2, fill: INK }, cwi);
+    const sling = mk('path', { fill: 'none', stroke: INK, 'stroke-width': '.9' }, svg);
+    const stone = mk('g', {}, svg);
+    mk('circle', { r: 5.5, fill: `url(#hatch${id})`, stroke: INK, 'stroke-width': '1.3', filter: `url(#ink${id})` }, stone);
+    mk('circle', { r: 5.5, fill: 'none', stroke: INK, 'stroke-width': '1.3' }, stone);
+    const PERIOD = 5200, COCK = 118, REL = 300;
+    const ease = k => k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    let launch = null, flight = [];
+    const place = (alpha, slingDir, stonePos, showStone) => {
+      const a = rad(alpha);
+      arm.setAttribute('transform', `translate(${P[0]} ${P[1]}) rotate(${alpha.toFixed(2)})`);
+      const tip = [P[0] + Math.cos(a) * LONG, P[1] + Math.sin(a) * LONG];
+      const sh = [P[0] - Math.cos(a) * SHORT, P[1] - Math.sin(a) * SHORT];
+      cw.setAttribute('transform', `translate(${sh[0].toFixed(2)} ${sh[1].toFixed(2)})`);
+      const end = stonePos || [tip[0] + Math.cos(rad(slingDir)) * SLING, tip[1] + Math.sin(rad(slingDir)) * SLING];
+      sling.setAttribute('d', `M${tip[0].toFixed(2)} ${tip[1].toFixed(2)} L${end[0].toFixed(2)} ${end[1].toFixed(2)}`);
+      stone.setAttribute('transform', `translate(${end[0].toFixed(2)} ${end[1].toFixed(2)})`);
+      stone.setAttribute('opacity', showStone ? '1' : '0');
+      return { tip, end };
+    };
+    return animate(win, T => {
+      const t = T % PERIOD, cycle = Math.floor(T / PERIOD);
+      wrot.setAttribute('transform', 'rotate(0)');
+      rope.setAttribute('opacity', '0');
+      if (t < 650) {                                   // the drop: the counterweight falls and the arm whips round
+        const k = t / 650, alpha = COCK + (REL - COCK) * k * k;
+        const dir = -55 * Math.pow(k, 1.6) + (k < 0.15 ? 0 : 0);
+        const tip = [P[0] + Math.cos(rad(alpha)) * LONG, P[1] + Math.sin(rad(alpha)) * LONG];
+        let end = [tip[0] + Math.cos(rad(dir)) * SLING, tip[1] + Math.sin(rad(dir)) * SLING];
+        if (end[1] > GROUND - 15) end = [end[0], GROUND - 15];
+        place(alpha, dir, end, true);
+        launch = { at: T - t + 650, from: null }; flight = [];
+        trace.setAttribute('opacity', '0'); ticks.setAttribute('opacity', '0');
+      } else {
+        let alpha;
+        if (t < 2400) alpha = 270 + 30 * Math.cos((t - 650) * 0.0105) * Math.exp(-(t - 650) / 380);
+        else if (t < 4300) { const k = ease((t - 2400) / 1900); alpha = 270 - (270 - COCK) * k; wrot.setAttribute('transform', `rotate(${(-k * 540).toFixed(1)})`); }
+        else alpha = COCK;
+        const reloaded = t >= 4300;
+        const { tip } = place(alpha, reloaded ? 0 : 90, reloaded ? null : null, reloaded);
+        if (reloaded) {
+          const a = rad(alpha), tp = [P[0] + Math.cos(a) * LONG, P[1] + Math.sin(a) * LONG];
+          place(alpha, 0, [Math.min(tp[0] + SLING, 214), GROUND - 15], true);
+        }
+        if (t >= 2400 && t < 4300) {
+          rope.setAttribute('d', `M80 ${GROUND - 30} L${tip[0].toFixed(2)} ${tip[1].toFixed(2)}`);
+          rope.setAttribute('opacity', '.8');
+        }
+        // the stone's flight: a parabola, traced as the dotted line of a mechanics diagram
+        const ft = (t - 650) / 1000;
+        if (ft < 1.9) {
+          const a0 = rad(REL), tip0 = [P[0] + Math.cos(a0) * LONG, P[1] + Math.sin(a0) * LONG];
+          const s0 = [tip0[0] + Math.cos(rad(-55)) * SLING, tip0[1] + Math.sin(rad(-55)) * SLING];
+          const vx = 150, vy = -150, g = 210;
+          const pos = [s0[0] + vx * ft, s0[1] + vy * ft + 0.5 * g * ft * ft];
+          flight.push(pos);
+          if (pos[0] < 330 && pos[1] < 260) {
+            stone.setAttribute('transform', `translate(${pos[0].toFixed(2)} ${pos[1].toFixed(2)})`);
+            stone.setAttribute('opacity', '1');
+          } else stone.setAttribute('opacity', '0');
+          trace.setAttribute('d', 'M' + flight.filter((_, i) => i % 2 === 0).map(p => p.map(v => v.toFixed(1)).join(' ')).join('L'));
+          trace.setAttribute('opacity', '.9');
+        } else {
+          trace.setAttribute('opacity', Math.max(0, 0.9 - (ft - 1.9) * 0.9).toFixed(2));
+        }
+      }
+    }, still);
+  }
+
+  /* ------------------------------------------------------------------ IV. The five points */
+  function orbit(svg, id, win, still) {
+    defs(svg, id, 21);
+    const mu = 0.01215, Dpx = 92, C = [160, 121];
+    // Effective potential in the rotating frame (barycentre at the origin, Earth at -mu, Moon at 1-mu, distance 1).
+    const omega = (x, y) => 0.5 * (x * x + y * y) + (1 - mu) / Math.hypot(x + mu, y) + mu / Math.hypot(x - 1 + mu, y);
+    const L = { 1: [0.83692, 0], 2: [1.15568, 0], 3: [-1.00506, 0], 4: [0.5 - mu, Math.sqrt(3) / 2], 5: [0.5 - mu, -Math.sqrt(3) / 2] };
+    const levels = [omega(...L[1]), omega(...L[2]), omega(...L[3]), omega(...L[4]) - 0.004];
+    // marching squares over the frame
+    const x0 = -1.62, x1 = 1.62, y0 = -1.28, y1 = 1.28, h = 0.022;
+    const nx = Math.round((x1 - x0) / h), ny = Math.round((y1 - y0) / h);
+    const grid = [];
+    for (let j = 0; j <= ny; j++) { const row = []; for (let i = 0; i <= nx; i++) row.push(Math.min(9, omega(x0 + i * h, y0 + j * h))); grid.push(row); }
+    const px = (x, y) => [(x + mu) * Dpx, y * Dpx];           // frame units -> px, Earth at the origin of the group
+    const contours = levels.map(lv => {
+      let d = '';
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const v = [grid[j][i], grid[j][i + 1], grid[j + 1][i + 1], grid[j + 1][i]];
+        const c = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        const pts = [];
+        for (let e = 0; e < 4; e++) {
+          const a = v[e], b = v[(e + 1) % 4];
+          if ((a - lv) * (b - lv) < 0) {
+            const k = (lv - a) / (b - a), ca = c[e], cb = c[(e + 1) % 4];
+            pts.push(px(x0 + (i + ca[0] + (cb[0] - ca[0]) * k) * h, y0 + (j + ca[1] + (cb[1] - ca[1]) * k) * h));
+          }
+        }
+        if (pts.length >= 2) d += `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}L${pts[1][0].toFixed(1)} ${pts[1][1].toFixed(1)}`;
+        if (pts.length === 4) d += `M${pts[2][0].toFixed(1)} ${pts[2][1].toFixed(1)}L${pts[3][0].toFixed(1)} ${pts[3][1].toFixed(1)}`;
+      }
+      return d;
+    });
+    const back = mk('g', inkAttrs(id, 1), svg);
+    mk('rect', { x: 8, y: 8, width: 304, height: 224, rx: 3, opacity: .55 }, back);
+    mk('circle', { cx: C[0], cy: C[1], r: Dpx, 'stroke-dasharray': '2 4', opacity: .6, 'stroke-width': '.9' }, back);
+    // stars, fixed
+    let rnd = 11; const rand = () => { rnd = (rnd * 16807) % 2147483647; return rnd / 2147483647; };
+    for (let i = 0; i < 26; i++) {
+      const x = 14 + rand() * 292, y = 14 + rand() * 212;
+      if (Math.hypot(x - C[0], y - C[1]) < 118) continue;
+      mk('path', { d: `M${x - 1.6} ${y}H${x + 1.6}M${x} ${y - 1.6}V${y + 1.6}`, stroke: SOFT, 'stroke-width': '.7' }, svg);
+    }
+    const frame = mk('g', {}, svg);                  // rotates with the Moon
+    const fr = mk('g', {}, frame);
+    contours.forEach((d, i) => mk('path', { d, fill: 'none', stroke: i === 3 ? RUB : SOFT, 'stroke-width': i === 3 ? '.8' : '.7', opacity: i === 3 ? '.7' : '.65', 'stroke-linecap': 'round' }, fr));
+    // the Moon
+    const moon = mk('g', { transform: `translate(${Dpx} 0)` }, fr);
+    const mi = mk('g', inkAttrs(id, 1.1), moon);
+    mk('circle', { r: 7, fill: PLATE }, mi);
+    mk('path', { d: 'M0 -7 A7 7 0 0 1 0 7 A3.5 7 0 0 0 0 -7 Z', fill: `url(#hatch${id})`, stroke: 'none' }, mi);
+    for (const [x, y, r] of [[-2.5, -2, 1.3], [1.5, 2.5, 1], [-1, 3.6, .7]]) mk('circle', { cx: x, cy: y, r }, mi);
+    // L points: small crosses in rubric
+    const crosses = {};
+    for (const k of [1, 2, 3, 4, 5]) {
+      const [x, y] = px(...L[k]);
+      crosses[k] = mk('path', { d: `M${x - 3} ${y - 3}L${x + 3} ${y + 3}M${x + 3} ${y - 3}L${x - 3} ${y + 3}`, stroke: RUB, 'stroke-width': '1.4', 'stroke-linecap': 'round' }, fr);
+    }
+    // Earth, fixed at the centre (a little globe that turns on its axis)
+    const earth = mk('g', { transform: `translate(${C[0]} ${C[1]})` }, svg);
+    const ei = mk('g', inkAttrs(id, 1.2), earth);
+    mk('circle', { r: 17, fill: PLATE }, ei);
+    const shade = mk('path', { fill: `url(#hatch${id})`, stroke: 'none' }, ei);
+    mk('ellipse', { rx: 17, ry: 5.5, 'stroke-width': '.8' }, ei);
+    mk('line', { x1: -17, y1: 0, x2: 17, y2: 0, 'stroke-width': '.6' }, ei);
+    const mer = [0, 1, 2].map(() => mk('ellipse', { rx: 6, ry: 17, 'stroke-width': '.8' }, ei));
+    mk('circle', { r: 17 }, ei);
+    // labels stay upright: placed each frame at the rotated positions
+    const labels = {};
+    const off = { 1: [-2, -9], 2: [8, -6], 3: [-16, -6], 4: [7, -5], 5: [7, 11] };
+    for (const k of [1, 2, 3, 4, 5]) {
+      const t = mk('text', { fill: INK, 'font-size': '13', 'font-style': 'italic', 'font-family': 'var(--lg-display, Georgia, serif)' }, svg);
+      t.textContent = 'L';
+      const sub = mk('tspan', { 'font-size': '9', dy: '3' }, t); sub.textContent = String(k);
+      labels[k] = t;
+    }
+    const mlab = mk('text', { fill: SOFT, 'font-size': '10', 'font-style': 'italic', 'font-family': 'var(--lg-display, Georgia, serif)' }, svg);
+    mlab.textContent = 'Moon';
+    const elab = mk('text', { x: C[0] - 13, y: C[1] + 31, fill: SOFT, 'font-size': '10', 'font-style': 'italic', 'font-family': 'var(--lg-display, Georgia, serif)' }, svg);
+    elab.textContent = 'Earth';
+    return animate(win, t => {
+      const th = -t * 2 * Math.PI / 16000 + 0.5;        // one orbit in 16 s, counter-clockwise
+      const c = Math.cos(th), s = Math.sin(th);
+      frame.setAttribute('transform', `translate(${C[0]} ${C[1]}) rotate(${(th * 180 / Math.PI).toFixed(3)})`);
+      for (const k of [1, 2, 3, 4, 5]) {
+        const [x, y] = px(...L[k]);
+        const X = C[0] + x * c - y * s, Y = C[1] + x * s + y * c;
+        labels[k].setAttribute('x', (X + off[k][0]).toFixed(1)); labels[k].setAttribute('y', (Y + off[k][1]).toFixed(1));
+      }
+      const mx = C[0] + Dpx * c, my = C[1] + Dpx * s;
+      mlab.setAttribute('x', (mx - 11).toFixed(1)); mlab.setAttribute('y', (my + 20).toFixed(1));
+      const spin = (t * 0.0006) % (2 * Math.PI);
+      mer.forEach((m, i) => { const p = spin + i * Math.PI / 3; m.setAttribute('rx', Math.abs(Math.cos(p) * 17).toFixed(2)); });
+      shade.setAttribute('d', 'M0 -17 A17 17 0 0 1 0 17 A8 17 0 0 0 0 -17 Z');
+    }, still);
+  }
+
+  const PLATES = { clockwork, alchemy, trebuchet, orbit };
+  const NAMES = Object.keys(PLATES);
+  function drawPlate(svg, name, opts = {}) {
+    const id = `lgp${++uid}`;
+    const win = (svg.ownerDocument && svg.ownerDocument.defaultView) || window;
+    return PLATES[name](svg, id, win, !!opts.still);
+  }
+  return { drawPlate, NAMES };
+})();
+
+const LOADER_CAPTIONS = {
+  clockwork: 'Lagrange is reckoning',
+  alchemy: 'Lagrange is distilling',
+  trebuchet: 'Lagrange is taking aim',
+  orbit: 'Lagrange is finding the balance',
+};
 function mountLoader(containerEl, theme) {
   const doc = containerEl.ownerDocument || document;
+  const win = doc.defaultView || window;
+  const names = LagrangePlates.NAMES;
+  const name = names.includes(theme) ? theme : names[Math.floor(Math.random() * names.length)];
   const el = doc.createElement('div');
-  el.className = `lagrange-loader lagrange-loader--${theme === 'alchemy' ? 'alchemy' : 'clockwork'}`;
+  el.className = `lagrange-loader lagrange-loader--${name}`;
   el.setAttribute('role', 'status');
-  el.setAttribute('aria-label', 'Lagrange is thinking');
-  for (let i = 0; i < 3; i++) {
-    const dot = doc.createElement('span');
-    dot.className = 'lagrange-loader-dot';
-    el.appendChild(dot);
-  }
+  el.setAttribute('aria-label', `${LOADER_CAPTIONS[name]}…`);
+  const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 320 240');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('class', 'lagrange-plate');
+  el.appendChild(svg);
+  const cap = doc.createElement('div');
+  cap.className = 'lagrange-loader-caption';
+  cap.textContent = LOADER_CAPTIONS[name];
+  const dots = doc.createElement('span');
+  dots.className = 'lagrange-loader-dots';
+  for (let i = 0; i < 3; i++) { const d = doc.createElement('span'); d.textContent = '.'; dots.appendChild(d); }
+  cap.appendChild(dots);
+  el.appendChild(cap);
   containerEl.appendChild(el);
+  let stopAnim = () => {};
+  try { stopAnim = LagrangePlates.drawPlate(svg, name, { still: prefersReducedMotion(win) }); } catch (e) { console.error('Lagrange: loader', e); }
   let stopped = false;
   return {
     stop() {
       if (stopped) return;
       stopped = true;
+      try { stopAnim(); } catch (e) { /* ignore */ }
       el.remove();
     },
   };
@@ -934,154 +1356,207 @@ function rangeRects(view, from, to) {
 }
 
 // ==== LAGRANGE PEN (replaceable) ====
-// The pen that sets Lagrange's edits down in the note. Replace everything between this line and the END line below
-// with the real flying fountain pen; nothing else in this file needs to change.
+// The pen that sets Lagrange's edits down in the note: a fountain pen flies to each edit, strikes the old words
+// through in rubric ink, writes the replacement above the line in a copperplate hand, then the change is made and
+// the ink lifts off the page. Between edits it hovers; a moment after the last one it flies off.
 //
 // Contract
 //   createPen(app, settings) -> { edit(view, from, to, replacement): Promise<void>, destroy() }
-//     app       the Obsidian App.
-//     settings  Lagrange's live settings object; read settings.penSpeed (0.5 = slow, 1 = normal, 3 = fast) on each
-//               edit, as the writer can change it at any time. (settings.showPen is handled before the pen is called:
-//               when it is off, edits are applied without the pen.)
-//   pen.edit(view, from, to, replacement)
-//     view         a CodeMirror 6 EditorView (Obsidian's editor.cm), in Live Preview or Source mode.
-//     from, to     document offsets of the text being replaced (from < to; the old text is view.state.sliceDoc(from, to)).
-//     replacement  the new text (may be empty: a deletion).
-//     It must (a) show the old text being struck through, (b) write the new text, then (c) change the document so that
-//     [from, to] holds replacement, normally with one view.dispatch({changes: {from, to, insert: replacement}}), and
-//     remove every decoration and overlay it added. Resolve once (c) is done. Lagrange calls edit() for one edit at a
-//     time, in document order, and waits for each; before each call it puts the cursor at `from` and scrolls it into
-//     view (the pen may scroll further). While a run is under way the editor is locked against the writer's
-//     typing, and Lagrange folds every change made during the run into a single undo step, so the pen needs no
-//     history handling of its own. If edit() rejects, Lagrange stops the run, keeps the edits already made, and calls
-//     destroy().
-//   pen.destroy()
-//     removes everything the pen added to any editor or to the page, and stops its timers. Called on unload.
-//   Helpers available: rangeRects(view, from, to) and view.coordsAtPos(pos) for screen coordinates (viewport-relative,
-//   like getBoundingClientRect), sleep(ms), nextFrame(win), prefersReducedMotion(win).
+//     settings.penSpeed (0.5 slow .. 3 fast) is read on every edit. Lagrange calls edit() one edit at a time, in
+//     document order, with the editor locked and all changes folded into one undo step; see runEdits.
+//   pen.edit(view, from, to, replacement): strike [from, to], write `replacement`, then view.dispatch the change and
+//     remove every mark it added. With prefers-reduced-motion the pen does not fly: the old words dim briefly and the
+//     change is made.
+//   pen.destroy(): removes the pen, its ink and its decorations from every window, and stops its timers.
 function createPen(app, settings) {
-  const setMarks = StateEffect.define();   // a DecorationSet, or null to clear
-  const marksField = StateField.define({
+  const setGone = StateEffect.define();   // a DecorationSet, or null to clear
+  const goneField = StateField.define({
     create: () => Decoration.none,
     update(deco, tr) {
       deco = deco.map(tr.changes);
-      for (const e of tr.effects) if (e.is(setMarks)) deco = e.value || Decoration.none;
+      for (const e of tr.effects) if (e.is(setGone)) deco = e.value || Decoration.none;
       return deco;
     },
     provide: f => EditorView.decorations.from(f),
   });
-
-  class InkWidget extends WidgetType {
-    constructor(text, ms) { super(); this.text = text; this.ms = ms; }
-    eq(other) { return other.text === this.text; }
-    toDOM(view) {
-      const span = view.dom.ownerDocument.createElement('span');
-      span.className = 'lagrange-pen-ink';
-      span.textContent = this.text;
-      span.style.setProperty('--lagrange-write-ms', `${Math.round(this.ms)}ms`);
-      return span;
-    }
-    ignoreEvent() { return true; }
-  }
-
+  const goneMark = Decoration.mark({ class: 'lagrange-pen-gone' });
+  const SVGNS = 'http://www.w3.org/2000/svg';
   const views = new Set();
-  let nib = null;
+  const layers = new Map();               // document -> { svg, marks, pen, pos, lift, idle, win }
   let destroyed = false;
 
   const install = view => {
-    if (view.state.field(marksField, false) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(marksField) });
+    if (view.state.field(goneField, false) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(goneField) });
     views.add(view);
   };
-
-  const nibFor = view => {
-    const doc = view.dom.ownerDocument;
-    if (!nib || nib.ownerDocument !== doc) {
-      if (nib) nib.remove();
-      nib = doc.createElement('div');
-      nib.className = 'lagrange-nib';
-      nib.setAttribute('aria-hidden', 'true');
-      doc.body.appendChild(nib);
-    }
-    return nib;
+  const mk = (doc, tag, attrs, parent) => {
+    const e = doc.createElementNS(SVGNS, tag);
+    for (const k in attrs) e.setAttribute(k, String(attrs[k]));
+    if (parent) parent.appendChild(e);
+    return e;
   };
 
-  // Moves the nib along the given rectangles' midlines (left to right, line by line) over ms milliseconds.
-  const glide = (view, rects, ms) => {
-    if (!rects.length || ms <= 0) return Promise.resolve();
-    const el = nibFor(view);
-    const pts = [];
-    for (const r of rects) {
-      const y = r.top + r.height * 0.62;
-      pts.push([r.left, y], [r.right, y]);
-    }
-    let total = 0;
-    const dist = [0];
-    for (let i = 1; i < pts.length; i++) {
-      total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-      dist.push(total);
-    }
-    const frames = pts.map((p, i) => ({ transform: `translate(${p[0]}px, ${p[1]}px)`, offset: total ? dist[i] / total : i / Math.max(1, pts.length - 1) }));
-    el.style.display = 'block';
-    if (typeof el.animate !== 'function') return sleep(ms);
-    return new Promise(resolve => {
-      const anim = el.animate(frames, { duration: ms, easing: 'linear', fill: 'forwards' });
-      anim.onfinish = anim.oncancel = () => resolve();
+  function layerFor(doc) {
+    let L = layers.get(doc);
+    if (L && L.svg.isConnected) return L;
+    const svg = mk(doc, 'svg', { class: 'lagrange-pen-layer', 'aria-hidden': 'true' });
+    doc.body.appendChild(svg);
+    const defs = mk(doc, 'defs', {}, svg);
+    const pat = mk(doc, 'pattern', { id: 'lagrange-pen-hatch', width: 3, height: 3, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(80)' }, defs);
+    mk(doc, 'rect', { width: 3, height: 3, fill: 'var(--lg-plate)' }, pat);
+    mk(doc, 'line', { x1: 0, y1: 0, x2: 0, y2: 3, stroke: 'var(--lg-ink)', 'stroke-width': 0.7, opacity: 0.45 }, pat);
+    const marks = mk(doc, 'g', {}, svg);
+    const pen = mk(doc, 'g', { class: 'lagrange-pen' }, svg);
+    // drawn horizontally with the nib's tip at (0, 0), then turned so the barrel rises to the upper right
+    const body = mk(doc, 'g', { transform: 'rotate(-38)' }, pen);
+    const st = { stroke: 'var(--lg-ink)', 'stroke-width': 1.2, 'stroke-linejoin': 'round' };
+    mk(doc, 'path', { d: 'M0 0 L16 -5.2 Q22 -6.5 26 -6 L26 6 Q22 6.5 16 5.2 Z', fill: 'var(--lg-plate)', ...st }, body);   // nib
+    mk(doc, 'line', { x1: 2, y1: 0, x2: 17, y2: 0, stroke: 'var(--lg-ink)', 'stroke-width': 0.8 }, body);                     // slit
+    mk(doc, 'circle', { cx: 18, cy: 0, r: 1.3, fill: 'var(--lg-ink)' }, body);                                                 // breather hole
+    mk(doc, 'path', { d: 'M26 -6.5 H48 Q51 -7.5 54 -8 V8 Q51 7.5 48 6.5 H26 Z', fill: 'var(--lg-ink)', opacity: 0.85 }, body);  // section
+    mk(doc, 'path', { d: 'M54 -8.5 H150 Q158 -8.5 160 0 Q158 8.5 150 8.5 H54 Z', fill: 'url(#lagrange-pen-hatch)', ...st }, body); // barrel
+    mk(doc, 'rect', { x: 92, y: -9, width: 7, height: 18, fill: 'var(--lg-rubric)', opacity: 0.9 }, body);                    // band
+    mk(doc, 'path', { d: 'M100 -9 H140 Q144 -9 144 -6', fill: 'none', stroke: 'var(--lg-ink)', 'stroke-width': 1.6 }, body);  // clip
+    pen.style.display = 'none';
+    L = { svg, marks, pen, pos: null, lift: 0, idle: 0, win: doc.defaultView || window };
+    layers.set(doc, L);
+    return L;
+  }
+
+  const place = (L, x, y) => {
+    L.pos = { x, y };
+    L.pen.setAttribute('transform', `translate(${x.toFixed(1)} ${(y - L.lift).toFixed(1)}) scale(${(1 + L.lift * 0.012).toFixed(3)})`);
+  };
+  const tween = (win, ms, fn) => new Promise(resolve => {
+    const t0 = win.performance.now(), dur = Math.max(1, ms);
+    const frame = now => {
+      if (destroyed) { resolve(); return; }
+      const k = Math.min(1, (now - t0) / dur);
+      fn(k);
+      if (k < 1) win.requestAnimationFrame(frame); else resolve();
+    };
+    win.requestAnimationFrame(frame);
+  });
+  const ease = k => (k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2);
+  const fly = async (L, x, y, ms, lift = 14) => {
+    const a = L.pos ? { ...L.pos } : { x, y };
+    const mx = (a.x + x) / 2, my = Math.min(a.y, y) - Math.min(60, 20 + Math.hypot(x - a.x, y - a.y) * 0.15);
+    await tween(L.win, ms, k => {
+      const e = ease(k), u = 1 - e;
+      L.lift = Math.sin(k * Math.PI) * lift;
+      place(L, u * u * a.x + 2 * u * e * mx + e * e * x, u * u * a.y + 2 * u * e * my + e * e * y);
     });
+    L.lift = 0;
+    place(L, x, y);
   };
-
-  const hideNib = () => { if (nib) nib.style.display = 'none'; };
+  const park = (L, view) => {
+    L.win.clearTimeout(L.idle);
+    L.idle = L.win.setTimeout(async () => {
+      if (destroyed || !L.pos) return;
+      const r = view.dom.getBoundingClientRect();
+      await fly(L, r.right + 80, r.top - 60, 700);
+      L.pen.style.display = 'none';
+      L.pos = null;
+    }, 1400);
+  };
 
   return {
     async edit(view, from, to, replacement) {
       if (destroyed) throw new Error('The pen was put away.');
-      const win = view.dom.ownerDocument.defaultView || window;
+      const doc = view.dom.ownerDocument, win = doc.defaultView || window;
       const still = prefersReducedMotion(win);
       const speed = Number(settings && settings.penSpeed) > 0 ? Number(settings.penSpeed) : 1;
-      const k = (still ? 0.25 : 1) / speed;
+      const k = 1 / speed;
       install(view);
       view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'center' }) });
       await nextFrame(win);
       await nextFrame(win);
-
-      // (a) strike the old text
-      const strikeMs = 420 * k;
-      const strike = Decoration.mark({ class: 'lagrange-pen-strike', attributes: { style: `--lagrange-strike-ms: ${Math.round(strikeMs)}ms` } });
-      if (to > from) {
-        view.dispatch({ effects: setMarks.of(Decoration.set([strike.range(from, to)])) });
-        await nextFrame(win);
-        if (still) await sleep(strikeMs);
-        else await Promise.all([glide(view, rangeRects(view, from, to), strikeMs), sleep(strikeMs)]);
+      const rects = rangeRects(view, from, Math.max(from, to));
+      if (still || !rects.length) {
+        if (to > from) {
+          view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(from, to)])) });
+          await sleep(220 * k);
+        }
+        view.dispatch({ changes: { from, to, insert: replacement }, effects: setGone.of(null) });
+        return;
       }
-
-      // (b) write the new text beside it, in a hand
-      const writeMs = Math.min(1600, 140 + 30 * replacement.length) * k;
-      const marks = [];
-      if (to > from) marks.push(strike.range(from, to));
-      if (replacement) marks.push(Decoration.widget({ widget: new InkWidget(replacement, writeMs), side: 1 }).range(to));
-      view.dispatch({ effects: setMarks.of(Decoration.set(marks, true)) });
-      await nextFrame(win);
-      const ink = view.dom.querySelector('.lagrange-pen-ink');
-      if (ink && !still) {
-        const rects = [];
-        for (const r of ink.getClientRects()) rects.push(r);
-        await Promise.all([glide(view, rects, writeMs), sleep(writeMs)]);
-      } else {
-        await sleep(writeMs);
+      const L = layerFor(doc);
+      win.clearTimeout(L.idle);
+      const vr = view.dom.getBoundingClientRect();
+      if (!L.pos) place(L, Math.min(win.innerWidth - 20, vr.right + 80), Math.max(10, vr.top - 40));
+      L.pen.style.display = '';
+      const r0 = rects[0];
+      const mid = r => r.top + r.height * 0.58;
+      const ink = [];
+      try {
+        await fly(L, r0.left - 2, mid(r0), 650 * k);
+        if (to > from) {
+          ink.push(mk(doc, 'circle', { cx: r0.left - 2, cy: mid(r0), r: 1.6, fill: 'var(--lg-rubric)', opacity: 0.8 }, L.marks));
+          view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(from, to)])) });
+          for (let i = 0; i < rects.length && !destroyed; i++) {
+            const r = rects[i], y0 = mid(r), x0 = r.left - 2, x1 = r.right + 2;
+            const p = mk(doc, 'path', {
+              d: `M${x0} ${y0} C ${x0 + (x1 - x0) * 0.3} ${y0 - 1.6}, ${x0 + (x1 - x0) * 0.7} ${y0 + 1.6}, ${x1} ${y0 - 0.6}`,
+              fill: 'none', stroke: 'var(--lg-rubric)', 'stroke-width': 1.7, 'stroke-linecap': 'round',
+            }, L.marks);
+            ink.push(p);
+            const len = p.getTotalLength();
+            p.style.strokeDasharray = String(len);
+            p.style.strokeDashoffset = String(len);
+            if (i) await fly(L, x0, y0, 240 * k, 6);
+            await tween(win, Math.min(len * 3.2, 900) * k, t => {
+              p.style.strokeDashoffset = (len * (1 - t)).toFixed(1);
+              const q = p.getPointAtLength(len * t);
+              place(L, q.x, q.y);
+            });
+          }
+        }
+        let hand = null, handEnd = { x: r0.right, y: r0.top };
+        if (replacement && !destroyed) {
+          hand = doc.createElement('div');
+          hand.className = 'lagrange-pen-hand';
+          const shown = replacement.replace(/\s+/g, ' ').trim();
+          hand.textContent = shown.length > 48 ? shown.slice(0, 46).trimEnd() + ' …' : shown;
+          const fs = parseFloat(win.getComputedStyle(view.contentDOM).fontSize) || 16;
+          hand.style.fontSize = `${(fs * 1.3).toFixed(1)}px`;
+          doc.body.appendChild(hand);
+          const hb = hand.getBoundingClientRect();
+          const cw = Math.min(hb.width, vr.width - 8), ch = hb.height;
+          const cx0 = Math.max(vr.left + 4, Math.min(r0.left + (r0.width - cw) / 2, vr.right - cw - 4));
+          const cy0 = Math.max(vr.top + 2, r0.top - ch * 0.62);
+          hand.style.left = `${cx0}px`;
+          hand.style.top = `${cy0}px`;
+          ink.push(hand);
+          const by = cy0 + ch * 0.78;
+          await fly(L, cx0, by, 280 * k, 6);
+          await tween(win, Math.min(2400, cw * 9) * k, t => {
+            hand.style.clipPath = `inset(-0.4em ${((1 - t) * 100).toFixed(1)}% -0.4em -0.2em)`;
+            place(L, cx0 + cw * t, by + Math.sin(t * cw * 0.55) * 3.2 - 2);
+          });
+          handEnd = { x: cx0 + cw, y: cy0 };
+        }
+        await fly(L, Math.min(vr.right - 12, handEnd.x + 30), handEnd.y - 18, 280 * k, 10);
+        await sleep(380 * k);
+      } finally {
+        view.dispatch({ changes: { from, to, insert: replacement }, effects: setGone.of(null) });
+        const fade = Math.round(300 * k);
+        for (const n of ink) { n.style.transition = `opacity ${fade}ms ease`; n.style.opacity = '0'; }
+        win.setTimeout(() => { for (const n of ink) n.remove(); }, fade + 40);
+        park(L, view);
       }
-      await sleep(260 * k);
-
-      // (c) the real change, with the decorations cleared in the same transaction
-      hideNib();
-      view.dispatch({ changes: { from, to, insert: replacement }, effects: setMarks.of(null) });
-      await sleep(140 * k);
     },
     destroy() {
       destroyed = true;
       for (const view of views) {
-        try { if (view.state.field(marksField, false) !== undefined) view.dispatch({ effects: setMarks.of(null) }); } catch (e) { /* view gone */ }
+        try { if (view.state.field(goneField, false) !== undefined) view.dispatch({ effects: setGone.of(null) }); } catch (e) { /* view gone */ }
       }
       views.clear();
-      if (nib) { nib.remove(); nib = null; }
+      for (const [doc, L] of layers) {
+        try { L.win.clearTimeout(L.idle); } catch (e) { /* window closed */ }
+        L.svg.remove();
+        for (const n of doc.querySelectorAll('.lagrange-pen-hand')) n.remove();
+      }
+      layers.clear();
     },
   };
 }
@@ -1670,7 +2145,7 @@ class LagrangeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Loading animation')
       .setDesc('What the chat shows while Lagrange thinks.')
-      .addDropdown(d => d.addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy')
+      .addDropdown(d => d.addOption('random', 'A different plate each time').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('trebuchet', 'Trebuchet').addOption('orbit', 'The five Lagrange points')
         .setValue(s.loaderTheme).onChange(async v => { s.loaderTheme = v; await save(); }));
     new Setting(containerEl)
       .setName('Show the pen')

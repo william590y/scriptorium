@@ -7,7 +7,7 @@
   "openaiBaseUrl": "http://localhost:11434/v1",
   "openaiApiKey": "",
   "openaiModel": "",
-  "loaderTheme": "clockwork",
+  "loaderTheme": "random",
   "showPen": true,
   "penSpeed": 1
 }
