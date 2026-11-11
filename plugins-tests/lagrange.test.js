@@ -444,6 +444,25 @@ test('Demo: typographic slips in any note, never inside code', () => {
   assert.equal(out, 'He said “yes”—twice… It’s the end.\n\n`"code"` stays.');
 });
 
+test('Demo: Markdown syntax is never changed (link titles, wikilinks, HTML, math, URLs, tables)', () => {
+  const doc = [
+    'A figure ![A second figure|300](fig.png "The fleuron figure") and a [link](https://x.org/a--b "Its title").',
+    'An embed ![[plate "one".png]], a tag <span title="x">here</span>, math $a--b$ and https://x.org/c--d too.',
+    '| col  | "q" |',
+    '| --- | --- |',
+    '',
+    'Outside, "quoted" prose -- fixed.',
+  ].join('\n');
+  const edits = L.demoProofreadEdits(doc);
+  const { located, skipped } = L.locateEdits(doc, edits);
+  assert.equal(skipped.length, 0);
+  let out = doc;
+  for (const e of located.slice().reverse()) out = out.slice(0, e.from) + e.replace + out.slice(e.to);
+  const lines = out.split('\n');
+  assert.deepEqual(lines.slice(0, 5), doc.split('\n').slice(0, 5));
+  assert.equal(lines[5], 'Outside, “quoted” prose -- fixed.');
+});
+
 test('Demo: revisions follow the instruction', () => {
   assert.equal(L.demoRevise('One. Two. Three. Four.', 'make it shorter'), 'One. Two.');
   assert.equal(L.demoRevise('the art of the page', 'title case'), 'The Art of the Page');
