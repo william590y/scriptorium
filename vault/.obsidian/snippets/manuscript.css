@@ -163,6 +163,14 @@ body:where(:not(.scriptorium-fancy)).theme-dark {
 body:where(:not(.scriptorium-fancy)).theme-light {
   --background-primary: #f7f2e7;     /* warm paper */
   --text-normal: #2a2420;            /* soft ink, not pure black */
+  /* the whole window on the same paper: sidebars, ribbon, tabs, title and status bars */
+  --background-secondary: #f7f2e7;
+  --titlebar-background: #f7f2e7;
+  --titlebar-background-focused: #f7f2e7;
+  --tab-container-background: #f7f2e7;
+  --ribbon-background: #f7f2e7;
+  --ribbon-background-collapsed: #f7f2e7;
+  --status-bar-background: #f7f2e7;
 }
 body:where(:not(.scriptorium-fancy)).theme-dark {
   --background-primary: #1d1a17;
@@ -415,6 +423,14 @@ body:where(.scriptorium-fancy).theme-dark {
 body:where(.scriptorium-fancy).theme-light {
   --background-primary: #f7f2e7;     /* warm paper */
   --text-normal: #2a2420;            /* soft ink, not pure black */
+  /* the whole window on the same paper: sidebars, ribbon, tabs, title and status bars */
+  --background-secondary: #f7f2e7;
+  --titlebar-background: #f7f2e7;
+  --titlebar-background-focused: #f7f2e7;
+  --tab-container-background: #f7f2e7;
+  --ribbon-background: #f7f2e7;
+  --ribbon-background-collapsed: #f7f2e7;
+  --status-bar-background: #f7f2e7;
 }
 body:where(.scriptorium-fancy).theme-dark {
   --background-primary: #1d1a17;
