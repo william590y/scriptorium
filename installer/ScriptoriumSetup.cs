@@ -369,8 +369,8 @@ namespace ScriptoriumSetup
         {
             var rng = new Rng(seed);
             float x0 = r.Left, y0 = r.Top, x1 = r.Right, y1 = r.Bottom;
-            Func<float> j = () => rng.Range(-0.7f, 0.7f) * S;   // a hand's unsteadiness
-            Func<float> o = () => rng.Range(0.4f, 2.6f) * S;    // overshoot at a corner
+            Func<float> j = () => rng.Range(-0.9f, 0.9f) * S;   // a hand's unsteadiness
+            Func<float> o = () => rng.Range(0.6f, 3.2f) * S;    // overshoot at a corner
             Side(g, new PointF(x0 - o(), y0 + j()), new PointF(x1 + o(), y0 + j()), color, width, rng);
             Side(g, new PointF(x1 + j(), y0 - o()), new PointF(x1 + j(), y1 + o()), color, width, rng);
             Side(g, new PointF(x1 + o(), y1 + j()), new PointF(x0 - o(), y1 + j()), color, width, rng);
@@ -380,7 +380,7 @@ namespace ScriptoriumSetup
         static void Side(Graphics g, PointF a, PointF d, Color color, float width, Rng rng)
         {
             float dx = d.X - a.X, dy = d.Y - a.Y, len = (float)Math.Sqrt(dx * dx + dy * dy), nx = -dy / len, ny = dx / len;
-            float bow1 = rng.Range(-0.8f, 0.8f) * S, bow2 = rng.Range(-0.8f, 0.8f) * S;
+            float bow1 = rng.Range(-1.1f, 1.1f) * S, bow2 = rng.Range(-1.1f, 1.1f) * S;
             var b = new PointF(a.X + dx / 3 + nx * bow1, a.Y + dy / 3 + ny * bow1);
             var c = new PointF(a.X + 2 * dx / 3 + nx * bow2, a.Y + 2 * dy / 3 + ny * bow2);
             Stroke(g, Bezier(a, b, c, d, Math.Max(8, (int)(len / (2 * S)))), width, color, rng.NextSeed(), 3 * S, 4 * S);
@@ -507,9 +507,11 @@ namespace ScriptoriumSetup
     // native text box, can use them too. If anything fails, the window falls back to Georgia.
     static class Typefaces
     {
-        static readonly PrivateFontCollection collection = new PrivateFontCollection();
-        public static FontFamily Text, Semi, Display;
+        // One private collection per face, so GDI+ never has to group faces into families by itself.
+        static readonly List<PrivateFontCollection> collections = new List<PrivateFontCollection>();
+        public static FontFamily Text, Italic, Semi, Display;
         public static bool Embedded;
+        public static string Report = "";
         public const char SmallCapA = '\uF761';   // the semibold face's small capitals a..z (see tools/build_fonts.py)
 
         [DllImport("gdi32.dll")] static extern IntPtr AddFontMemResourceEx(IntPtr font, uint size, IntPtr reserved, ref uint count);
@@ -517,42 +519,51 @@ namespace ScriptoriumSetup
         public static void Load()
         {
             if (Text != null) return;
-            try
-            {
-                foreach (string name in new[] { "SetupText-Regular.ttf", "SetupText-Italic.ttf", "SetupText-SemiBold.ttf", "SetupDisplay-SemiBold.ttf" })
-                {
-                    byte[] data;
-                    using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
-                    {
-                        if (s == null) throw new FileNotFoundException("Missing font " + name);
-                        using (var m = new MemoryStream()) { s.CopyTo(m); data = m.ToArray(); }
-                    }
-                    // GDI+ reads the font from this memory for as long as the process runs, so it is never freed.
-                    IntPtr memory = Marshal.AllocCoTaskMem(data.Length);
-                    Marshal.Copy(data, 0, memory, data.Length);
-                    collection.AddMemoryFont(memory, data.Length);
-                    if (Installer.IsWindows) { uint count = 0; AddFontMemResourceEx(memory, (uint)data.Length, IntPtr.Zero, ref count); }
-                }
-                Text = Find("ScrSetup EB Garamond"); Semi = Find("ScrSetup EB Garamond SemiBold"); Display = Find("ScrSetup Cormorant SemiBold");
-                Embedded = Text != null && Semi != null && Display != null && Text.IsStyleAvailable(FontStyle.Italic);
-            }
-            catch { Embedded = false; }
+            Text = Face("SetupText-Regular.ttf"); Italic = Face("SetupText-Italic.ttf");
+            Semi = Face("SetupText-SemiBold.ttf"); Display = Face("SetupDisplay-SemiBold.ttf");
+            Embedded = Text != null && Italic != null && Semi != null && Display != null;
             if (!Embedded)
             {
                 FontFamily serif;
                 try { serif = new FontFamily("Georgia"); } catch { serif = FontFamily.GenericSerif; }
-                Text = Semi = Display = serif;
+                Text = Italic = Semi = Display = serif;
             }
         }
 
-        static FontFamily Find(string name)
+        static FontFamily Face(string name)
         {
-            foreach (FontFamily f in collection.Families) if (f.Name == name) return f;
-            return null;
+            try
+            {
+                byte[] data;
+                using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
+                {
+                    if (s == null) throw new FileNotFoundException("not embedded");
+                    using (var m = new MemoryStream()) { s.CopyTo(m); data = m.ToArray(); }
+                }
+                // GDI+ reads the font from this memory for as long as the process runs, so it is never freed.
+                IntPtr memory = Marshal.AllocCoTaskMem(data.Length);
+                Marshal.Copy(data, 0, memory, data.Length);
+                var collection = new PrivateFontCollection();
+                collections.Add(collection);
+                collection.AddMemoryFont(memory, data.Length);
+                uint count = 0;
+                if (Installer.IsWindows) AddFontMemResourceEx(memory, (uint)data.Length, IntPtr.Zero, ref count);
+                FontFamily[] families = collection.Families;
+                Report += name + ": " + (families.Length > 0 ? families[0].Name : "no family") + " (GDI: " + count + "); ";
+                return families.Length > 0 ? families[0] : null;
+            }
+            catch (Exception e) { Report += name + ": " + e.GetType().Name + " " + e.Message + "; "; return null; }
         }
 
-        // Sizes are 96-dpi pixels; fonts are made in device pixels.
-        public static Font Make(FontFamily family, float px, FontStyle style) { return new Font(family, px * Ink.S, style, GraphicsUnit.Pixel); }
+        // Sizes are 96-dpi pixels; fonts are made in device pixels. Italic text comes from the italic face.
+        public static Font Make(FontFamily family, float px, FontStyle style)
+        {
+            if (Embedded && family == Text && (style & FontStyle.Italic) != 0) family = Italic;
+            if (!family.IsStyleAvailable(style))
+                foreach (FontStyle st in new[] { FontStyle.Regular, FontStyle.Italic, FontStyle.Bold })
+                    if (family.IsStyleAvailable(st)) { style = st; break; }
+            return new Font(family, px * Ink.S, style, GraphicsUnit.Pixel);
+        }
 
         // Small capitals for the semibold face: lower-case letters map to its small-capital glyphs.
         public static string SmallCaps(string s)
@@ -788,6 +799,10 @@ namespace ScriptoriumSetup
     class InkCheck : CheckBox, IInked
     {
         internal bool Hover, ShowFocus;
+        bool record;
+
+        // After a successful install the boxes stay disabled but are written in full ink: a record of what was done.
+        public bool Record { get { return record; } set { record = value; Invalidate(); } }
 
         // From the site's .ink-check (a 24 x 24 view box): the box, drawn as one stroke, and the tick, a filled shape.
         static readonly PointF[] BoxPath = {
@@ -833,7 +848,7 @@ namespace ScriptoriumSetup
         {
             Sheet.Under(this, g);
             Ink.Prepare(g);
-            float s = Ink.S, alpha = Enabled ? 1f : Ink.Faded;
+            float s = Ink.S, alpha = Enabled || record ? 1f : Ink.Faded;
             float baseline = (float)Math.Round(Height / 2f + Font.Size * 0.27f);
             float k = BoxSize / 18f, cx = 1.5f * s + BoxSize / 2, cy = baseline - Font.Size * 0.3f;
             var place = new Matrix(k, 0, 0, k, cx - 12 * k, cy - 12.2f * k);
@@ -1044,6 +1059,7 @@ namespace ScriptoriumSetup
         string installedPath;
         Bitmap paper;
         float ornamentY, ruleY;
+        bool finished;   // the install succeeded: the choices made are shown in full ink, as a record
 
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
@@ -1206,6 +1222,13 @@ namespace ScriptoriumSetup
 
         static int ColorRef(Color c) { return c.R | (c.G << 8) | (c.B << 16); }
 
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // The folder box starts with the caret at the end of the path, not with the whole path highlighted.
+            pathBox.SelectionStart = pathBox.TextLength; pathBox.SelectionLength = 0;
+        }
+
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void OnPaint(PaintEventArgs e) { PaintPage(e.Graphics); }
 
@@ -1231,12 +1254,13 @@ namespace ScriptoriumSetup
             // The folder path is written on a hand-ruled line. While setup runs, the text box is hidden and the path is
             // written here in faded ink.
             float x0 = pathBox.Left, x1 = pathBox.Right;
-            Ink.Stroke(g, Ink.Ruled(x0 - 1 * s, x1 + 4 * s, ruleY, 0.45f * s, 0x9A7Bu), 1.2f * s, Ink.A(Ink.Black, pathBox.Enabled ? 0.72f : 0.72f * Ink.Faded), 0x9A7Cu, 5 * s, 5 * s);
+            float alpha = pathBox.Enabled || finished ? 1f : Ink.Faded;
+            Ink.Stroke(g, Ink.Ruled(x0 - 1 * s, x1 + 4 * s, ruleY, 0.45f * s, 0x9A7Bu), 1.2f * s, Ink.A(Ink.Black, 0.72f * alpha), 0x9A7Cu, 5 * s, 5 * s);
             if (!pathBox.Enabled)
             {
                 string text = pathBox.Text;
                 while (text.Length > 1 && Lettering.Width(g, text, pathBox.Font) > x1 - x0 - 4 * s) text = text.Substring(0, text.Length - 2) + "…";
-                Lettering.Line(g, text, pathBox.Font, Ink.A(Ink.Black, Ink.Faded), x0 + 1 * s, pathBox.Top + Lettering.Ascent(pathBox.Font) + 1 * s);
+                Lettering.Line(g, text, pathBox.Font, Ink.A(Ink.Black, alpha), x0 + 1 * s, pathBox.Top + Lettering.Ascent(pathBox.Font) + 1 * s);
             }
         }
 
@@ -1402,10 +1426,19 @@ namespace ScriptoriumSetup
             status.Text = "Done. Your vault is in " + dest;
             if (!preview) Clipboard.SetText(dest);
             installButton.Text = "Open folder"; installButton.Enabled = true; closeButton.Text = "Finish";
+            ShowRecord(true);
+        }
+
+        void ShowRecord(bool on)
+        {
+            finished = on;
+            foreach (InkCheck c in new[] { fontsBox, obsidianBox, longformBox, openBox }) c.Record = on;
+            Invalidate();
         }
 
         internal void ResetControls()
         {
+            ShowRecord(false);
             Progress(0, false);
             foreach (Control c in new Control[] { pathBox, browse, longformBox, openBox, installButton }) c.Enabled = true;
             fontsBox.Enabled = !FontsInstalled();
@@ -1435,7 +1468,7 @@ namespace ScriptoriumSetup
             {
                 try
                 {
-                    log.WriteLine("Embedded fonts: " + Typefaces.Embedded + " (" + Typefaces.Text.Name + ", " + Typefaces.Semi.Name + ", " + Typefaces.Display.Name + ")");
+                    log.WriteLine("Embedded fonts: " + Typefaces.Embedded + ". " + Typefaces.Report);
                     using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) log.WriteLine("Screen DPI: " + g.DpiX + ", OS: " + Environment.OSVersion);
                     States(dir);
                     Animation(dir);

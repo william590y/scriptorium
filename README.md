@@ -62,11 +62,17 @@ Everything is built from this repository; the release files are built by GitHub 
 |---|---|---|
 | `dist/Scriptorium.zip` | `python3 tools/build_zip.py` | Python 3.9 or later |
 | `dist/Scriptorium-Setup.exe` | `tools/build_exe.sh` (rebuilds the zip first) | [Mono](https://www.mono-project.com) (`csc` on `PATH`, or `MONO=<prefix>`) |
+| `installer/fonts/*.ttf` (committed) | `python3 tools/build_fonts.py` | Python 3.9 or later, [fontTools](https://github.com/fonttools/fonttools) |
 
 The zip is deterministic: sorted entries, one fixed timestamp (or `SOURCE_DATE_EPOCH`) and fixed permissions, so the
 same `vault/` gives the same bytes. CI rebuilds it on Linux and checks that it matches the Windows build. The installer
 embeds the zip as the resource `Scriptorium.zip`. On Windows, CI compiles it with the Roslyn `csc.exe` from Visual
 Studio Build Tools against the .NET Framework 4.8 reference assemblies, with the same switches as `build_exe.sh`.
+
+The installer draws its own window in Scriptorium's style, ink on paper, set in EB Garamond and Cormorant Garamond. It
+embeds the four faces it uses (`installer/fonts/`): static instances of the same pinned Google Fonts files it downloads,
+subset to Latin and given private names, made by `tools/build_fonts.py`. They only draw the window; they are never
+installed.
 
 To check a build without installing anything:
 
@@ -76,13 +82,17 @@ mono dist/Scriptorium-Setup.exe --extract-only /tmp/scriptorium-check/vault   # 
 
 This unpacks the embedded vault into a new folder and exits; it downloads nothing.
 
+To look at the window without installing anything, run `Scriptorium-Setup.exe --render screenshots` on Windows: it
+draws the window offscreen in each of its states (ready, downloading, installing, done, failed, and the frames of a whole
+install) and saves them as PNGs. CI does this on every build and uploads them as the `screenshots` artifact.
+
 ## Repository layout
 
 ```
 vault/        the vault template (the Scriptorium plugin and snippet live here)
-installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico
+installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico, and fonts/ (the window's type)
 installers/   the script installers
-tools/        build_zip.py, build_exe.sh
+tools/        build_zip.py, build_exe.sh, build_fonts.py
 ```
 
 ## Third-party components
@@ -93,6 +103,7 @@ tools/        build_zip.py, build_exe.sh
 | [Manuscriptum](https://github.com/sgranade/manuscriptum) 1.0.2 | `vault/.obsidian/plugins/manuscriptum` | Stephen Granade | MIT |
 | [Typewriter Mode](https://github.com/davisriedel/obsidian-typewriter-mode) 1.6.1 | `vault/.obsidian/plugins/typewriter-mode` | Davis Riedel | MIT |
 | Yinit initials (from [yinit-otf](https://ctan.org/pkg/yinit-otf)) | embedded in `vault/.obsidian/snippets/manuscript.css` | Yannis Haralambous | Public domain |
+| EB Garamond and Cormorant Garamond subsets, for the installer's window | `installer/fonts` | The EB Garamond Project Authors; the Cormorant Project Authors | SIL OFL 1.1 |
 
 Each license file sits next to its component. These are not part of this repository and not included in the
 installer; they are downloaded from their official sources only when you tick them:
