@@ -449,14 +449,32 @@ function uniqueContext(doc, from, to) {
   return null;
 }
 
+/* Ranges of a note the demo must not change: front matter, code, math, comments, HTML tags, tables, link and image
+   destinations (where a curled quote would break a title), wikilinks and embeds, and bare URLs. */
+function demoSkipRanges(text) {
+  const skip = [];
+  const fm = text.match(/^---\n[\s\S]*?\n---\n/);
+  if (fm) skip.push([0, fm[0].length]);
+  const patterns = [
+    /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g,     // code
+    /\$\$[\s\S]*?\$\$|\$[^$\n]+\$/g,                // math
+    /%%[\s\S]*?%%|<!--[\s\S]*?-->/g,               // comments
+    /<\/?[A-Za-z][^>\n]*>/g,                         // HTML tags
+    /^[ \t]*\|.*$/gm,                                 // table rows
+    /\]\((?:[^()\n]|\([^()\n]*\))*\)/g,                 // link and image destinations, with their titles
+    /^[ \t]*\[[^\]\n]+\]:.*$/gm,                        // reference link definitions
+    /!?\[\[[^\]\n]*\]\]/g,                              // wikilinks and embeds
+    /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()]+/gi,              // bare URLs
+  ];
+  for (const re of patterns) for (const m of text.matchAll(re)) skip.push([m.index, m.index + m[0].length]);
+  return skip;
+}
+
 /* The demo's proofreading: typographic slips anywhere (fixes close together become one edit), then, in the Lorem
    Ipsum sample, a few made-up corrections so there is always something to show. */
 function demoProofreadEdits(doc) {
   const text = String(doc || '');
-  const skip = [];   // front matter and code are never touched
-  const fm = text.match(/^---\n[\s\S]*?\n---\n/);
-  if (fm) skip.push([0, fm[0].length]);
-  for (const m of text.matchAll(/```[\s\S]*?```|`[^`\n]*`/g)) skip.push([m.index, m.index + m[0].length]);
+  const skip = demoSkipRanges(text);   // front matter, code and Markdown syntax are never touched
   const overlaps = (list, a, b) => list.some(([s, e]) => a < e && s < b);
   const fixes = [];
   for (const rule of DEMO_RULES) {

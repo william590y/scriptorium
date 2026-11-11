@@ -1,3 +1,6 @@
 {
-  "fancyMode": false
+  "fancyMode": false,
+  "initials": "yinit",
+  "marginalia": true,
+  "imageFocus": true
 }

@@ -131,10 +131,25 @@ jobs:
           python3 tools/build_zip.py dist/Scriptorium.zip
           echo "$WINDOWS_ZIP_SHA256  dist/Scriptorium.zip" | sha256sum -c -
 
+  plugin-tests:
+    name: Test the Scriptorium and Lagrange plugins (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the tests
+        run: |
+          node --version
+          node --check vault/.obsidian/plugins/scriptorium/main.js
+          node --check vault/.obsidian/plugins/lagrange/main.js
+          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js
+
   release:
     name: Publish the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, zip-reproducible]
+    needs: [build, zip-reproducible, plugin-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
