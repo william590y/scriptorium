@@ -1,0 +1,13 @@
+{
+  "provider": "anthropic",
+  "anthropicApiKey": "",
+  "anthropicModel": "claude-sonnet-5-5",
+  "anthropicCustomModel": "",
+  "refusalFallback": true,
+  "openaiBaseUrl": "http://localhost:11434/v1",
+  "openaiApiKey": "",
+  "openaiModel": "",
+  "loaderTheme": "clockwork",
+  "showPen": true,
+  "penSpeed": 1
+}

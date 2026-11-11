@@ -125,8 +125,8 @@ def test_update(exe, work):
     check(appearance.get("theme") == "moonstone" and appearance.get("accentColor") == "#123456",
           "the rest of appearance.json kept")
     plugins = json.loads(after[f"{OBS}/community-plugins.json"])
-    check(plugins == ["longform", "manuscriptum", "scriptorium", "calendar", "typewriter-mode"],
-          "the missing plugin re-added, the list's order and the user's plugin kept")
+    check(plugins == ["longform", "manuscriptum", "scriptorium", "calendar", "typewriter-mode", "lagrange"],
+          "the missing plugins added, the list's order and the user's plugin kept")
 
     found = backups(vault)
     check(len(found) == 1, "one backup folder in .obsidian")

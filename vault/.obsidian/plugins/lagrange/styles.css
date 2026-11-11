@@ -1,0 +1,400 @@
+/* Lagrange: ink on paper, in Scriptorium's palette.
+   Paper and ink come from Obsidian's own variables (which Scriptorium's snippet sets to warm paper and soft ink), so
+   the light and dark themes, and other themes, all work; the rubric is Lagrange's. */
+
+body {
+  --lagrange-rubric: #8b2323;          /* oxblood */
+  --lagrange-rubric-deep: #7d2219;
+  --lagrange-paper: var(--background-primary);
+  --lagrange-ink: var(--text-normal);
+  --lagrange-muted: var(--text-muted);
+  --lagrange-rule: color-mix(in srgb, var(--text-normal) 20%, transparent);
+  --lagrange-serif: "EB Garamond", "Literata", Georgia, serif;
+  --lagrange-display: "Cormorant Garamond", "EB Garamond", Georgia, serif;
+  --lagrange-hand: "Snell Roundhand", "Apple Chancery", "Segoe Script", "URW Chancery L", "Cormorant Garamond", "EB Garamond", cursive;
+  --lagrange-size: clamp(15px, calc(var(--font-text-size, 16px) * 0.8), 19px);
+}
+body.theme-dark {
+  --lagrange-rubric: #c9805f;          /* the warmer accent Scriptorium uses on dark paper */
+  --lagrange-rubric-deep: #d39073;
+}
+
+
+/* ---------- The chat view ---------- */
+
+.workspace-leaf-content[data-type="lagrange-chat"] > .view-content.lagrange-view {
+  padding: 0;
+}
+.lagrange-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--lagrange-paper);
+  color: var(--lagrange-ink);
+  font-family: var(--lagrange-serif);
+  font-size: var(--lagrange-size);
+  line-height: 1.45;
+  font-variant-numeric: oldstyle-nums proportional-nums;
+  font-kerning: normal;
+}
+
+.lagrange-head {
+  position: relative;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--lagrange-rule);
+  text-align: center;
+}
+.lagrange-title {
+  font-family: var(--lagrange-display);
+  font-variant: small-caps;
+  font-size: 1.45em;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.1;
+  color: var(--lagrange-rubric);
+}
+.lagrange-subject {
+  margin-top: 2px;
+  font-style: italic;
+  color: var(--lagrange-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lagrange-subject em { font-style: normal; color: var(--lagrange-ink); }
+.lagrange-actions {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+}
+.lagrange-actions .lagrange-icon {
+  background: none;
+  box-shadow: none;
+  color: var(--lagrange-muted);
+}
+.lagrange-actions .lagrange-icon:hover { color: var(--lagrange-rubric); }
+
+.lagrange-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px 18px 18px;
+  user-select: text;
+}
+
+.lagrange-empty {
+  margin: 18% 4px 0;
+  text-align: center;
+  font-style: italic;
+  color: var(--lagrange-muted);
+}
+.lagrange-empty p { margin: 0.5em 0; }
+.lagrange-empty em { font-style: normal; font-variant: small-caps; letter-spacing: 0.03em; color: var(--lagrange-ink); }
+.lagrange-fleuron {
+  font-size: 2em;
+  font-style: normal;
+  line-height: 1;
+  margin-bottom: 0.3em;
+  color: var(--lagrange-rubric);
+}
+.lagrange-quiet { font-size: 0.9em; }
+
+.lagrange-turn { margin: 0.85em 0; }
+
+/* The writer's words: italic, with a rubric pilcrow in the margin. Each exchange after the first opens with a rule. */
+.lagrange-turn--user {
+  position: relative;
+  padding-left: 1.1em;
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lagrange-turn--user::before {
+  content: "¶";
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-style: normal;
+  color: var(--lagrange-rubric);
+}
+.lagrange-turn--user:not(:first-child) {
+  margin-top: 1.5em;
+  padding-top: 1.1em;
+  border-top: 1px solid var(--lagrange-rule);
+}
+.lagrange-turn--user:not(:first-child)::before { top: 1.1em; }
+
+/* Lagrange's replies: Markdown, set as text. */
+.lagrange-turn-body { overflow-wrap: anywhere; }
+.lagrange-turn-body.markdown-rendered { font-size: 1em; line-height: 1.45; }
+.lagrange-turn-body > div > :first-child { margin-top: 0; }
+.lagrange-turn-body > div > :last-child { margin-bottom: 0; }
+.lagrange-turn-body p { margin: 0.45em 0; text-align: start; hyphens: auto; }
+.lagrange-turn-body :is(ul, ol) { padding-inline-start: 1.15em; margin: 0.45em 0; }
+.lagrange-turn-body li { margin-inline-start: 0; text-align: start; }
+.lagrange-turn-body li::marker { color: var(--lagrange-rubric); }
+.lagrange-turn-body { --list-marker-color: var(--lagrange-rubric); --list-indent: 1.15em; }
+.lagrange-turn-body :is(h1, h2, h3, h4, h5, h6) {
+  font-family: var(--lagrange-display);
+  font-variant: small-caps;
+  font-size: 1.1em;
+  letter-spacing: 0.04em;
+  margin: 0.8em 0 0.3em;
+  color: var(--lagrange-ink);
+}
+.lagrange-turn-body blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.9em;
+  border-left: 1px solid var(--lagrange-rubric);
+  font-style: italic;
+}
+.lagrange-turn-body code { font-size: 0.85em; }
+.lagrange-turn--reply.is-empty { display: none; }
+
+.lagrange-turn-note, .lagrange-aside {
+  margin-top: 0.35em;
+  font-size: 0.88em;
+  font-style: italic;
+  color: var(--lagrange-muted);
+}
+.lagrange-aside { margin: 0.6em 0; padding-left: 1.1em; }
+.lagrange-turn-note.is-warn { color: var(--lagrange-rubric); }
+
+.lagrange-error {
+  margin: 0.6em 0;
+  padding: 0.15em 0 0.15em 0.9em;
+  border-left: 2px solid var(--lagrange-rubric);
+  font-style: italic;
+}
+.lagrange-error a { color: var(--lagrange-rubric); font-style: normal; font-variant: small-caps; letter-spacing: 0.03em; }
+
+/* Tasks: proofreading and revising, with the edits listed as a corrector would mark them. */
+.lagrange-turn--task {
+  margin-top: 1.4em;
+  padding-top: 1em;
+  border-top: 1px solid var(--lagrange-rule);
+}
+.lagrange-turn--task:first-child { border-top: none; padding-top: 0; }
+.lagrange-task-head { display: flex; align-items: baseline; gap: 0.5em; flex-wrap: wrap; }
+.lagrange-task-title {
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--lagrange-rubric);
+}
+.lagrange-task-subtitle { font-style: italic; color: var(--lagrange-muted); min-width: 0; overflow-wrap: anywhere; }
+.lagrange-view button:is(.lagrange-task-stop, .lagrange-undo, .lagrange-send) {
+  font-family: var(--lagrange-serif);
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  background: none;
+  box-shadow: none;
+  border: none;
+  padding: 0 0.2em;
+  height: auto;
+  color: var(--lagrange-rubric);
+  cursor: pointer;
+}
+.lagrange-view button.lagrange-task-stop { margin-left: auto; font-size: 0.9em; }
+.lagrange-view button:is(.lagrange-task-stop, .lagrange-undo, .lagrange-send):hover {
+  background: none;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.lagrange-task-status:not(:empty), .lagrange-task-summary {
+  margin-top: 0.3em;
+  font-style: italic;
+  color: var(--lagrange-muted);
+}
+.lagrange-edits {
+  margin: 0.4em 0 0.2em;
+  padding-left: 1.4em;
+}
+.lagrange-edits li { margin: 0.4em 0; }
+.lagrange-edits li::marker { color: var(--lagrange-rubric); font-variant-numeric: oldstyle-nums; }
+.lagrange-edit-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.lagrange-del {
+  text-decoration: line-through;
+  text-decoration-color: var(--lagrange-rubric);
+  text-decoration-thickness: 1.5px;
+  color: var(--lagrange-muted);
+}
+.lagrange-ins { text-decoration: none; color: var(--lagrange-ink); }
+.lagrange-ins.is-deletion { font-style: italic; color: var(--lagrange-muted); }
+.lagrange-arrow { color: var(--lagrange-rubric); }
+.lagrange-reason { font-size: 0.88em; font-style: italic; color: var(--lagrange-muted); }
+.lagrange-skipped-head {
+  margin-top: 0.6em;
+  font-variant: small-caps;
+  letter-spacing: 0.05em;
+  color: var(--lagrange-muted);
+}
+.lagrange-edits.is-skipped { opacity: 0.8; list-style: none; padding-left: 0.6em; }
+.lagrange-view button.lagrange-undo { margin-top: 0.5em; font-size: 1em; }
+.lagrange-view button.lagrange-undo:disabled { color: var(--lagrange-muted); cursor: default; text-decoration: none; }
+.lagrange-raw summary { cursor: pointer; font-style: italic; color: var(--lagrange-muted); }
+.lagrange-raw pre { white-space: pre-wrap; font-size: 0.8em; max-height: 16em; overflow: auto; }
+
+/* Writing a message: a ruled line on the page, not a box. */
+.lagrange-compose {
+  padding: 8px 18px 12px;
+  border-top: 1px solid var(--lagrange-rule);
+}
+body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of the status bar, which floats over the sidebar */
+.lagrange-view textarea.lagrange-input {
+  display: block;
+  width: 100%;
+  min-height: 2.6em;
+  max-height: 220px;
+  resize: none;
+  padding: 0.3em 0 0.35em;
+  border: none;
+  border-bottom: 1px solid var(--lagrange-rule);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--lagrange-ink);
+  font-family: var(--lagrange-serif);
+  font-size: 1em;
+  line-height: 1.4;
+}
+.lagrange-view textarea.lagrange-input:is(:focus, :focus-visible, :hover) {
+  border-bottom-color: var(--lagrange-rubric);
+  box-shadow: none;
+  outline: none;
+}
+.lagrange-view textarea.lagrange-input::placeholder { font-style: italic; color: var(--text-faint); }
+.lagrange-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6em;
+  margin-top: 0.35em;
+}
+.lagrange-hint {
+  min-width: 0;
+  font-size: 0.78em;
+  font-style: italic;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lagrange-view button.lagrange-send { font-size: 1.05em; flex: none; }
+.lagrange-view button.lagrange-send.is-stop { color: var(--lagrange-muted); }
+
+/* Notices, the revise dialogue and the settings. */
+.lagrange-notice-undo {
+  margin-left: 0.4em;
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+}
+.lagrange-modal .modal-title { font-family: var(--lagrange-display); font-variant: small-caps; letter-spacing: 0.06em; color: var(--lagrange-rubric); }
+.lagrange-modal-passage {
+  margin: 0 0 0.8em;
+  padding-left: 0.9em;
+  border-left: 1px solid var(--lagrange-rubric);
+  font-family: var(--lagrange-serif);
+  font-style: italic;
+  color: var(--lagrange-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lagrange-modal textarea.lagrange-modal-input {
+  width: 100%;
+  resize: vertical;
+  padding: 0.4em 0.1em;
+  border: none;
+  border-bottom: 1px solid var(--lagrange-rule);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--lagrange-ink);
+  font-family: var(--lagrange-serif);
+  font-size: 1.1em;
+}
+.lagrange-modal textarea.lagrange-modal-input:is(:focus, :focus-visible) { border-bottom-color: var(--lagrange-rubric); box-shadow: none; }
+.lagrange-modal textarea.lagrange-modal-input::placeholder { font-style: italic; color: var(--text-faint); }
+.lagrange-modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 0.8em; }
+.lagrange-modal-buttons button { font-family: var(--lagrange-serif); font-variant: small-caps; letter-spacing: 0.05em; font-size: 1.05em; }
+.lagrange-modal-buttons button.mod-cta { background: var(--lagrange-rubric); color: var(--lagrange-paper); }
+.lagrange-modal-buttons button.mod-cta:hover { background: var(--lagrange-rubric-deep); }
+
+/* While the pen writes, the editor is locked. */
+.cm-editor.lagrange-writing .cm-content { cursor: progress; }
+
+
+/* ==== LAGRANGE LOADER (replaceable) ==== */
+/* Placeholder: three ink dots, breathing in turn. Replace with the real ink-drawn animation (see main.js). */
+.lagrange-loader {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  height: 1.6em;
+  padding-left: 0.1em;
+}
+.lagrange-loader-dot {
+  width: 0.42em;
+  height: 0.42em;
+  border-radius: 50%;
+  background: var(--lagrange-ink);
+  opacity: 0.25;
+  animation: lagrange-ink-dot 1.2s ease-in-out infinite;
+}
+.lagrange-loader--alchemy .lagrange-loader-dot { background: var(--lagrange-rubric); border-radius: 50% 50% 50% 0; }
+.lagrange-loader-dot:nth-child(2) { animation-delay: 0.2s; }
+.lagrange-loader-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes lagrange-ink-dot {
+  0%, 100% { opacity: 0.2; transform: scale(0.8); }
+  45% { opacity: 0.9; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lagrange-loader-dot { animation: none; opacity: 0.55; }
+}
+/* ==== END LAGRANGE LOADER ==== */
+
+
+/* ==== LAGRANGE PEN (replaceable) ==== */
+/* Placeholder: a rubric stroke drawn through the old text, the new text revealed left to right in a hand, and an ink
+   nib that follows. Replace with the real pen's styles (see main.js). */
+.lagrange-pen-strike {
+  color: color-mix(in srgb, currentColor 60%, transparent);
+  background-image: linear-gradient(var(--lagrange-rubric), var(--lagrange-rubric));
+  background-repeat: no-repeat;
+  background-position: 0 58%;
+  background-size: 0% 0.085em;
+  animation: lagrange-strike var(--lagrange-strike-ms, 420ms) ease-out forwards;
+}
+@keyframes lagrange-strike {
+  to { background-size: 100% 0.085em; }
+}
+.lagrange-pen-ink {
+  margin-left: 0.3em;
+  font-family: var(--lagrange-hand);
+  font-style: italic;
+  color: var(--lagrange-rubric);
+  clip-path: inset(0 100% 0 0);
+  animation: lagrange-write var(--lagrange-write-ms, 800ms) linear forwards;
+}
+@keyframes lagrange-write {
+  to { clip-path: inset(0 0 0 0); }
+}
+.lagrange-nib {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--layer-tooltip, 70);
+  width: 7px;
+  height: 7px;
+  margin: -6px 0 0 -1px;
+  border-radius: 50% 50% 50% 0;
+  background: var(--lagrange-rubric);
+  pointer-events: none;
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lagrange-pen-strike { animation: none; background-size: 100% 0.085em; }
+  .lagrange-pen-ink { animation: none; clip-path: none; }
+}
+/* ==== END LAGRANGE PEN ==== */

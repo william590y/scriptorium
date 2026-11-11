@@ -1,7 +1,7 @@
 # Third-party components
 
-Scriptorium's own files (the Scriptorium plugin, the `manuscript` snippet apart from the embedded Yinit font, the
-installers and the build tools) are licensed under the GNU General Public License, version 3 or later (see
+Scriptorium's own files (the Scriptorium and Lagrange plugins, the `manuscript` snippet apart from the embedded Yinit
+font, the installers and the build tools) are licensed under the GNU General Public License, version 3 or later (see
 [LICENSE](LICENSE)). The components below keep their own licenses.
 
 ## Included in `vault/` (and so in `Scriptorium.zip` and `Scriptorium-Setup.exe`)

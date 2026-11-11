@@ -18,6 +18,7 @@
 # <https://www.gnu.org/licenses/>.
 
 import hashlib
+import json
 import os
 import sys
 import time
@@ -56,6 +57,21 @@ def vault_files():
     return sorted(files)
 
 
+def check_no_api_keys(files):
+    # Lagrange keeps its API keys in its data.json: the packaged one must hold the defaults, with every key empty, so a
+    # key typed into the development vault can never ship.
+    rel = ".obsidian/plugins/lagrange/data.json"
+    if rel not in files:
+        return
+    try:
+        settings = json.loads((VAULT / rel).read_text(encoding="utf-8"))
+    except ValueError:
+        sys.exit(f"vault/{rel} is not valid JSON")
+    filled = sorted(k for k, v in settings.items() if "key" in k.lower() and v)
+    if filled:
+        sys.exit(f"vault/{rel} holds an API key ({', '.join(filled)}): empty it before packaging")
+
+
 def main():
     out = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_OUT
     files = vault_files()
@@ -63,6 +79,7 @@ def main():
         sys.exit("vault/.obsidian/plugins/longform must not be packaged (Longform is downloaded at install time)")
     if ".obsidian/appearance.json" not in files:
         sys.exit("vault/.obsidian/appearance.json is missing")
+    check_no_api_keys(files)
     date = fixed_date()
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
