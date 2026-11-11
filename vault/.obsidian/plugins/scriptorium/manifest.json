@@ -1,7 +1,7 @@
 {
   "id": "scriptorium",
   "name": "Scriptorium",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "minAppVersion": "1.0.0",
   "description": "Switch between Scriptorium's regular and fancy typography.",
   "author": "William Liaw",
