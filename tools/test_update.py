@@ -162,7 +162,7 @@ def test_not_a_vault(exe, work):
     print("\n== A folder that is not a Scriptorium vault is refused ==")
     folder = work / "notvault"
     folder.mkdir()
-    (folder / "note.md").write_text("Someone else's notes.\n", encoding="utf-8")
+    (folder / "note.md").write_bytes(b"Someone else's notes.\n")
     r = run(exe, "--update-only", str(folder))
     check(r.returncode != 0, "--update-only fails")
     check(snapshot(folder) == {"note.md": b"Someone else's notes.\n"}, "the folder is unchanged")
@@ -178,7 +178,7 @@ def test_install_targets(exe, work):
           "it holds exactly the package")
     other = work / "other"
     other.mkdir()
-    (other / "note.md").write_text("Someone else's notes.\n", encoding="utf-8")
+    (other / "note.md").write_bytes(b"Someone else's notes.\n")
     r = run(exe, "--extract-only", str(other))
     check(r.returncode != 0, "a folder with files in it is refused")
     check(snapshot(other) == {"note.md": b"Someone else's notes.\n"}, "and left unchanged")

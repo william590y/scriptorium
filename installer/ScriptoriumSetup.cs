@@ -1707,9 +1707,17 @@ namespace ScriptoriumSetup
             ResumeLayout(false);
             if (!preview)
             {
+                // The default folder is checked at once (it is local), so a window opened on an existing vault starts in
+                // Update; later edits are checked once typing pauses.
+                try
+                {
+                    string full = Path.GetFullPath(pathBox.Text.Trim());
+                    Vaults.Target t = Vaults.Classify(full);
+                    ShowTarget(t, true, t == Vaults.Target.Vault ? Vaults.VaultVersion(full) : null);
+                }
+                catch { }
                 detect.Tick += (s, e) => Detect();
                 pathBox.TextChanged += (s, e) => { detect.Stop(); detect.Start(); };
-                detect.Start();
             }
         }
 
