@@ -689,6 +689,7 @@ namespace ScriptoriumSetup
         public bool Centered, SmallCaps;
         public int MaxLines;
         public float Leading = 1.36f, Tracking;
+        public float Above = 0.98f, Below = 0.34f;   // room above the first baseline and below the last, in ems
 
         public InkLabel(string text, Font font, Color color, bool centered)
         {
@@ -701,7 +702,7 @@ namespace ScriptoriumSetup
         protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
 
         float LineHeight { get { return (float)Math.Round(Font.Size * Leading); } }
-        float FirstBaseline { get { return (float)Math.Round(Font.Size * 0.98f); } }
+        float FirstBaseline { get { return (float)Math.Round(Font.Size * Above); } }
 
         List<string> Lines(Graphics g, float width)
         {
@@ -721,7 +722,7 @@ namespace ScriptoriumSetup
             using (Graphics g = Lettering.Measure())
             {
                 int n = lines > 0 ? lines : Lines(g, width).Count;
-                return (int)Math.Ceiling(FirstBaseline + (n - 1) * LineHeight + Font.Size * 0.34f);
+                return (int)Math.Ceiling(FirstBaseline + (n - 1) * LineHeight + Font.Size * Below);
             }
         }
 
@@ -1095,7 +1096,7 @@ namespace ScriptoriumSetup
             Font = Typefaces.Make(Typefaces.Text, 16f, FontStyle.Regular);
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-            title = new InkLabel("Scriptorium", Typefaces.Make(Typefaces.Display, 48f, FontStyle.Regular), Ink.Red, true);
+            title = new InkLabel("Scriptorium", Typefaces.Make(Typefaces.Display, 48f, FontStyle.Regular), Ink.Red, true) { Above = 0.86f, Below = 0.27f };
             tagline = new InkLabel("Book-page typography for Obsidian.", Typefaces.Make(Typefaces.Text, 18f, FontStyle.Italic), Ink.Muted, true);
             intro = new InkLabel("This creates a new vault with the Scriptorium configuration and a Lorem\u00A0Ipsum sample note.",
                                  Typefaces.Make(Typefaces.Text, 17f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
@@ -1143,6 +1144,8 @@ namespace ScriptoriumSetup
         // ---------- the page ----------
         const float PageWidth = 600, PageMargin = 40;
         int bottomY;
+        Size pageSize;   // the laid-out page (the client size, unless Windows had to make the window smaller)
+        internal Size PageSize { get { return pageSize; } }
 
         void Place(Control c, float x, ref float y, float width, float after)
         {
@@ -1161,15 +1164,15 @@ namespace ScriptoriumSetup
             try
             {
                 int room = Screen.FromPoint(Cursor.Position).WorkingArea.Height - SizeFromClientSize(Size.Empty).Height;
-                for (int rows = 3; rows >= 2 && ClientSize.Height > room; rows--) LayoutPage(rows);
+                for (int rows = 3; rows >= 2 && PageSize.Height > room; rows--) LayoutPage(rows);
             }
             catch { }
         }
 
         void LayoutPage(int logRows)
         {
-            float s = Ink.S, cw = PageWidth - 2 * PageMargin, y = 8 * s;
-            Place(title, PageMargin, ref y, cw, -8);
+            float s = Ink.S, cw = PageWidth - 2 * PageMargin, y = 12 * s;
+            Place(title, PageMargin, ref y, cw, 0);
             Place(tagline, PageMargin, ref y, cw, 0);
             ornamentY = y + 12 * s; y += 26 * s;
             Place(intro, PageMargin, ref y, cw, 12);
@@ -1195,7 +1198,8 @@ namespace ScriptoriumSetup
             details.SetBounds(Ink.R(PageMargin), (int)Math.Round(y), Ink.R(cw), (int)Math.Round(logRows * details.LineHeight + 6 * s)); y += details.Height + 12 * s;
             bottomY = (int)Math.Round(y);
             LayoutButtons();
-            ClientSize = new Size(Ink.R(PageWidth), bottomY + Ink.R(38) + Ink.R(16));
+            pageSize = new Size(Ink.R(PageWidth), bottomY + Ink.R(38) + Ink.R(16));
+            ClientSize = pageSize;
             if (paper != null) { paper.Dispose(); paper = null; }
             pathBox.BackColor = AveragePaper(pathBox.Bounds);
         }
@@ -1213,7 +1217,7 @@ namespace ScriptoriumSetup
         {
             get
             {
-                Size size = ClientSize;
+                Size size = PageSize;
                 if (paper == null || paper.Size != size) { if (paper != null) paper.Dispose(); paper = Ink.MakePaper(Math.Max(1, size.Width), Math.Max(1, size.Height)); }
                 return paper;
             }
@@ -1275,7 +1279,7 @@ namespace ScriptoriumSetup
             g.PixelOffsetMode = PixelOffsetMode.Half;
             g.DrawImage(Paper, 0, 0, Paper.Width, Paper.Height);
             Ink.Prepare(g);
-            float s = Ink.S, cx = ClientSize.Width / 2f;
+            float s = Ink.S, cx = PageSize.Width / 2f;
 
             // Under the subtitle: a fleuron between two short pen rules.
             using (Font f = Typefaces.Make(Typefaces.Display, 25f, FontStyle.Regular))
@@ -1599,7 +1603,7 @@ namespace ScriptoriumSetup
                 {
                     f.Status("Downloading fonts (" + (i + 1) + " of " + fonts.Length + ") …");
                     if (i == 0) { f.Progress(0, false); }
-                    foreach (double q in new[] { 0.4, 0.8 }) { f.Progress((int)(100.0 * (i + q) / fonts.Length), false); frame(120); }
+                    foreach (double q in new[] { 0.3, 0.65, 1.0 }) { f.Progress((int)(100.0 * (i + q) / fonts.Length), false); frame(110); }
                     f.Log("Installed " + fonts[i].Label);
                 }
                 f.Status("Creating the vault …"); f.Progress(0, true); f.Bar.StopTimer();
@@ -1621,12 +1625,13 @@ namespace ScriptoriumSetup
         // routine; the native text box is printed by Windows itself (WM_PRINT, via DrawToBitmap).
         internal static Bitmap Capture(SetupForm f)
         {
-            var bmp = new Bitmap(f.ClientSize.Width, f.ClientSize.Height, PixelFormat.Format32bppArgb);
+            var bmp = new Bitmap(f.PageSize.Width, f.PageSize.Height, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bmp))
             {
                 f.PaintPage(g);
-                foreach (Control c in f.Controls)
+                for (int i = f.Controls.Count - 1; i >= 0; i--)   // bottom of the z-order first, as Windows paints them
                 {
+                    Control c = f.Controls[i];
                     if (!c.Visible) continue;
                     GraphicsState state = g.Save();
                     g.TranslateTransform(c.Left, c.Top);
