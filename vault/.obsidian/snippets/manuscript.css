@@ -603,3 +603,82 @@ body:where(.scriptorium-fancy).theme-dark {
   font-family: var(--manuscript-display);
   font-weight: 500;
 }
+
+
+/* ---------- Code on scrolls ----------
+   Code blocks are set on a parchment scroll: a sheet shaded toward its edges, with a rolled end above and below
+   that runs past the sheet and finishes in turned wooden knobs. Both modes, light and dark; Reading view, Live
+   Preview and PDF export. Delete this block to keep the theme's plain code blocks. */
+body.theme-light {
+  --scroll-sheet: #f1e7d0;
+  --scroll-sheet-edge: #e2d3b2;
+  --scroll-roll-hi: #fbf4e2;
+  --scroll-roll: #dccaa3;
+  --scroll-roll-lo: #a88f62;
+  --scroll-knob: #6b4423;
+  --scroll-knob-hi: #a8754a;
+  --scroll-shadow: rgba(60, 40, 15, 0.22);
+}
+body.theme-dark {
+  --scroll-sheet: #2b2620;
+  --scroll-sheet-edge: #221d18;
+  --scroll-roll-hi: #5c5040;
+  --scroll-roll: #463c30;
+  --scroll-roll-lo: #2a231c;
+  --scroll-knob: #3e2815;
+  --scroll-knob-hi: #7a5534;
+  --scroll-shadow: rgba(0, 0, 0, 0.45);
+}
+body.theme-light, body.theme-dark {
+  --code-background: var(--scroll-sheet);
+  --scroll-rod: 0.92em;   /* the rolled end's thickness */
+}
+.markdown-rendered .el-pre,
+.markdown-rendered > pre {
+  position: relative;
+  clear: both;              /* never beside a drop cap */
+  padding-block: calc(var(--scroll-rod) * 0.75);
+}
+.markdown-rendered pre {
+  background:
+    linear-gradient(to right, var(--scroll-sheet-edge), var(--scroll-sheet) 7%, var(--scroll-sheet) 93%, var(--scroll-sheet-edge));
+  border: none;
+  border-radius: 0;
+  box-shadow: inset 0 11px 9px -9px var(--scroll-shadow), inset 0 -11px 9px -9px var(--scroll-shadow);
+  margin: 0 1em;
+  padding: 1.15em 1.35em;
+}
+.markdown-rendered .el-pre::before,
+.markdown-rendered .el-pre::after,
+.markdown-source-view.mod-cm6 .HyperMD-codeblock-begin::before,
+.markdown-source-view.mod-cm6 .HyperMD-codeblock-end::after {
+  content: "";
+  position: absolute;
+  left: 0.25em;
+  right: 0.25em;
+  height: var(--scroll-rod);
+  border-radius: calc(var(--scroll-rod) / 2);
+  background:
+    radial-gradient(circle at calc(var(--scroll-rod) / 2) 45%, var(--scroll-knob-hi) 0 18%, var(--scroll-knob) 24% 48%, transparent 52%),
+    radial-gradient(circle at calc(100% - var(--scroll-rod) / 2) 45%, var(--scroll-knob-hi) 0 18%, var(--scroll-knob) 24% 48%, transparent 52%),
+    linear-gradient(to bottom, var(--scroll-roll-hi), var(--scroll-roll) 48%, var(--scroll-roll-lo));
+  background-size: var(--scroll-rod) 100%, var(--scroll-rod) 100%, calc(100% - 2 * var(--scroll-rod) + 2px) 100%;
+  background-position: left center, right center, center;
+  background-repeat: no-repeat;
+  box-shadow: 0 2px 3px -1px var(--scroll-shadow);
+  pointer-events: none;
+  z-index: 1;
+}
+.markdown-rendered .el-pre::before { top: calc(var(--scroll-rod) * 0.25); }
+.markdown-rendered .el-pre::after { bottom: calc(var(--scroll-rod) * 0.25); }
+/* Live Preview: the fence lines carry the rolled ends; the lines between are the sheet */
+.markdown-source-view.mod-cm6 .HyperMD-codeblock {
+  background: linear-gradient(to right, var(--scroll-sheet-edge), var(--scroll-sheet) 7%, var(--scroll-sheet) 93%, var(--scroll-sheet-edge)) !important;
+}
+.markdown-source-view.mod-cm6 .HyperMD-codeblock-begin { position: relative; padding-top: calc(var(--scroll-rod) * 0.9) !important; }
+.markdown-source-view.mod-cm6 .HyperMD-codeblock-end { position: relative; padding-bottom: calc(var(--scroll-rod) * 0.9) !important; }
+.markdown-source-view.mod-cm6 .HyperMD-codeblock-begin::before { top: calc(var(--scroll-rod) * -0.35); left: -0.6em; right: -0.6em; }
+.markdown-source-view.mod-cm6 .HyperMD-codeblock-end::after { bottom: calc(var(--scroll-rod) * -0.35); left: -0.6em; right: -0.6em; }
+@media print {
+  .markdown-rendered pre { box-shadow: none; }
+}
