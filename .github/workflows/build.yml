@@ -74,6 +74,10 @@ jobs:
           if ($n -ne $files.Count) { throw "Expected $($files.Count) files in the installed vault, found $n" }
           Write-Host "OK: $n files, identical to vault/"
 
+      - name: Test updating a vault in place
+        shell: pwsh
+        run: python tools/test_update.py dist/Scriptorium-Setup.exe
+
       - name: Render the window (screenshots for review)
         shell: pwsh
         timeout-minutes: 5

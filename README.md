@@ -41,9 +41,19 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
 
 - **Windows:** download `Scriptorium-Setup.exe` from the
   [latest release](https://github.com/william590y/scriptorium/releases/latest), open it, choose the vault folder and
-  click **Install**. It creates a new vault folder (an existing folder is never changed) and, if you tick them,
-  installs Obsidian, EB Garamond and Cormorant Garamond for the current user, and downloads the Longform plugin. No
-  administrator rights are needed.
+  click **Install**. It creates a new vault folder (or fills an empty one; any other existing folder is never changed)
+  and, if you tick them, installs Obsidian, EB Garamond and Cormorant Garamond for the current user, and downloads the
+  Longform plugin. No administrator rights are needed.
+- **Updating (Windows):** open a newer `Scriptorium-Setup.exe` and choose your vault folder (by default
+  `Documents\Scriptorium`). When the folder is a Scriptorium vault, the button reads **Update** and the window says which
+  version is in it. Update replaces Scriptorium's own files with the new ones: the `manuscript` snippet, the code of the
+  Scriptorium, Manuscriptum and Typewriter Mode plugins (and Longform's, if ticked), the Typewriter theme and the vault's
+  `README.md`. It keeps everything of yours: your notes, the plugins' settings (`data.json`, such as Fancy mode),
+  Obsidian's settings and workspace, and the Lorem Ipsum note; files of the configuration that are missing are added
+  back, and nothing is deleted. It turns the `manuscript` snippet and Scriptorium's community plugins back on if they
+  were off, leaving your own snippets and plugins as they are. Every file it replaces is first copied to
+  `.obsidian\scriptorium-backup-<date>-<time>\`, and if anything fails half-way the vault is put back as it was.
+  Restart Obsidian (or reload the vault) afterwards.
 - **Script installers:** `installers/Install-Scriptorium-Windows.cmd`, `Install-Scriptorium-macOS.command` and
   `Install-Scriptorium-Linux.sh` do the same from a terminal; they download the configuration from
   williamliaw.com, pinned by SHA-256.
@@ -80,11 +90,16 @@ To check a build without installing anything:
 mono dist/Scriptorium-Setup.exe --extract-only /tmp/scriptorium-check/vault   # on Windows, run the exe directly
 ```
 
-This unpacks the embedded vault into a new folder and exits; it downloads nothing.
+This unpacks the embedded vault into a new (or empty) folder and exits; it downloads nothing. Likewise,
+`Scriptorium-Setup.exe --update-only <vault>` updates an existing Scriptorium vault in place, as **Update** does, but
+without Longform and without downloading anything. `python3 tools/test_update.py dist/Scriptorium-Setup.exe` tests it
+(edited notes, settings and snippets kept, Scriptorium's files replaced and backed up, settings merged, unreadable JSON
+left alone, other folders refused, a failure half-way undone); CI runs it on Windows, and it runs under Mono elsewhere
+(`MONO=<prefix>`).
 
 To look at the window without installing anything, run `Scriptorium-Setup.exe --render screenshots` on Windows: it
-draws the window offscreen in each of its states (ready, downloading, installing, done, failed, and the frames of a whole
-install) and saves them as PNGs. CI does this on every build and uploads them as the `screenshots` artifact.
+draws the window offscreen in each of its states (ready, downloading, installing, done, failed, updating a vault, and the
+frames of a whole install) and saves them as PNGs. CI does this on every build and uploads them as the `screenshots` artifact.
 
 ## Repository layout
 
@@ -92,7 +107,7 @@ install) and saves them as PNGs. CI does this on every build and uploads them as
 vault/        the vault template (the Scriptorium plugin and snippet live here)
 installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico, and fonts/ (the window's type)
 installers/   the script installers
-tools/        build_zip.py, build_exe.sh, build_fonts.py
+tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py
 ```
 
 ## Third-party components
@@ -150,7 +165,8 @@ telemetry, analytics or update check. The Scriptorium plugin makes no network re
 Scriptorium Setup does not register itself as an installed program; everything it adds can be removed by hand:
 
 1. **The vault:** delete the vault folder you chose (by default `Documents\Scriptorium`). In Obsidian, remove it from
-   the vault list with **Open another vault → … → Remove from list**.
+   the vault list with **Open another vault → … → Remove from list**. (To keep the vault but drop the copies an update
+   made, delete its `.obsidian\scriptorium-backup-…` folders.)
 2. **The fonts:** open **Settings → Personalization → Fonts**, select EB Garamond and Cormorant Garamond and choose
    **Uninstall**. They were installed for the current user only, in `%LOCALAPPDATA%\Microsoft\Windows\Fonts`.
 3. **Obsidian:** uninstall it in **Windows Settings → Apps → Installed apps**.
