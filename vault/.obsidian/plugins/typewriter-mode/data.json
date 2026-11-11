@@ -1,0 +1,69 @@
+{
+  "currentLine": {
+    "currentLineHighlightColor-dark": "#444444",
+    "currentLineHighlightColor-light": "#dddddd",
+    "currentLineHighlightStyle": "box",
+    "currentLineHighlightUnderlineThickness": 1,
+    "fadeLinesIntensity": 0.5,
+    "isFadeLinesEnabled": false,
+    "isFadeLinesOnlyInWritingFocusModeEnabled": false,
+    "isHighlightCurrentLineEnabled": true,
+    "isHighlightCurrentLineOnlyInFocusedEditorEnabled": false,
+    "isHighlightCurrentLineOnlyInWritingFocusModeEnabled": false,
+    "isPauseCurrentLineHighlightWhileScrollingEnabled": false,
+    "isPauseCurrentLineHighlightWhileSelectingEnabled": false
+  },
+  "dimming": {
+    "dimmedOpacity": 0.25,
+    "dimUnfocusedEditorsBehavior": "dim",
+    "dimUnfocusedMode": "paragraphs",
+    "isDimHighlightListParentEnabled": false,
+    "isDimTableAsOneEnabled": true,
+    "isDimUnfocusedEnabled": false,
+    "isDimUnfocusedOnlyInWritingFocusModeEnabled": false,
+    "isPauseDimUnfocusedWhileScrollingEnabled": true,
+    "isPauseDimUnfocusedWhileSelectingEnabled": true
+  },
+  "general": {
+    "disabledFilePaths": [],
+    "enabledFilePaths": [],
+    "enabledPlatforms": "both",
+    "isAnnounceUpdatesEnabled": true,
+    "isOnlyActivateAfterFirstInteractionEnabled": false,
+    "isPluginActivated": true,
+    "version": "1.6.1"
+  },
+  "hemingwayMode": {
+    "hemingwayModeStatusBarText": null,
+    "isAllowBackspaceInHemingwayModeEnabled": false,
+    "isHemingwayModeEnabled": false,
+    "isHemingwayModeOnlyInWritingFocusModeEnabled": false,
+    "isShowHemingwayModeStatusBarEnabled": true
+  },
+  "keepLinesAboveAndBelow": {
+    "isKeepLinesAboveAndBelowEnabled": false,
+    "linesAboveAndBelow": 5
+  },
+  "maxChars": {
+    "isMaxCharsPerLineEnabled": false,
+    "maxCharsPerLine": 64
+  },
+  "restoreCursorPosition": {
+    "cursorPositions": {},
+    "isRestoreCursorPositionEnabled": false
+  },
+  "typewriter": {
+    "isOnlyMaintainTypewriterOffsetWhenReachedEnabled": false,
+    "isTypewriterOnlyUseCommandsEnabled": false,
+    "isTypewriterScrollEnabled": true,
+    "typewriterOffset": 0.5
+  },
+  "writingFocus": {
+    "doesWritingFocusShowHeader": false,
+    "doesWritingFocusShowStatusBar": false,
+    "doesWritingFocusShowVignette": true,
+    "isWritingFocusFullscreen": true,
+    "writingFocusFontSize": 0,
+    "writingFocusVignetteStyle": "box"
+  }
+}

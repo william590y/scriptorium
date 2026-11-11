@@ -1,0 +1,152 @@
+# Builds Scriptorium.zip (from vault/) and Scriptorium-Setup.exe (from installer/) on GitHub-hosted runners.
+# Every push and pull request uploads both as a workflow artifact; a tag v* also publishes them as a GitHub release.
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the installer (Windows)
+    runs-on: windows-latest
+    outputs:
+      zip_sha256: ${{ steps.hashes.outputs.zip }}
+      exe_sha256: ${{ steps.hashes.outputs.exe }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build Scriptorium.zip from vault/
+        shell: pwsh
+        run: python tools/build_zip.py dist/Scriptorium.zip
+
+      - name: Build Scriptorium-Setup.exe (Roslyn csc, .NET Framework 4.8)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $csc = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\Roslyn\csc.exe' | Select-Object -First 1
+          if (-not $csc) { throw 'Roslyn csc.exe was not found in Visual Studio Build Tools' }
+          Write-Host "csc: $csc"
+          & $csc -version
+          $api = "${env:ProgramFiles(x86)}\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8"
+          if (-not (Test-Path "$api\mscorlib.dll")) { throw "No .NET Framework 4.8 reference assemblies in $api" }
+          $refs = 'mscorlib', 'System', 'System.Core', 'System.Drawing', 'System.Windows.Forms',
+                  'System.IO.Compression', 'System.IO.Compression.FileSystem' | ForEach-Object { "-r:$api\$_.dll" }
+          # Same switches as tools/build_exe.sh; warnings fail the build.
+          & $csc -nologo -noconfig -nostdlib -target:winexe -platform:anycpu -optimize+ -deterministic -codepage:65001 `
+            -warn:4 -warnaserror+ @refs `
+            -win32icon:installer/scriptorium.ico -win32manifest:installer/app.manifest `
+            -resource:dist/Scriptorium.zip,Scriptorium.zip `
+            -out:dist/Scriptorium-Setup.exe installer/ScriptoriumSetup.cs
+          if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
+
+      - name: Check that the installer unpacks exactly vault/
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:RUNNER_TEMP 'scriptorium-check\vault'
+          $p = Start-Process -FilePath 'dist\Scriptorium-Setup.exe' -ArgumentList '--extract-only', $dest -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "--extract-only failed with exit code $($p.ExitCode)" }
+          if (Test-Path -LiteralPath (Join-Path $dest '.obsidian\plugins\longform')) { throw 'Longform must not be bundled' }
+          $src = (Resolve-Path vault).Path
+          $files = @(Get-ChildItem -LiteralPath $src -Recurse -File -Force)
+          foreach ($f in $files) {
+            $rel = $f.FullName.Substring($src.Length + 1)
+            $copy = Join-Path $dest $rel
+            if (-not (Test-Path -LiteralPath $copy)) { throw "Missing from the installed vault: $rel" }
+            if ((Get-FileHash -LiteralPath $copy).Hash -ne (Get-FileHash -LiteralPath $f.FullName).Hash) { throw "Differs: $rel" }
+          }
+          $n = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force).Count
+          if ($n -ne $files.Count) { throw "Expected $($files.Count) files in the installed vault, found $n" }
+          Write-Host "OK: $n files, identical to vault/"
+
+      - name: Record SHA-256
+        id: hashes
+        shell: pwsh
+        run: |
+          $zip = (Get-FileHash dist\Scriptorium.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exe = (Get-FileHash dist\Scriptorium-Setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          "| File | SHA-256 |`n|---|---|`n| Scriptorium-Setup.exe | ``$exe`` |`n| Scriptorium.zip | ``$zip`` |" >> $env:GITHUB_STEP_SUMMARY
+          Write-Host "$exe  Scriptorium-Setup.exe"
+          Write-Host "$zip  Scriptorium.zip"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Scriptorium
+          path: |
+            dist/Scriptorium-Setup.exe
+            dist/Scriptorium.zip
+          if-no-files-found: error
+
+  zip-reproducible:
+    name: Rebuild Scriptorium.zip on Linux and compare
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rebuild and compare
+        env:
+          WINDOWS_ZIP_SHA256: ${{ needs.build.outputs.zip_sha256 }}
+        run: |
+          python3 tools/build_zip.py dist/Scriptorium.zip
+          echo "$WINDOWS_ZIP_SHA256  dist/Scriptorium.zip" | sha256sum -c -
+
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, zip-reproducible]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Scriptorium
+          path: dist
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXE_SHA256: ${{ needs.build.outputs.exe_sha256 }}
+          ZIP_SHA256: ${{ needs.build.outputs.zip_sha256 }}
+        run: |
+          cd dist
+          echo "$EXE_SHA256  Scriptorium-Setup.exe" > SHA256SUMS
+          echo "$ZIP_SHA256  Scriptorium.zip" >> SHA256SUMS
+          sha256sum -c SHA256SUMS
+          {
+            echo "Scriptorium ${TAG#v}: book-page typography for Obsidian."
+            echo
+            echo "- **Scriptorium-Setup.exe**: the Windows installer (.NET Framework 4.8, no administrator rights needed). It creates a new vault and, if you tick them, installs Obsidian, the EB Garamond and Cormorant Garamond fonts, and the Longform plugin from their official sources, each pinned by SHA-256."
+            echo "- **Scriptorium.zip**: the vault template for manual setup."
+            echo
+            echo "Both files were built from this tag by GitHub Actions: $RUN_URL"
+            echo
+            echo "**Code signing is pending.** This installer is not signed yet, so Windows SmartScreen may say it protected your PC; choose **More info**, then **Run anyway**."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" Scriptorium-Setup.exe Scriptorium.zip --repo "$REPO" --title "Scriptorium $TAG" \
+            --notes-file notes.md --verify-tag

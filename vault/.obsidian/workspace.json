@@ -1,0 +1,31 @@
+{
+  "main": {
+    "id": "sample-main",
+    "type": "split",
+    "direction": "vertical",
+    "children": [
+      {
+        "id": "sample-tabs",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "sample-note",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Lorem Ipsum.md",
+                "mode": "preview",
+                "source": false
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "active": "sample-note",
+  "lastOpenFiles": [
+    "Lorem Ipsum.md"
+  ]
+}

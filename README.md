@@ -1,0 +1,161 @@
+# Scriptorium
+
+A fancy and sophisticated Obsidian configuration for the typographically inclined.
+
+Scriptorium gives [Obsidian](https://obsidian.md) book-page typography: bookish serif type, warm paper, centered
+small-cap headings, italic subtitles, ornamental Yinit drop caps and floral scene breaks. It is made of:
+
+- **the vault template** (`vault/`): the Typewriter theme, the `manuscript` CSS snippet, writing plugins and a
+  Lorem Ipsum sample note;
+- **the Scriptorium plugin** (`vault/.obsidian/plugins/scriptorium`), which switches between the regular and the
+  Fancy typography;
+- **Scriptorium Setup** (`installer/`), a small Windows installer that creates a new vault from the template and, if
+  you tick them, installs Obsidian, the fonts and the Longform plugin;
+- **script installers** for Windows, macOS and Linux (`installers/`).
+
+Screenshots of both modes: <https://williamliaw.com/scriptorium>
+
+## Fancy mode
+
+Fancy mode starts **off**, with centered small-cap section headings and bordered quotations. Turn it on for quiet
+italic quotations and justified openings. Both modes open chapters with an ornamental Yinit initial and use the same
+1.45 line spacing.
+
+In Obsidian, go to **Settings → Scriptorium → Fancy mode**. You can also click the **feather icon**, click
+**Fancy mode: on/off** in the status bar, or run **Scriptorium: Toggle fancy mode** from the command palette. Your
+choice is remembered for that vault.
+
+## Writing conventions
+
+- The filename supplies the title.
+- `###### Subtitle` creates a centered italic subtitle.
+- `## Chapter heading` creates a centered small-cap chapter heading; `### Section heading` a smaller one.
+- `> Quotation` creates an italic quotation.
+- `---` creates an ornamental scene break.
+- Images are centred. Put `left`, `right` or `center` before the size to place one: `![[image.png|left|300]]`,
+  `![[image.png|right|240]]`, `![[image.png|center]]`. Left and right images float in Reading view.
+
+## Install
+
+See <https://williamliaw.com/scriptorium> for the downloads and instructions.
+
+- **Windows:** download `Scriptorium-Setup.exe` from the
+  [latest release](https://github.com/william590y/scriptorium/releases/latest), open it, choose the vault folder and
+  click **Install**. It creates a new vault folder (an existing folder is never changed) and, if you tick them,
+  installs Obsidian, EB Garamond and Cormorant Garamond for the current user, and downloads the Longform plugin. No
+  administrator rights are needed.
+- **Script installers:** `installers/Install-Scriptorium-Windows.cmd`, `Install-Scriptorium-macOS.command` and
+  `Install-Scriptorium-Linux.sh` do the same from a terminal; they download the configuration from
+  williamliaw.com, pinned by SHA-256.
+- **Manual:** extract `Scriptorium.zip` from the latest release, open the folder as a vault in Obsidian, install
+  [EB Garamond](https://fonts.google.com/specimen/EB+Garamond) and
+  [Cormorant Garamond](https://fonts.google.com/specimen/Cormorant+Garamond), then open **Lorem Ipsum** in Reading
+  view. Enable community plugins to use the Fancy mode switch. Longform is enabled in the configuration but not
+  included; install it from **Settings → Community plugins**.
+
+## Building
+
+Everything is built from this repository; the release files are built by GitHub Actions
+(`.github/workflows/build.yml`) on GitHub-hosted runners.
+
+| Output | Command | Needs |
+|---|---|---|
+| `dist/Scriptorium.zip` | `python3 tools/build_zip.py` | Python 3.9 or later |
+| `dist/Scriptorium-Setup.exe` | `tools/build_exe.sh` (rebuilds the zip first) | [Mono](https://www.mono-project.com) (`csc` on `PATH`, or `MONO=<prefix>`) |
+
+The zip is deterministic: sorted entries, one fixed timestamp (or `SOURCE_DATE_EPOCH`) and fixed permissions, so the
+same `vault/` gives the same bytes. CI rebuilds it on Linux and checks that it matches the Windows build. The installer
+embeds the zip as the resource `Scriptorium.zip`. On Windows, CI compiles it with the Roslyn `csc.exe` from Visual
+Studio Build Tools against the .NET Framework 4.8 reference assemblies, with the same switches as `build_exe.sh`.
+
+To check a build without installing anything:
+
+```sh
+mono dist/Scriptorium-Setup.exe --extract-only /tmp/scriptorium-check/vault   # on Windows, run the exe directly
+```
+
+This unpacks the embedded vault into a new folder and exits; it downloads nothing.
+
+## Repository layout
+
+```
+vault/        the vault template (the Scriptorium plugin and snippet live here)
+installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico
+installers/   the script installers
+tools/        build_zip.py, build_exe.sh
+```
+
+## Third-party components
+
+| Component | Where | Author | License |
+|---|---|---|---|
+| [Typewriter theme](https://github.com/crashmoney/obsidian-typewriter) 2.3.4 | `vault/.obsidian/themes/Typewriter` | crashmoney | GPL-3.0 |
+| [Manuscriptum](https://github.com/sgranade/manuscriptum) 1.0.2 | `vault/.obsidian/plugins/manuscriptum` | Stephen Granade | MIT |
+| [Typewriter Mode](https://github.com/davisriedel/obsidian-typewriter-mode) 1.6.1 | `vault/.obsidian/plugins/typewriter-mode` | Davis Riedel | MIT |
+| Yinit initials (from [yinit-otf](https://ctan.org/pkg/yinit-otf)) | embedded in `vault/.obsidian/snippets/manuscript.css` | Yannis Haralambous | Public domain |
+
+Each license file sits next to its component. These are not part of this repository and not included in the
+installer; they are downloaded from their official sources only when you tick them:
+
+| Component | Source | License |
+|---|---|---|
+| [Longform](https://github.com/kevboh/longform) 2.1.0 | its official GitHub release | its own license (see its repository) |
+| [Obsidian](https://obsidian.md) 1.15.0 | its official GitHub release | proprietary (free to use) |
+| [EB Garamond](https://github.com/google/fonts/tree/main/ofl/ebgaramond), [Cormorant Garamond](https://github.com/google/fonts/tree/main/ofl/cormorantgaramond) | Google Fonts' GitHub repository | SIL Open Font License 1.1 |
+
+See [THIRD_PARTY.md](THIRD_PARTY.md) for details.
+
+## Code signing policy
+
+*Applies once the project's application to SignPath Foundation is approved; until then, releases are unsigned.*
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+Team roles:
+
+- Committers and reviewers: William Liaw ([@william590y](https://github.com/william590y))
+- Approvers: William Liaw ([@william590y](https://github.com/william590y))
+
+Only files built by this repository's GitHub Actions workflow from this repository's source are signed.
+
+## Privacy policy
+
+This program will not transfer any information to other networked systems unless specifically requested by the user
+or the person installing or operating it.
+
+Scriptorium Setup downloads the following, and only when you tick the matching option in its window:
+
+- Obsidian's official installer, from Obsidian's GitHub releases (`github.com/obsidianmd/obsidian-releases`);
+- the EB Garamond and Cormorant Garamond fonts, from Google Fonts' GitHub repository
+  (`raw.githubusercontent.com/google/fonts`);
+- the Longform plugin's official release, from its GitHub releases (`github.com/kevboh/longform`).
+
+Each download is verified against a SHA-256 hash pinned in the installer. Nothing is uploaded, and there is no
+telemetry, analytics or update check. The Scriptorium plugin makes no network requests.
+
+## Uninstalling
+
+Scriptorium Setup does not register itself as an installed program; everything it adds can be removed by hand:
+
+1. **The vault:** delete the vault folder you chose (by default `Documents\Scriptorium`). In Obsidian, remove it from
+   the vault list with **Open another vault → … → Remove from list**.
+2. **The fonts:** open **Settings → Personalization → Fonts**, select EB Garamond and Cormorant Garamond and choose
+   **Uninstall**. They were installed for the current user only, in `%LOCALAPPDATA%\Microsoft\Windows\Fonts`.
+3. **Obsidian:** uninstall it in **Windows Settings → Apps → Installed apps**.
+
+## License
+
+Copyright (C) 2026 William Liaw
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with this program. If not, see
+<https://www.gnu.org/licenses/>. The full text is in [LICENSE](LICENSE).
+
+Third-party components keep their own licenses (above).
