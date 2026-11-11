@@ -394,9 +394,16 @@ namespace ScriptoriumSetup
 
         public static string UpdatedMessage(string vault, Report r)
         {
-            return "Updated Scriptorium in " + vault + " (from " + (r.From ?? "an unknown version") + " to " + (r.To ?? "an unknown version") +
-                   "). Restart Obsidian or reload the vault to load it.";
+            return "Updated Scriptorium in " + vault + " (" + FromTo(r) + "). Restart Obsidian or reload the vault to load it.";
         }
+
+        // The same, shorter, for the status line (the path is in the folder box just above it).
+        public static string UpdatedStatus(Report r)
+        {
+            return "Done. Updated Scriptorium " + FromTo(r) + ". Restart Obsidian or reload the vault to load it.";
+        }
+
+        static string FromTo(Report r) { return "from " + (r.From ?? "an unknown version") + " to " + (r.To ?? "an unknown version"); }
 
         static Rule RuleFor(string rel)
         {
@@ -1676,7 +1683,7 @@ namespace ScriptoriumSetup
             intro = new InkLabel("This creates a new vault with the Scriptorium configuration and a Lorem\u00A0Ipsum sample note.",
                                  Typefaces.Make(Typefaces.Text, 17f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
             folderLabel = new InkLabel("New vault folder", Typefaces.Make(Typefaces.Semi, 16f, FontStyle.Regular), Ink.Black, false) { SmallCaps = true, Tracking = 0.06f };
-            folderHint = new InkLabel("A new or empty folder, or a Scriptorium vault to update. Other folders are never changed.",
+            folderHint = new InkLabel("A new or empty folder, or a Scriptorium vault to update. Other folders are left alone.",
                                       Typefaces.Make(Typefaces.Text, 16f, FontStyle.Italic), Ink.Muted, false);
             status = new InkLabel("Ready.", Typefaces.Make(Typefaces.Text, 16f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2, Leading = 1.3f };
 
@@ -2102,8 +2109,8 @@ namespace ScriptoriumSetup
             Vaults.Report report = Vaults.Update(dest, longformFiles, line => Log(line));
             Progress(100, false);
             installedPath = dest;
-            string message = Vaults.UpdatedMessage(dest, report);
-            UI(() => UpdateDone(message));
+            string message = Vaults.UpdatedMessage(dest, report), done = Vaults.UpdatedStatus(report);
+            UI(() => UpdateDone(done));
             Log(message);
             if (open)
             {
@@ -2354,7 +2361,7 @@ namespace ScriptoriumSetup
                 f.Log("Kept your notes and settings");
                 string message = Vaults.UpdatedMessage(vault, report);
                 f.Progress(100, false);
-                f.UpdateDone(message);
+                f.UpdateDone(Vaults.UpdatedStatus(report));
                 f.Log(message);
                 Save(f, dir, "12-update-done.png");
             }
