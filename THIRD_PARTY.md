@@ -1,10 +1,18 @@
 # Third-party components
 
-Scriptorium's own files (the Scriptorium plugin, the `manuscript` snippet apart from the embedded Yinit, Goudy Initialen
-and Scriptorium Mono fonts, the installers, the build tools and the tests) are licensed under the GNU General Public
-License, version 3 or later (see [LICENSE](LICENSE)). The components below keep their own licenses.
+Scriptorium's own files (the Scriptorium and Lagrange plugins apart from the font embedded in Lagrange's `styles.css`,
+the `manuscript` snippet apart from the embedded Yinit, Goudy Initialen and Scriptorium Mono fonts, the installers, the
+build tools and the tests) are licensed under the GNU General Public License, version 3 or later (see
+[LICENSE](LICENSE)). The components below keep their own licenses.
 
 ## Included in `vault/` (and so in `Scriptorium.zip` and `Scriptorium-Setup.exe`)
+
+### Pinyon Script (embedded in Lagrange's styles as "Lagrange Hand")
+
+- Path: `vault/.obsidian/plugins/lagrange/styles.css` (a base64 WOFF2, Latin subset made with fontTools `pyftsubset`)
+- Source: <https://github.com/google/fonts/tree/main/ofl/pinyonscript> (upstream <https://github.com/SorkinType/Pinyon>)
+- Authors: The Pinyon Project Authors
+- License: SIL Open Font License 1.1: `vault/.obsidian/plugins/lagrange/LagrangeHand-OFL.txt`
 
 ### Typewriter theme 2.3.4
 
