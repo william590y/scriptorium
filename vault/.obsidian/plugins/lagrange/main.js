@@ -1714,9 +1714,15 @@ function createPen(app, settings) {
       const k = 1 / speed;
       install(view);
       view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'center' }) });
-      await nextFrame(win);
-      await nextFrame(win);
-      const rects = rangeRects(view, from, Math.max(from, to));
+      // Wait for the text to stop moving (Typewriter Mode and smooth scrolling keep it moving for a few frames).
+      let rects = [], prev = null, steady = 0;
+      for (let i = 0; i < 90 && steady < 4; i++) {
+        await nextFrame(win);
+        rects = rangeRects(view, from, Math.max(from, to));
+        const top = rects.length ? rects[0].top : null;
+        steady = prev !== null && top !== null && Math.abs(top - prev) < 0.5 ? steady + 1 : 0;
+        prev = top;
+      }
       if (still || !rects.length) {
         if (to > from) {
           view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(from, to)])) });
