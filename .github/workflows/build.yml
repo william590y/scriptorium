@@ -47,6 +47,10 @@ jobs:
             -warn:4 -warnaserror+ @refs `
             -win32icon:installer/scriptorium.ico -win32manifest:installer/app.manifest `
             -resource:dist/Scriptorium.zip,Scriptorium.zip `
+            -resource:installer/fonts/SetupText-Regular.ttf,SetupText-Regular.ttf `
+            -resource:installer/fonts/SetupText-Italic.ttf,SetupText-Italic.ttf `
+            -resource:installer/fonts/SetupText-SemiBold.ttf,SetupText-SemiBold.ttf `
+            -resource:installer/fonts/SetupDisplay-SemiBold.ttf,SetupDisplay-SemiBold.ttf `
             -out:dist/Scriptorium-Setup.exe installer/ScriptoriumSetup.cs
           if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 
@@ -69,6 +73,22 @@ jobs:
           $n = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force).Count
           if ($n -ne $files.Count) { throw "Expected $($files.Count) files in the installed vault, found $n" }
           Write-Host "OK: $n files, identical to vault/"
+
+      - name: Render the window (screenshots for review)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = Start-Process -FilePath 'dist\Scriptorium-Setup.exe' -ArgumentList '--render', 'screenshots' -Wait -PassThru
+          if (Test-Path screenshots\render.log) { Get-Content screenshots\render.log }
+          if ($p.ExitCode -ne 0) { throw "--render failed with exit code $($p.ExitCode)" }
+
+      - name: Upload the screenshots
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: error
 
       - name: Record SHA-256
         id: hashes

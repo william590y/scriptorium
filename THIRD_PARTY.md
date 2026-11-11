@@ -35,10 +35,28 @@ installers and the build tools) are licensed under the GNU General Public Licens
   Yannis Haralambous' METAFONT yinit, converted to WOFF2
 - License: public domain ("The copyright is (C) Yannis Haralambous, 1994, Public Domain.")
 
+## Included in `installer/fonts/` (and so in `Scriptorium-Setup.exe`)
+
+### EB Garamond and Cormorant Garamond (subsets for the installer's window)
+
+- Path: `installer/fonts/SetupText-Regular.ttf`, `SetupText-Italic.ttf`, `SetupText-SemiBold.ttf` (EB Garamond) and
+  `SetupDisplay-SemiBold.ttf` (Cormorant Garamond)
+- Source: the variable fonts `EBGaramond[wght].ttf`, `EBGaramond-Italic[wght].ttf` and `CormorantGaramond[wght].ttf`
+  from Google Fonts' repository, <https://github.com/google/fonts> (commit `5bb28733cec313b63fbd415b574b5ae35c8aa8b8`),
+  the same files, pinned by the same SHA-256, that Scriptorium Setup downloads
+- Modified by `tools/build_fonts.py`: static instances (weights 400 and 600) made with fontTools, subset to Latin and
+  punctuation, old-style figures and small capitals moved into the character map, OpenType layout tables removed, and
+  renamed to private family names (`ScrSetup EB Garamond`, `ScrSetup EB Garamond SemiBold`, `ScrSetup Cormorant
+  SemiBold`). The copyright and license name records are kept.
+- Use: Scriptorium Setup loads them privately to draw its own window; they are never installed on the system.
+- Copyright 2017 The EB Garamond Project Authors (https://github.com/octaviopardo/EBGaramond12); Copyright 2015 The
+  Cormorant Project Authors (github.com/CatharsisFonts/Cormorant)
+- License: SIL Open Font License 1.1: `installer/fonts/OFL-EBGaramond.txt`, `installer/fonts/OFL-CormorantGaramond.txt`
+
 ## Not included: downloaded at install time
 
 Scriptorium Setup downloads these from their official sources, each pinned by SHA-256, only when the matching option
-is ticked. They are not part of this repository, the zip or the installer.
+is ticked. They are not part of this repository, the zip or the installer (apart from the window's font subsets above).
 
 ### Longform 2.1.0
 

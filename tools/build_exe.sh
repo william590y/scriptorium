@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Builds dist/Scriptorium-Setup.exe (Windows, .NET Framework 4.8) with Mono's csc on Linux or macOS.
-# The exe embeds dist/Scriptorium.zip, which this script rebuilds from vault/ first (tools/build_zip.py).
+# The exe embeds dist/Scriptorium.zip, which this script rebuilds from vault/ first (tools/build_zip.py), and the fonts it
+# draws its window with (installer/fonts/*.ttf, made by tools/build_fonts.py and committed).
 # The release build is made on Windows by .github/workflows/build.yml with the same compiler switches.
 #
 # Usage: tools/build_exe.sh                     (uses the csc on PATH and the Mono installation it belongs to)
 #        MONO=/path/to/mono/prefix tools/build_exe.sh
 # Check: mono dist/Scriptorium-Setup.exe --extract-only /tmp/scriptorium-test/vault
+# Look:  Scriptorium-Setup.exe --render screenshots   (Windows: saves PNGs of the window in its states; installs nothing)
 #
 # Copyright (C) 2026 William Liaw
 #
@@ -39,6 +41,10 @@ OUT=dist/Scriptorium-Setup.exe
   -r:"$API/System.Windows.Forms.dll" -r:"$API/System.IO.Compression.dll" -r:"$API/System.IO.Compression.FileSystem.dll" \
   -win32icon:installer/scriptorium.ico -win32manifest:installer/app.manifest \
   -resource:dist/Scriptorium.zip,Scriptorium.zip \
+  -resource:installer/fonts/SetupText-Regular.ttf,SetupText-Regular.ttf \
+  -resource:installer/fonts/SetupText-Italic.ttf,SetupText-Italic.ttf \
+  -resource:installer/fonts/SetupText-SemiBold.ttf,SetupText-SemiBold.ttf \
+  -resource:installer/fonts/SetupDisplay-SemiBold.ttf,SetupDisplay-SemiBold.ttf \
   -out:"$OUT" installer/ScriptoriumSetup.cs
 ls -l "$OUT"
 if command -v sha256sum >/dev/null; then sha256sum "$OUT"; else shasum -a 256 "$OUT"; fi
