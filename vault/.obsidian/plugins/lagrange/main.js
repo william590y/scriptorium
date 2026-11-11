@@ -8,15 +8,16 @@
  * version. It is distributed WITHOUT ANY WARRANTY; see the GNU General Public License (LICENSE, next to this file).
  *
  * Plain CommonJS with no build step, like the Scriptorium plugin next to it. Obsidian supplies 'obsidian',
- * '@codemirror/state' and '@codemirror/view' to plugins through require(); nothing else is loaded, and no Node API
- * is used, so the plugin also runs on mobile.
+ * '@codemirror/state' and '@codemirror/view' to plugins through require(). Node's child_process, fs, os and path are
+ * loaded only by the two subscription providers, only on desktop (nodeModule), so the plugin still runs on mobile.
  *
  * Map of this file:
  *   1. Settings and constants
  *   2. Pure helpers: SSE parsing, edit JSON parsing, locating edits, clipping notes, error messages, demo replies.
  *      They touch neither the DOM nor Obsidian; plugins-tests/lagrange.test.js tests them under Node.
- *   3. Providers: Anthropic Messages API, OpenAI-compatible chat completions, Demo (offline). The only network
- *      requests the plugin makes are these, to the provider chosen in its settings, when the writer asks for something.
+ *   3. Providers: Anthropic Messages API, OpenAI API and OpenAI-compatible chat completions, a Claude subscription
+ *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline). The only requests the plugin makes
+ *      are to the provider chosen in its settings, when the writer asks for something.
  *   4. The loader, a replaceable section:  mountLoader(containerEl, theme) -> { stop() }
  *   5. Pen helpers shared by any pen (rangeRects, sleep, nextFrame), then the pen, a replaceable section:
  *      createPen(app, settings) -> { edit(view, from, to, replacement): Promise<void>, destroy() }
@@ -55,10 +56,10 @@ const MAX_TOKENS_CUSTOM = 8192;    // a custom model ID may be an older model wi
 
 // How much of a note goes into one request, in characters. Longer notes are clipped around the cursor, and the chat
 // says so. Local models often run with small context windows, hence the smaller figure.
-const NOTE_LIMIT = { anthropic: 120000, openai: 24000, demo: 120000 };
+const NOTE_LIMIT = { anthropic: 120000, 'claude-code': 120000, 'openai-api': 120000, codex: 80000, openai: 24000, demo: 120000 };
 
 const DEFAULT_SETTINGS = {
-  provider: 'anthropic',              // 'anthropic' | 'openai' | 'demo'
+  provider: 'anthropic',              // 'anthropic' | 'claude-code' | 'openai-api' | 'codex' | 'openai' | 'demo'
   anthropicApiKey: '',
   anthropicModel: 'claude-sonnet-5-5', // an ANTHROPIC_MODELS id, or 'custom'
   anthropicCustomModel: '',
@@ -66,6 +67,12 @@ const DEFAULT_SETTINGS = {
   openaiBaseUrl: 'http://localhost:11434/v1',
   openaiApiKey: '',
   openaiModel: '',
+  openaiPlatformKey: '',               // OpenAI API (platform.openai.com)
+  openaiPlatformModel: '',
+  claudeCodePath: '',                  // Claude subscription via Claude Code; empty = look in the usual places
+  claudeCodeModel: 'sonnet',
+  codexPath: '',                       // ChatGPT subscription via Codex; empty = look in the usual places
+  codexModel: '',
   loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
@@ -78,7 +85,7 @@ function sanitizeSettings(saved) {
       if (typeof saved[k] === typeof DEFAULT_SETTINGS[k]) s[k] = saved[k];
     }
   }
-  if (!['anthropic', 'openai', 'demo'].includes(s.provider)) s.provider = DEFAULT_SETTINGS.provider;
+  if (!['anthropic', 'claude-code', 'openai-api', 'codex', 'openai', 'demo'].includes(s.provider)) s.provider = DEFAULT_SETTINGS.provider;
   if (!['random', 'clockwork', 'alchemy', 'trebuchet', 'orbit'].includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
   if (s.anthropicModel !== 'custom' && !ANTHROPIC_MODELS.some(m => m.id === s.anthropicModel)) {
     s.anthropicModel = DEFAULT_SETTINGS.anthropicModel;
@@ -94,6 +101,9 @@ function anthropicModelId(s) {
 function modelLabel(s) {
   if (s.provider === 'demo') return 'Demo (offline)';
   if (s.provider === 'openai') return String(s.openaiModel || '').trim() || 'OpenAI-compatible server';
+  if (s.provider === 'openai-api') return String(s.openaiPlatformModel || '').trim() || 'OpenAI';
+  if (s.provider === 'claude-code') return `Claude (subscription${String(s.claudeCodeModel || '').trim() ? `, ${String(s.claudeCodeModel).trim()}` : ''})`;
+  if (s.provider === 'codex') return `ChatGPT (subscription${String(s.codexModel || '').trim() ? `, ${String(s.codexModel).trim()}` : ''})`;
   const id = anthropicModelId(s);
   const preset = ANTHROPIC_MODELS.find(m => m.id === id);
   return preset ? preset.name : (id || 'Claude');
@@ -759,6 +769,230 @@ async function streamOpenAI(s, req, hooks) {
   return { text: st.text, stopReason: st.stopReason, stopDetails: null, model, fallbackTo: null };
 }
 
+/* ---- Subscriptions: Claude through Claude Code, ChatGPT through Codex (desktop only) ----
+   A Claude Pro/Max or ChatGPT Plus/Pro subscription can't be used by calling an API directly; the sanctioned way is
+   each company's own command-line tool, signed in to the writer's account: Claude Code (`claude`) and Codex (`codex`).
+   Lagrange runs the tool once per request, with every tool, setting file and session file turned off, gives it the
+   prompt on stdin, and reads its JSON event stream. Node's child_process is loaded only here, only on desktop. */
+
+// Node modules, loaded lazily so the plugin still loads on mobile, where the subscription providers are unavailable.
+function nodeModule(name) {
+  if (obsidian.Platform && obsidian.Platform.isDesktopApp === false) {
+    throw new LagrangeError('Signing in with a subscription works only in Obsidian on a computer: it runs the ' +
+      'provider’s command-line tool. On a phone or tablet, choose an API key provider in Settings → Lagrange.', { kind: 'setup' });
+  }
+  return require(name);   // eslint-disable-line global-require
+}
+
+const CLI = {
+  claude: {
+    label: 'Claude Code',
+    install: 'Install Claude Code (claude.com/code), then run “claude” once in a terminal and sign in with your Claude account.',
+    login: 'Claude Code isn’t signed in. Open a terminal, run “claude”, and sign in with your Claude Pro or Max account.',
+  },
+  codex: {
+    label: 'Codex',
+    install: 'Install Codex (npm install -g @openai/codex, or see developers.openai.com/codex), then run “codex login” and choose “Sign in with ChatGPT”.',
+    login: 'Codex isn’t signed in. Open a terminal, run “codex login”, and choose “Sign in with ChatGPT”.',
+  },
+};
+
+/* Where the tools usually live. Obsidian started from the dock doesn't see the shell's PATH, so look in the usual
+   install folders as well as PATH. Returns the first path that exists, or null. */
+function findCli(name, custom) {
+  const fs = nodeModule('fs'), path = nodeModule('path'), os = nodeModule('os');
+  const want = String(custom || '').trim();
+  if (want) return fs.existsSync(want) ? want : null;
+  const home = os.homedir(), win = process.platform === 'win32';
+  const exts = win ? ['.exe', '.cmd', ''] : [''];
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean).concat(win
+    ? [path.join(home, '.local', 'bin'), path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'npm'),
+       path.join(home, 'AppData', 'Local', 'Programs', name)]
+    : [path.join(home, '.local', 'bin'), path.join(home, '.claude', 'local'), '/opt/homebrew/bin', '/usr/local/bin',
+       path.join(home, '.npm-global', 'bin'), path.join(home, '.bun', 'bin'), path.join(home, '.volta', 'bin'), '/usr/bin']);
+  for (const d of dirs) for (const e of exts) {
+    const p = path.join(d, name + e);
+    try { if (fs.statSync(p).isFile()) return p; } catch (err) { /* not here */ }
+  }
+  return null;
+}
+
+/* One prompt from the conversation: the tools take a single message, so earlier turns become a short transcript. */
+function transcriptPrompt(messages) {
+  const msgs = (messages || []).filter(m => m && typeof m.content === 'string');
+  if (msgs.length <= 1) return msgs.length ? msgs[0].content : '';
+  const last = msgs[msgs.length - 1];
+  const earlier = msgs.slice(0, -1).map(m => `${m.role === 'assistant' ? 'Lagrange' : 'Writer'}: ${m.content}`).join('\n\n');
+  return `<conversation_so_far>\n${earlier}\n</conversation_so_far>\n\nThe writer now says:\n\n${last.content}`;
+}
+
+/* Applies one line of `claude -p --output-format stream-json --include-partial-messages` to st; returns new text. */
+function applyClaudeCodeLine(st, line) {
+  line = String(line || '').trim();
+  if (!line) return '';
+  let e;
+  try { e = JSON.parse(line); } catch (err) { return ''; }
+  if (e.type === 'stream_event' && e.event && e.event.type === 'content_block_delta' && e.event.delta
+      && e.event.delta.type === 'text_delta' && typeof e.event.delta.text === 'string') {
+    st.text += e.event.delta.text;
+    st.streamed = true;
+    return e.event.delta.text;
+  }
+  if (e.type === 'stream_event' && e.event && e.event.type === 'message_delta' && e.event.delta && e.event.delta.stop_reason) {
+    st.stopReason = e.event.delta.stop_reason;
+  }
+  if (e.type === 'system' && e.subtype === 'init' && e.model) st.model = e.model;
+  if (e.type === 'assistant' && !st.streamed && e.message && Array.isArray(e.message.content)) {
+    const t = e.message.content.filter(b => b && b.type === 'text').map(b => b.text).join('');
+    if (t) { st.text += t; return t; }
+  }
+  if (e.type === 'result') {
+    st.done = true;
+    if (e.is_error) st.error = String(e.result || (e.errors && e.errors.join(' ')) || e.subtype || 'Claude Code reported an error.');
+    else if (!st.text && typeof e.result === 'string') { st.text = e.result; return e.result; }
+  }
+  return '';
+}
+
+/* Applies one line of `codex exec --json` to st; returns new text. */
+function applyCodexLine(st, line) {
+  line = String(line || '').trim();
+  if (!line) return '';
+  let e;
+  try { e = JSON.parse(line); } catch (err) { return ''; }
+  const item = e.item || (e.msg && { type: e.msg.type, text: e.msg.message });
+  if ((e.type === 'item.completed' || (e.msg && e.msg.type === 'agent_message')) && item && item.type === 'agent_message' && typeof item.text === 'string') {
+    const add = (st.text ? '\n\n' : '') + item.text;
+    st.text += add;
+    return add;
+  }
+  if (e.type === 'turn.completed') st.done = true;
+  if (e.type === 'error' || e.type === 'turn.failed' || (e.msg && e.msg.type === 'error')) {
+    st.error = String((e.error && e.error.message) || e.message || (e.msg && e.msg.message) || 'Codex reported an error.');
+  }
+  return '';
+}
+
+function cliErrorMessage(which, text) {
+  const t = String(text || '');
+  if (/log ?in|logged in|sign ?in|authenticat|unauthori[sz]ed|invalid api key|401|credential/i.test(t)) return CLI[which].login;
+  if (/rate.?limit|usage limit|quota|429|limit reached/i.test(t)) {
+    return `${CLI[which].label} says your subscription’s usage limit has been reached. Try again later. (${t.slice(0, 160)})`;
+  }
+  return `${CLI[which].label} stopped with an error: ${t.slice(0, 300) || 'no details'}`;
+}
+
+/* Runs a command-line tool, feeding `input` on stdin and passing each stdout line to onLine. Resolves with the exit
+   code and stderr; rejects on a missing executable. hooks.signal stops it. */
+function runCli(which, exe, args, input, onLine, hooks) {
+  const cp = nodeModule('child_process'), os = nodeModule('os'), path = nodeModule('path');
+  const win = process.platform === 'win32';
+  const env = Object.assign({}, process.env);
+  env.PATH = [path.dirname(exe), env.PATH || ''].filter(Boolean).join(path.delimiter);
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = cp.spawn(exe, args, { cwd: os.tmpdir(), env, windowsHide: true, shell: win && /\.cmd$/i.test(exe), stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      reject(new LagrangeError(`${CLI[which].label} couldn’t be started (${e.message}). ${CLI[which].install}`, { kind: 'setup', cause: e }));
+      return;
+    }
+    let buf = '', err = '', settled = false;
+    const done = f => { if (!settled) { settled = true; f(); } };
+    const onAbort = () => { try { child.kill(); } catch (e) { /* gone */ } done(() => reject(abortError())); };
+    if (hooks.signal) {
+      if (hooks.signal.aborted) { onAbort(); return; }
+      hooks.signal.addEventListener('abort', onAbort, { once: true });
+    }
+    child.on('error', e => done(() => reject(new LagrangeError(e.code === 'ENOENT'
+      ? `${CLI[which].label} wasn’t found at ${exe}. ${CLI[which].install}`
+      : `${CLI[which].label} couldn’t be started (${e.message}).`, { kind: 'setup', cause: e }))));
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      buf += chunk;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        try { onLine(line); } catch (e) { try { child.kill(); } catch (k) { /* gone */ } done(() => reject(e)); return; }
+      }
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', c => { err = (err + c).slice(-4000); });
+    child.on('close', code => {
+      if (hooks.signal) hooks.signal.removeEventListener('abort', onAbort);
+      if (buf.trim()) { try { onLine(buf); } catch (e) { done(() => reject(e)); return; } }
+      done(() => resolve({ code, stderr: err }));
+    });
+    child.stdin.on('error', () => { /* the tool may exit before reading everything */ });
+    child.stdin.end(input, 'utf8');
+  });
+}
+
+function abortError() {
+  const e = new Error('Stopped.');
+  e.name = 'AbortError';
+  return e;
+}
+
+async function streamClaudeCode(s, req, hooks) {
+  const exe = findCli('claude', s.claudeCodePath);
+  if (!exe) throw new LagrangeError(`Claude Code wasn’t found${s.claudeCodePath ? ` at ${s.claudeCodePath}` : ''}. ${CLI.claude.install}`, { kind: 'setup' });
+  const fs = nodeModule('fs'), os = nodeModule('os'), path = nodeModule('path');
+  const sysFile = path.join(os.tmpdir(), `lagrange-system-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(sysFile, req.system || '', 'utf8');
+  const quote = a => (process.platform === 'win32' && /\.cmd$/i.test(exe) ? `"${String(a).replace(/"/g, '""')}"` : a);
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+    '--tools', quote(''), '--no-session-persistence', '--setting-sources', quote(''), '--strict-mcp-config',
+    '--system-prompt-file', quote(sysFile)];
+  const model = String(s.claudeCodeModel || '').trim();
+  if (model) args.push('--model', quote(model));
+  const st = { text: '', streamed: false, stopReason: null, model: null, error: null, done: false };
+  try {
+    const { code, stderr } = await runCli('claude', exe, args, transcriptPrompt(req.messages), line => {
+      const delta = applyClaudeCodeLine(st, line);
+      if (delta && hooks.onText) hooks.onText(delta, st.text);
+    }, hooks);
+    if (st.error) throw new LagrangeError(cliErrorMessage('claude', st.error), { kind: 'stream' });
+    if (!st.text) throw new LagrangeError(cliErrorMessage('claude', stderr || `exit code ${code}`), { kind: 'stream' });
+  } finally {
+    try { fs.unlinkSync(sysFile); } catch (e) { /* already gone */ }
+  }
+  return { text: st.text, stopReason: st.stopReason || 'end_turn', stopDetails: null, model: st.model || model || 'Claude Code', fallbackTo: null };
+}
+
+async function streamCodex(s, req, hooks) {
+  const exe = findCli('codex', s.codexPath);
+  if (!exe) throw new LagrangeError(`Codex wasn’t found${s.codexPath ? ` at ${s.codexPath}` : ''}. ${CLI.codex.install}`, { kind: 'setup' });
+  const os = nodeModule('os');
+  const args = ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-C', os.tmpdir()];
+  const model = String(s.codexModel || '').trim();
+  if (model) args.push('-m', model);
+  args.push('-');
+  const input = '<instructions>\n' + (req.system || '') + '\n\nAnswer in text only: do not run commands, read files or ' +
+    'make changes. Everything you need is in this message.\n</instructions>\n\n' + transcriptPrompt(req.messages);
+  const st = { text: '', error: null, done: false };
+  const { code, stderr } = await runCli('codex', exe, args, input, line => {
+    const delta = applyCodexLine(st, line);
+    if (delta && hooks.onText) hooks.onText(delta, st.text);
+  }, hooks);
+  if (st.error) throw new LagrangeError(cliErrorMessage('codex', st.error), { kind: 'stream' });
+  if (!st.text) throw new LagrangeError(cliErrorMessage('codex', stderr || `exit code ${code}`), { kind: 'stream' });
+  return { text: st.text, stopReason: 'end_turn', stopDetails: null, model: model || 'Codex', fallbackTo: null };
+}
+
+/* Settings → "Check": runs `<tool> --version`. Resolves with a sentence for the settings page. */
+async function checkCli(which, custom) {
+  let exe;
+  try { exe = findCli(which === 'claude' ? 'claude' : 'codex', custom); } catch (e) { return e.message; }
+  if (!exe) return `Not found. ${CLI[which].install}`;
+  try {
+    let out = '';
+    await runCli(which, exe, ['--version'], '', line => { out += line + ' '; }, {});
+    return `Found ${exe}${out.trim() ? ` (${out.trim()})` : ''}. If requests fail, sign in: ${which === 'claude' ? 'run “claude” in a terminal' : 'run “codex login”'}.`;
+  } catch (e) { return e.message; }
+}
+
 async function streamDemo(req, hooks) {
   const text = typeof req.demo === 'function' ? String(req.demo()) : 'Demo mode has no reply for this.';
   await sleep(req.purpose === 'chat' ? 900 : 1200, hooks.signal);
@@ -777,6 +1011,17 @@ function complete(settings, req, hooks, session) {
   hooks = hooks || {};
   if (settings.provider === 'demo') return streamDemo(req, hooks);
   if (settings.provider === 'openai') return streamOpenAI(settings, req, hooks);
+  if (settings.provider === 'openai-api') {
+    if (!String(settings.openaiPlatformKey || '').trim()) {
+      return Promise.reject(new LagrangeError('Add your OpenAI API key in Settings → Lagrange, or choose “ChatGPT: my subscription” to use a ChatGPT plan.', { kind: 'setup' }));
+    }
+    if (!String(settings.openaiPlatformModel || '').trim()) {
+      return Promise.reject(new LagrangeError('Enter an OpenAI model ID in Settings → Lagrange.', { kind: 'setup' }));
+    }
+    return streamOpenAI(Object.assign({}, settings, { openaiBaseUrl: 'https://api.openai.com/v1', openaiApiKey: settings.openaiPlatformKey, openaiModel: settings.openaiPlatformModel }), req, hooks);
+  }
+  if (settings.provider === 'claude-code') return streamClaudeCode(settings, req, hooks);
+  if (settings.provider === 'codex') return streamCodex(settings, req, hooks);
   return streamAnthropic(settings, req, hooks, session);
 }
 
@@ -2069,8 +2314,11 @@ class LagrangeSettingTab extends PluginSettingTab {
       .setName('Provider')
       .setDesc('Who writes the replies and edits.')
       .addDropdown(d => d
-        .addOption('anthropic', 'Anthropic (Claude)')
-        .addOption('openai', 'OpenAI-compatible server')
+        .addOption('claude-code', 'Claude: my subscription (via Claude Code)')
+        .addOption('anthropic', 'Claude: API key')
+        .addOption('codex', 'ChatGPT: my subscription (via Codex)')
+        .addOption('openai-api', 'OpenAI: API key')
+        .addOption('openai', 'OpenAI-compatible server (Ollama, LM Studio…)')
         .addOption('demo', 'Demo (offline)')
         .setValue(s.provider)
         .onChange(async v => { s.provider = v; await save(true); }));
@@ -2111,6 +2359,56 @@ class LagrangeSettingTab extends PluginSettingTab {
         .setDesc('If Claude’s safety screening declines a request, let Anthropic retry it on another Claude model in the ' +
           'same call (a beta feature, for Sonnet 5.5 and Opus 5.5). Turned off automatically if your account lacks it.')
         .addToggle(t => t.setValue(s.refusalFallback).onChange(async v => { s.refusalFallback = v; await save(); }));
+    } else if (s.provider === 'claude-code' || s.provider === 'codex') {
+      const claude = s.provider === 'claude-code';
+      new Setting(containerEl).setName(claude ? 'Claude subscription' : 'ChatGPT subscription').setHeading();
+      containerEl.createEl('p', {
+        cls: 'setting-item-description',
+        text: claude
+          ? 'Uses your Claude Pro or Max plan through Claude Code, Anthropic’s command-line tool, signed in to your ' +
+            'account: no API key, and requests count against your plan’s usage. Install Claude Code, run “claude” once ' +
+            'in a terminal and sign in. Lagrange runs it with every tool, setting file and saved session turned off. ' +
+            'Works in Obsidian on a computer only.'
+          : 'Uses your ChatGPT Plus or Pro plan through Codex, OpenAI’s command-line tool, signed in to your account: no ' +
+            'API key, and requests count against your plan’s usage. Install Codex, run “codex login” and choose “Sign ' +
+            'in with ChatGPT”. Lagrange runs it read-only, in a temporary folder, without saving sessions. Works in ' +
+            'Obsidian on a computer only.',
+      });
+      const pathKey = claude ? 'claudeCodePath' : 'codexPath', modelKey = claude ? 'claudeCodeModel' : 'codexModel';
+      let status;
+      new Setting(containerEl)
+        .setName(claude ? 'Claude Code' : 'Codex')
+        .setDesc('Leave empty to look in the usual places; or give the full path to the program.')
+        .addText(t => t.setPlaceholder(claude ? '~/.local/bin/claude' : '/usr/local/bin/codex').setValue(s[pathKey])
+          .onChange(async v => { s[pathKey] = v.trim(); await save(); }))
+        .addButton(b => b.setButtonText('Check').onClick(async () => {
+          status.setText('Checking…');
+          status.setText(await checkCli(claude ? 'claude' : 'codex', s[pathKey]));
+        }));
+      status = containerEl.createEl('p', { cls: 'setting-item-description lagrange-cli-status' });
+      new Setting(containerEl)
+        .setName('Model')
+        .setDesc(claude ? 'sonnet, opus or haiku (or a full model ID). Empty: Claude Code’s default.'
+          : 'A model your plan includes, as Codex names it. Empty: Codex’s default.')
+        .addText(t => t.setPlaceholder(claude ? 'sonnet' : 'default').setValue(s[modelKey])
+          .onChange(async v => { s[modelKey] = v.trim(); await save(); }));
+    } else if (s.provider === 'openai-api') {
+      new Setting(containerEl).setName('OpenAI').setHeading();
+      new Setting(containerEl)
+        .setName('API key')
+        .setDesc('Create one at platform.openai.com. Stored in plain text in this vault’s .obsidian/plugins/lagrange/data.json ' +
+          'and sent only to api.openai.com.')
+        .addText(t => {
+          t.inputEl.type = 'password';
+          t.inputEl.autocomplete = 'off';
+          t.inputEl.spellcheck = false;
+          t.setPlaceholder('sk-…').setValue(s.openaiPlatformKey).onChange(async v => { s.openaiPlatformKey = v.trim(); await save(); });
+        });
+      new Setting(containerEl)
+        .setName('Model')
+        .setDesc('The model ID, as listed at platform.openai.com/docs/models.')
+        .addText(t => t.setPlaceholder('model ID').setValue(s.openaiPlatformModel)
+          .onChange(async v => { s.openaiPlatformModel = v.trim(); await save(); }));
     } else if (s.provider === 'openai') {
       new Setting(containerEl).setName('OpenAI-compatible server').setHeading();
       new Setting(containerEl)
@@ -2478,4 +2776,5 @@ LagrangePlugin.internals = {
   parseErrorBody, describeError, noteStats, excerpt, demoProofreadEdits, demoRevise, demoChatReply,
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,
   chatSystemPrompt, proofreadUserMessage, reviseUserMessage, runEdits, LagrangeError,
+  transcriptPrompt, applyClaudeCodeLine, applyCodexLine, cliErrorMessage, findCli, runCli, streamClaudeCode, streamCodex, checkCli,
 };

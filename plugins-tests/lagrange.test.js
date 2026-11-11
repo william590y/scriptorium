@@ -487,6 +487,121 @@ test('The replaceable sections are delimited once each, and their functions are 
   assert.equal(Lagrange.createPen.length, 2);
   assert.equal(typeof Lagrange.rangeRects, 'function');
   assert.equal(Lagrange.rangeRects.length, 3);
-  assert.doesNotMatch(js, /require\((['"])(fs|path|child_process|electron|http|https|os)\1\)/, 'no Node or Electron modules');
+  assert.doesNotMatch(js, /require\((['"])(fs|path|child_process|electron|http|https|os)\1\)/, 'no Node or Electron modules loaded at the top level');
+  // Node modules come only through nodeModule(), which refuses on mobile, and only the four the CLI providers need.
+  const loaded = [...js.matchAll(/nodeModule\((['"])([^'"]+)\1\)/g)].map(m => m[2]);
+  assert.ok(loaded.length > 0);
+  for (const m of loaded) assert.ok(['child_process', 'fs', 'os', 'path'].includes(m), `unexpected Node module ${m}`);
   assert.doesNotMatch(js, /\b(temperature|top_p|top_k)\b/, 'no sampling parameters (rejected on API version 2026-10-21)');
+});
+
+
+// ---------------------------------------------------------------- subscriptions through Claude Code and Codex
+test('Claude Code stream-json: text deltas stream; the result line closes; an error result is caught', () => {
+  const st = { text: '', streamed: false, stopReason: null, model: null, error: null, done: false };
+  const lines = [
+    '{"type":"system","subtype":"init","model":"claude-sonnet-5-5"}',
+    '{"type":"stream_event","event":{"type":"message_start"}}',
+    '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ink "}}}',
+    '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"and paper"}}}',
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"ink and paper"}]}}',
+    '{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}}}',
+    'not json',
+    '{"type":"result","subtype":"success","is_error":false,"result":"ink and paper"}',
+  ];
+  const got = lines.map(l => L.applyClaudeCodeLine(st, l)).join('');
+  assert.equal(got, 'ink and paper');
+  assert.equal(st.text, 'ink and paper');
+  assert.equal(st.model, 'claude-sonnet-5-5');
+  assert.equal(st.stopReason, 'end_turn');
+  assert.ok(st.done);
+  const bad = { text: '', streamed: false };
+  L.applyClaudeCodeLine(bad, '{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Please run /login"}');
+  assert.match(L.cliErrorMessage('claude', bad.error), /isn’t signed in/);
+  const whole = { text: '', streamed: false };   // without partial messages, the assistant message carries the text
+  assert.equal(L.applyClaudeCodeLine(whole, '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}'), 'hello');
+});
+
+test('Codex JSONL: agent messages are the reply; errors and failed turns are caught; the older event shape works', () => {
+  const st = { text: '', error: null, done: false };
+  for (const l of ['{"type":"thread.started","thread_id":"x"}', '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"thinking"}}',
+    '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ink and paper."}}',
+    '{"type":"turn.completed","usage":{}}']) L.applyCodexLine(st, l);
+  assert.equal(st.text, 'ink and paper.');
+  assert.ok(st.done);
+  const e1 = { text: '' }; L.applyCodexLine(e1, '{"type":"turn.failed","error":{"message":"You are not logged in"}}');
+  assert.match(L.cliErrorMessage('codex', e1.error), /codex login/);
+  const e2 = { text: '' }; L.applyCodexLine(e2, '{"type":"error","message":"usage limit reached for your plan"}');
+  assert.match(L.cliErrorMessage('codex', e2.error), /usage limit/);
+  const old = { text: '' }; L.applyCodexLine(old, '{"id":"0","msg":{"type":"agent_message","message":"older shape"}}');
+  assert.equal(old.text, 'older shape');
+});
+
+test('transcriptPrompt: one message passes through; a conversation becomes a short transcript', () => {
+  assert.equal(L.transcriptPrompt([{ role: 'user', content: 'Hello' }]), 'Hello');
+  const t = L.transcriptPrompt([{ role: 'user', content: 'A' }, { role: 'assistant', content: 'B' }, { role: 'user', content: 'C' }]);
+  assert.match(t, /Writer: A\n\nLagrange: B/);
+  assert.match(t, /The writer now says:\n\nC$/);
+});
+
+// Fake command-line tools: small Node scripts that print the event streams the real tools print, so the subprocess
+// path (spawn, stdin, line splitting, errors, stop) is tested without an account. POSIX only (they use a shebang).
+const posix = process.platform !== 'win32';
+function fakeCli(dir, name, body) {
+  const f = path.join(dir, name);
+  fs.writeFileSync(f, `#!/usr/bin/env node\n${body}\n`, { mode: 0o755 });
+  return f;
+}
+test('Claude subscription: Lagrange runs Claude Code with tools, settings and sessions off, and streams its reply', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const exe = fakeCli(dir, 'claude', `
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  const a = process.argv.slice(2), sys = require('fs').readFileSync(a[a.indexOf('--system-prompt-file') + 1], 'utf8');
+  const ok = a.includes('-p') && a[a.indexOf('--tools') + 1] === '' && a.includes('--no-session-persistence')
+    && a[a.indexOf('--setting-sources') + 1] === '' && a.includes('--strict-mcp-config') && a[a.indexOf('--model') + 1] === 'haiku';
+  const say = t => console.log(JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: t } } }));
+  say(ok ? 'flags ok; ' : 'flags WRONG ' + JSON.stringify(a) + '; '); say('system: ' + sys + '; '); say('prompt: ' + input);
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: 'x' }));
+});`);
+  const pieces = [];
+  const res = await L.streamClaudeCode({ claudeCodePath: exe, claudeCodeModel: 'haiku' },
+    { system: 'Be brief.', messages: [{ role: 'user', content: 'Hello' }] }, { onText: d => pieces.push(d) });
+  assert.equal(res.text, 'flags ok; system: Be brief.; prompt: Hello');
+  assert.equal(pieces.length, 3);
+  const notSigned = fakeCli(dir, 'claude2', `process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify({ type: 'result', is_error: true, result: 'Invalid API key · Please run /login' })));`);
+  await assert.rejects(L.streamClaudeCode({ claudeCodePath: notSigned }, { system: '', messages: [{ role: 'user', content: 'x' }] }, {}), /isn’t signed in/);
+  await assert.rejects(L.streamClaudeCode({ claudeCodePath: path.join(dir, 'missing') }, { system: '', messages: [] }, {}), /wasn’t found/);
+  const slow = fakeCli(dir, 'claude3', `setInterval(() => {}, 1000);`);
+  const ac = new AbortController(); setTimeout(() => ac.abort(), 150);
+  await assert.rejects(L.streamClaudeCode({ claudeCodePath: slow }, { system: '', messages: [{ role: 'user', content: 'x' }] }, { signal: ac.signal }), e => e.name === 'AbortError');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+test('ChatGPT subscription: Lagrange runs Codex read-only and ephemeral, and reads its agent message', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const exe = fakeCli(dir, 'codex', `
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  const a = process.argv.slice(2);
+  const ok = a[0] === 'exec' && a.includes('--json') && a.includes('--ephemeral') && a[a.indexOf('-s') + 1] === 'read-only' && a[a.length - 1] === '-';
+  console.log(JSON.stringify({ type: 'thread.started' }));
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: (ok ? 'flags ok' : 'flags WRONG') + (input.includes('<instructions>') && input.includes('Hello') ? '; prompt ok' : '; prompt WRONG') } }));
+  console.log(JSON.stringify({ type: 'turn.completed' }));
+});`);
+  const res = await L.streamCodex({ codexPath: exe, codexModel: '' }, { system: 'Be brief.', messages: [{ role: 'user', content: 'Hello' }] }, {});
+  assert.equal(res.text, 'flags ok; prompt ok');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+test('complete() routes the new providers; an OpenAI key and model are required', async () => {
+  await assert.rejects(L.complete(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai-api' }), { system: '', messages: [] }, {}), /OpenAI API key/);
+  await assert.rejects(L.complete(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai-api', openaiPlatformKey: 'sk-x' }), { system: '', messages: [] }, {}), /model ID/);
+  for (const p of ['claude-code', 'codex', 'openai-api']) assert.equal(L.sanitizeSettings({ provider: p }).provider, p);
+});
+
+// Live, only when asked (LAGRANGE_LIVE_CLI=1): the real tools, signed in to real accounts. Uses a little of the plan.
+test('live: the real Claude Code and Codex answer through Lagrange', { skip: process.env.LAGRANGE_LIVE_CLI !== '1' }, async () => {
+  const req = { system: 'You are terse.', messages: [{ role: 'user', content: 'Reply with exactly: ink and paper' }] };
+  const c = await L.streamClaudeCode({ claudeCodePath: '', claudeCodeModel: 'haiku' }, req, {});
+  assert.match(c.text.toLowerCase(), /ink and paper/);
+  const x = await L.streamCodex({ codexPath: '', codexModel: '' }, req, {});
+  assert.match(x.text.toLowerCase(), /ink and paper/);
 });
