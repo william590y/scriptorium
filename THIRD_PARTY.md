@@ -1,8 +1,8 @@
 # Third-party components
 
-Scriptorium's own files (the Scriptorium plugin, the `manuscript` snippet apart from the embedded Yinit and Scriptorium Mono fonts, the
-installers and the build tools) are licensed under the GNU General Public License, version 3 or later (see
-[LICENSE](LICENSE)). The components below keep their own licenses.
+Scriptorium's own files (the Scriptorium plugin, the `manuscript` snippet apart from the embedded Yinit, Goudy Initialen
+and Scriptorium Mono fonts, the installers, the build tools and the tests) are licensed under the GNU General Public
+License, version 3 or later (see [LICENSE](LICENSE)). The components below keep their own licenses.
 
 ## Included in `vault/` (and so in `Scriptorium.zip` and `Scriptorium-Setup.exe`)
 
@@ -44,6 +44,20 @@ installers and the build tools) are licensed under the GNU General Public Licens
 - Source: `Yinit.otf` from the CTAN package yinit-otf (<https://ctan.org/pkg/yinit-otf>), an OpenType conversion of
   Yannis Haralambous' METAFONT yinit, converted to WOFF2
 - License: public domain ("The copyright is (C) Yannis Haralambous, 1994, Public Domain.")
+
+### Goudy Initialen decorative initials
+
+- Path: embedded (WOFF2, letters A-Z) in `vault/.obsidian/snippets/manuscript.css` as the font "Scriptorium Goudy"; used
+  when **Settings → Scriptorium → Drop cap** is Goudy Initialen
+- Source: `GoudyIn.pfb` from the CTAN package initials (<https://ctan.org/pkg/initials>), floriated initials after
+  Frederic W. Goudy (Lanston Goudy Initials No. 296), digitised by Dieter Steffmann (Typographer Mediengestaltung, 2000)
+- Modified: converted from Type 1 to OpenType (CFF) and WOFF2 with fontTools, letters A-Z only, outlines unchanged; the
+  name table records the conversion. The same file is used on williamliaw.com
+  (`assets/fonts/GoudyInitialen-Scriptorium.woff2`, SHA-256 `5b8b60f1b595f7537154186ada9045df7153a1cf62fb1f1e98a2986aacbfdd06`).
+  The unmodified original is on CTAN.
+- License: LaTeX Project Public License ("The author gave his permission, that these fonts can be redistributed and/or
+  modified under the terms of the LaTeX Project Public License", the package's README, which names no version; the
+  current version, 1.3c, is included): [`licenses/GoudyInitialen-LPPL.txt`](licenses/GoudyInitialen-LPPL.txt)
 
 ## Included in `installer/fonts/` (and so in `Scriptorium-Setup.exe`)
 

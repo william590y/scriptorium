@@ -3,3 +3,300 @@
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
+
+/* ==========================================================
+   Marginalia: footnotes as sidenotes (Reading view), after gwern.net
+   Each note hangs from a small box with its number, open at the foot and set on a dotted rule; a second dotted rule
+   closes it, and a boxed ↙ leads back to the reference. Hovering a reference lights its note and the other way round.
+   ========================================================== */
+body {
+  --scriptorium-sidenote-rule: var(--scriptorium-rule, #b4a68e);
+  --scriptorium-sidenote-ink: var(--scriptorium-link, #7d2219);
+}
+body.theme-dark {
+  --scriptorium-sidenote-rule: var(--scriptorium-rule, #5f5447);
+  --scriptorium-sidenote-ink: var(--scriptorium-link, #d39073);
+}
+
+/* When the right margin alone is too narrow, the text column moves left and the text and the notes are centred as one. */
+.markdown-preview-view.scriptorium-margin > .markdown-preview-sizer {
+  position: relative;
+  left: calc(-1 * var(--scriptorium-sidenote-shift, 0px));
+}
+.markdown-preview-view.scriptorium-margin .callout.scriptorium-in-margin { display: none; }
+/* a paragraph after a marginal note carries on the text, so it keeps its indent */
+.markdown-preview-view.scriptorium-margin .el-p + .el-div:has(> .callout.scriptorium-in-margin) + .el-p > p {
+  text-indent: 1.5em;
+}
+
+.scriptorium-sidenote-column {
+  position: absolute;
+  top: 0;
+  height: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+.scriptorium-sidenote {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding-top: 1.9em;               /* the number's box */
+  font-size: 0.78em;
+  line-height: 1.4;
+  color: var(--text-normal);
+  text-align: left;
+  text-indent: 0;
+  -webkit-hyphens: auto;
+  hyphens: auto;
+  opacity: 0.86;
+  pointer-events: auto;
+}
+.scriptorium-sidenote:hover,
+.scriptorium-sidenote.is-highlighted,
+.scriptorium-sidenote.is-targeted {
+  opacity: 1;
+  z-index: 2;
+}
+.scriptorium-sidenote-number {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  min-width: 1.9em;
+  height: 1.9em;
+  padding: 0 0.35em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dotted var(--scriptorium-sidenote-rule);
+  border-bottom: none;
+  background: var(--background-primary);
+  color: var(--scriptorium-sidenote-ink);
+  font-weight: 600;
+  font-variant-numeric: lining-nums tabular-nums;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+}
+.scriptorium-sidenote-body {
+  border-top: 1px dotted var(--scriptorium-sidenote-rule);
+  border-bottom: 1px dotted var(--scriptorium-sidenote-rule);
+  padding: 0.45em 0 0.5em;
+  max-height: 24em;                 /* a very long note scrolls rather than pushing the next ones far from their lines */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.scriptorium-sidenote-body > :first-child { margin-top: 0; }
+.scriptorium-sidenote-body > :last-child { margin-bottom: 0; }
+.scriptorium-sidenote-body :is(p, li) {
+  margin: 0 0 0.45em;
+  text-align: left;
+  text-indent: 0 !important;
+}
+.scriptorium-sidenote-body :is(ul, ol) { padding-inline-start: 1.4em; margin: 0.3em 0; }
+.scriptorium-sidenote-body p:last-child { margin-bottom: 0; }
+.scriptorium-sidenote-back {
+  display: inline-block;
+  margin-left: 0.4em;
+  padding: 0.1em 0.22em 0.12em;
+  border: 1px dotted var(--scriptorium-sidenote-rule);
+  color: var(--scriptorium-sidenote-ink);
+  font-size: 0.9em;
+  font-style: normal;
+  line-height: 1;
+  text-decoration: none;
+  vertical-align: 0.05em;
+  cursor: pointer;
+}
+.scriptorium-sidenote-number:hover,
+.scriptorium-sidenote-back:hover {
+  border-style: solid;
+  color: var(--scriptorium-sidenote-ink);
+  text-decoration: none;
+}
+/* lit: the hovered note, or the note of the hovered reference */
+.scriptorium-sidenote.is-highlighted .scriptorium-sidenote-number,
+.scriptorium-sidenote.is-targeted .scriptorium-sidenote-number {
+  border: 3px double var(--scriptorium-sidenote-rule);
+  border-bottom: none;
+}
+.scriptorium-sidenote.is-highlighted .scriptorium-sidenote-body,
+.scriptorium-sidenote.is-targeted .scriptorium-sidenote-body {
+  border-top-style: solid;
+  border-bottom-style: solid;
+}
+.markdown-preview-view sup.footnote-ref.scriptorium-ref-highlighted > a,
+.markdown-preview-view sup.footnote-ref.is-targeted > a {
+  outline: 1px solid var(--scriptorium-sidenote-rule);
+  outline-offset: 2px;
+}
+/* a marginal note (> [!margin]): no number, and set in italic */
+.scriptorium-sidenote.is-margin-note { padding-top: 0; font-style: italic; }
+.scriptorium-sidenote.is-margin-note .scriptorium-sidenote-body { color: var(--text-muted); }
+.scriptorium-sidenote.is-margin-note :is(em, i) { font-style: normal; }
+.scriptorium-sidenote-title {
+  margin-bottom: 0.2em;
+  font-style: normal;
+  font-weight: 600;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.06em;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .scriptorium-sidenote.is-targeted,
+  .markdown-preview-view sup.footnote-ref.is-targeted > a {
+    animation: scriptorium-flash 1.5s ease-out;
+  }
+}
+@keyframes scriptorium-flash {
+  0%, 30% { background-color: var(--text-highlight-bg, rgba(139, 35, 35, 0.12)); }
+  100% { background-color: transparent; }
+}
+
+/* ==========================================================
+   Image focus, after gwern.net: click an image to see it on its own
+   ========================================================== */
+body.scriptorium-image-focus .markdown-reading-view .markdown-preview-view img:not(.emoji, a img, .callout-icon img),
+body.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-content img:not(.emoji, a img) {
+  cursor: zoom-in;
+}
+body.scriptorium-image-focus .markdown-reading-view .markdown-preview-view img:not(.emoji, a img, .callout-icon img):hover,
+body.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-content .image-embed img:hover {
+  box-shadow: 0 0 10px 0 rgba(42, 36, 32, 0.28);
+}
+body.theme-dark.scriptorium-image-focus .markdown-reading-view .markdown-preview-view img:not(.emoji, a img, .callout-icon img):hover,
+body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-content .image-embed img:hover {
+  box-shadow: 0 0 12px 0 rgba(0, 0, 0, 0.7);
+}
+
+.scriptorium-focus {
+  --scriptorium-focus-backdrop: rgba(36, 30, 26, 0.94);   /* ink */
+  --scriptorium-focus-ink: #f1ebde;
+  --scriptorium-focus-muted: #bfb39f;
+  --scriptorium-focus-slip: #f7f2e7;                       /* the caption is set on a slip of paper */
+  --scriptorium-focus-slip-ink: #2a2420;
+  --scriptorium-focus-slip-muted: #6a5f52;
+  --scriptorium-focus-slip-rule: #b4a68e;
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-modal, 50);
+  background: var(--scriptorium-focus-backdrop);
+  color: var(--scriptorium-focus-ink);
+  font-family: var(--font-text);
+  font-size: 18px;
+  cursor: zoom-out;
+  user-select: none;
+  touch-action: none;
+  overflow: hidden;
+}
+.theme-dark .scriptorium-focus {
+  --scriptorium-focus-backdrop: rgba(10, 9, 8, 0.95);
+  --scriptorium-focus-ink: #e4dccd;
+  --scriptorium-focus-muted: #a39885;
+  --scriptorium-focus-slip: #1d1a17;
+  --scriptorium-focus-slip-ink: #e4dccd;
+  --scriptorium-focus-slip-muted: #a39885;
+  --scriptorium-focus-slip-rule: #5f5447;
+}
+.scriptorium-focus-stage {
+  position: absolute;
+  inset: 0;
+}
+.scriptorium-focus-image {
+  position: absolute;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  background: #f7f2e7;              /* paper behind transparent images */
+  box-shadow: 0 6px 32px rgba(0, 0, 0, 0.45);
+  transform-origin: center center;
+  cursor: default;
+  -webkit-user-drag: none;
+}
+.scriptorium-focus.is-zoomed .scriptorium-focus-image { cursor: grab; }
+.scriptorium-focus.is-dragging .scriptorium-focus-image { cursor: grabbing; }
+.scriptorium-focus-image.is-loading { opacity: 0; }
+.scriptorium-focus-counter {
+  position: absolute;
+  top: 0.75em;
+  left: 4em;
+  right: 4em;
+  text-align: center;
+  color: var(--scriptorium-focus-muted);
+  font-variant-caps: all-small-caps;
+  font-variant-numeric: oldstyle-nums;
+  letter-spacing: 0.12em;
+  font-size: 1.05em;
+  pointer-events: none;
+}
+.scriptorium-focus .scriptorium-focus-button {
+  position: absolute;
+  margin: 0;
+  padding: 0 0.3em 0.08em;
+  min-width: 1.6em;
+  height: auto;
+  border: 1px dotted transparent;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--scriptorium-focus-muted);
+  font-family: var(--font-text);
+  font-size: 2.2em;
+  font-weight: 400;
+  line-height: 1;
+  cursor: pointer;
+}
+.scriptorium-focus .scriptorium-focus-button:hover:not(:disabled),
+.scriptorium-focus .scriptorium-focus-button:focus-visible {
+  background: none;
+  color: var(--scriptorium-focus-ink);
+  border-color: var(--scriptorium-focus-muted);
+  box-shadow: none;
+  outline: none;
+}
+.scriptorium-focus .scriptorium-focus-button:disabled { opacity: 0.25; pointer-events: none; }   /* a click there is a click outside the image */
+.scriptorium-focus .scriptorium-focus-close { top: 0.25em; right: 0.4em; }
+.scriptorium-focus :is(.scriptorium-focus-prev, .scriptorium-focus-next) { top: 50%; transform: translateY(-50%); font-size: 2.8em; }
+.scriptorium-focus .scriptorium-focus-prev { left: 0.25em; }
+.scriptorium-focus .scriptorium-focus-next { right: 0.25em; }
+.scriptorium-focus.is-single :is(.scriptorium-focus-prev, .scriptorium-focus-next, .scriptorium-focus-counter) { display: none; }
+.scriptorium-focus-caption {
+  position: absolute;
+  left: 50%;
+  bottom: 0.9em;
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(42em, calc(100% - 7em));
+  padding: 0.45em 1.25em 0.55em;
+  background: var(--scriptorium-focus-slip);
+  color: var(--scriptorium-focus-slip-ink);
+  border: 1px solid var(--scriptorium-focus-slip-rule);
+  box-shadow: inset 0 0 0 3px var(--scriptorium-focus-slip), inset 0 0 0 4px var(--scriptorium-focus-slip-rule);
+  font-size: 1em;
+  line-height: 1.4;
+  text-align: center;
+  cursor: auto;
+  user-select: text;
+}
+.scriptorium-focus-caption.is-empty { display: none; }
+.scriptorium-focus-caption p { margin: 0; }
+.scriptorium-focus-caption p + p {
+  margin-top: 0.35em;
+  padding-top: 0.35em;
+  border-top: 1px dotted var(--scriptorium-focus-slip-rule);
+}
+.scriptorium-focus-caption .scriptorium-focus-title {
+  color: var(--scriptorium-focus-slip-muted);
+  font-style: italic;
+  font-size: 0.92em;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .scriptorium-focus { animation: scriptorium-focus-in 0.18s ease-out; }
+  .scriptorium-focus:not(.is-dragging) .scriptorium-focus-image { transition: transform 0.12s ease-out, opacity 0.15s ease-out; }
+  body.scriptorium-image-focus .markdown-reading-view .markdown-preview-view img:not(.emoji, a img, .callout-icon img):active {
+    transform: scale(0.985);
+  }
+}
+@keyframes scriptorium-focus-in { from { opacity: 0; } }

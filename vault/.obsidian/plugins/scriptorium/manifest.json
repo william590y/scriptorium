@@ -3,7 +3,7 @@
   "name": "Scriptorium",
   "version": "1.0.5",
   "minAppVersion": "1.0.0",
-  "description": "Switch between Scriptorium's regular and fancy typography.",
+  "description": "Switch between Scriptorium's regular and fancy typography, choose the drop cap, set footnotes in the margin and see images in focus.",
   "author": "William Liaw",
   "authorUrl": "https://williamliaw.com/scriptorium",
   "isDesktopOnly": false

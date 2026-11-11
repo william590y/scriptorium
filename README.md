@@ -3,12 +3,13 @@
 A fancy and sophisticated Obsidian configuration for the typographically inclined.
 
 Scriptorium gives [Obsidian](https://obsidian.md) book-page typography: bookish serif type, warm paper, centered
-small-cap headings, italic subtitles, ornamental Yinit drop caps and floral scene breaks. It is made of:
+small-cap headings, italic subtitles, ornamental drop caps and floral scene breaks, with footnotes set in the margin,
+quiet admonitions and a focused view of images, after [gwern.net](https://gwern.net). It is made of:
 
 - **the vault template** (`vault/`): the Typewriter theme, the `manuscript` CSS snippet, writing plugins and a
   Lorem Ipsum sample note;
 - **the Scriptorium plugin** (`vault/.obsidian/plugins/scriptorium`), which switches between the regular and the
-  Fancy typography;
+  Fancy typography, chooses the drop cap, and sets footnotes in the margin and images in focus;
 - **Scriptorium Setup** (`installer/`), a small Windows installer that creates a new vault from the template and, if
   you tick them, installs Obsidian, the fonts and the Longform plugin;
 - **script installers** for Windows, macOS and Linux (`installers/`).
@@ -18,12 +19,37 @@ Screenshots of both modes: <https://williamliaw.com/scriptorium>
 ## Fancy mode
 
 Fancy mode starts **off**, with centered small-cap section headings and bordered quotations. Turn it on for quiet
-italic quotations and justified openings. Both modes open chapters with an ornamental Yinit initial and use the same
-1.45 line spacing.
+italic quotations and justified openings. Both modes open chapters with a drop cap (an ornamental Yinit initial unless
+you choose another) and use the same 1.45 line spacing.
 
 In Obsidian, go to **Settings → Scriptorium → Fancy mode**. You can also click the **feather icon**, click
 **Fancy mode: on/off** in the status bar, or run **Scriptorium: Toggle fancy mode** from the command palette. Your
 choice is remembered for that vault.
+
+## Drop caps, marginalia, admonitions and image focus
+
+These are set in **Settings → Scriptorium**, and remembered for the vault:
+
+- **Drop cap:** the initial that opens a chapter in Reading view: **Yinit** (ornamental, the default), **Goudy
+  Initialen** (floriated), a **plain capital** in Cormorant Garamond, or **none**. Each is a three-line drop in the
+  accent colour, with the rest of the first line in small capitals; with none, the opening paragraph starts with an
+  ordinary letter, without small capitals, justified like the rest.
+- **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
+  margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
+  rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
+  another. Hovering a reference lights its note and the other way round. They need a pane wide enough for the text
+  column and a note column (with the 22-pixel text, a window about 1,200 pixels wide with the sidebars closed); where the
+  right margin alone is too narrow, the text moves left so that text and notes are centred together. In a narrower pane, or with **Readable line length**
+  off, footnotes stay at the foot of the note. A callout of type margin (`> [!margin]`) is a marginal note without a
+  number. The command **Scriptorium: Toggle marginalia** turns them on and off.
+- **Image focus** (on by default): click an image in a note (Reading view or Live Preview) to see it on its own, on a
+  dimmed page, fitted to the window, with its caption below. **←** and **→** step through the note's images ("2 of 5"),
+  the mouse wheel zooms and dragging pans, double-click zooms in and out, and **Esc**, a click outside the image or the
+  × button returns to the note.
+
+Callouts (`> [!note]`, `> [!tip]`, `> [!warning]`, `> [!error]` and the others) are set as gwern.net's admonitions, in
+the snippet: a tinted slip with a broad band and a printer's mark (☞ for a note, † for danger), darker for the more
+urgent kinds, in Reading view and Live Preview, light and dark.
 
 ## Writing conventions
 
@@ -32,6 +58,11 @@ choice is remembered for that vault.
 - `## Chapter heading` creates a centered small-cap chapter heading; `### Section heading` a smaller one.
 - `> Quotation` creates an italic quotation.
 - `---` creates an ornamental scene break.
+- `[^1]` with `[^1]: The note.` creates a footnote, set in the margin in Reading view when there is room.
+- `> [!margin]` followed by `> Text` creates an unnumbered marginal note beside the paragraph that follows it.
+- `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` and the other callouts create admonitions.
+- `![[image.png|A caption]]` (or `![A caption](image.png "A title")`) gives an image the caption shown when it is in
+  focus.
 - Images are centred. Put `left`, `right` or `center` before the size to place one: `![[image.png|left|300]]`,
   `![[image.png|right|240]]`, `![[image.png|center]]`. Left and right images float in Reading view.
 
@@ -74,6 +105,9 @@ Everything is built from this repository; the release files are built by GitHub 
 | `dist/Scriptorium-Setup.exe` | `tools/build_exe.sh` (rebuilds the zip first) | [Mono](https://www.mono-project.com) (`csc` on `PATH`, or `MONO=<prefix>`) |
 | `installer/fonts/*.ttf` (committed) | `python3 tools/build_fonts.py` | Python 3.9 or later, [fontTools](https://github.com/fonttools/fonttools) |
 
+The Scriptorium plugin's layout and parsing helpers (sidenote placement and stacking, footnote definitions, image
+captions) are tested with `node --test plugins-tests/scriptorium.test.js` (Node 18 or later); CI runs it on Linux.
+
 The zip is deterministic: sorted entries, one fixed timestamp (or `SOURCE_DATE_EPOCH`) and fixed permissions, so the
 same `vault/` gives the same bytes. CI rebuilds it on Linux and checks that it matches the Windows build. The installer
 embeds the zip as the resource `Scriptorium.zip`. On Windows, CI compiles it with the Roslyn `csc.exe` from Visual
@@ -108,6 +142,8 @@ vault/        the vault template (the Scriptorium plugin and snippet live here)
 installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico, and fonts/ (the window's type)
 installers/   the script installers
 tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py
+plugins-tests/ tests for the Scriptorium plugin's layout and parsing (node --test plugins-tests/scriptorium.test.js)
+licenses/     licenses of embedded fonts
 ```
 
 ## Third-party components
@@ -118,6 +154,7 @@ tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py
 | [Manuscriptum](https://github.com/sgranade/manuscriptum) 1.0.2 | `vault/.obsidian/plugins/manuscriptum` | Stephen Granade | MIT |
 | [Typewriter Mode](https://github.com/davisriedel/obsidian-typewriter-mode) 1.6.1 | `vault/.obsidian/plugins/typewriter-mode` | Davis Riedel | MIT |
 | Yinit initials (from [yinit-otf](https://ctan.org/pkg/yinit-otf)) | embedded in `vault/.obsidian/snippets/manuscript.css` | Yannis Haralambous | Public domain |
+| Goudy Initialen (from [initials](https://ctan.org/pkg/initials)) | embedded in `vault/.obsidian/snippets/manuscript.css` | after F. W. Goudy; Dieter Steffmann | LaTeX Project Public License |
 | EB Garamond and Cormorant Garamond subsets, for the installer's window | `installer/fonts` | The EB Garamond Project Authors; the Cormorant Project Authors | SIL OFL 1.1 |
 
 Each license file sits next to its component. These are not part of this repository and not included in the
