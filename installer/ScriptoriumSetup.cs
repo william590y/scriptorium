@@ -342,7 +342,7 @@ namespace ScriptoriumSetup
 
         enum Rule { Replace, Keep, Plugins, Appearance }
 
-        static readonly string[] BundledPlugins = { "scriptorium", "manuscriptum", "typewriter-mode" };
+        static readonly string[] BundledPlugins = { "scriptorium", "manuscriptum", "typewriter-mode", "lagrange" };
         static readonly string[] PluginCode = { "main.js", "manifest.json", "styles.css", "LICENSE" };
 
         public static Target Classify(string path)

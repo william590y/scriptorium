@@ -33,7 +33,7 @@ OBS = ".obsidian"
 
 # Scriptorium's own files: an update must make each of these equal to the package.
 MANAGED = [f"{OBS}/snippets/manuscript.css", "README.md"] + [
-    f"{OBS}/plugins/{p}/{f}" for p in ("scriptorium", "manuscriptum", "typewriter-mode")
+    f"{OBS}/plugins/{p}/{f}" for p in ("scriptorium", "manuscriptum", "typewriter-mode", "lagrange")
     for f in ("main.js", "manifest.json", "styles.css", "LICENSE")
 ] + sorted(p.relative_to(PACKAGE).as_posix() for p in (PACKAGE / OBS / "themes" / "Typewriter").iterdir())
 
