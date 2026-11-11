@@ -629,6 +629,36 @@ body.theme-dark {
   --scroll-knob-hi: #7a5534;
   --scroll-shadow: rgba(0, 0, 0, 0.45);
 }
+/* The code is written on the scroll in ink: iron-gall ink for the text, rubric for keywords (as a scribe rubricated
+   headings), faded sepia for strings and values, a thin wash of ink for comments. */
+body.theme-light {
+  --code-normal: #2e241b;
+  --code-keyword: #8b2323;
+  --code-important: #8b2323;
+  --code-tag: #8b2323;
+  --code-function: #4a3020;
+  --code-property: #4f3d2c;
+  --code-string: #7a5f38;
+  --code-value: #6e4a2a;
+  --code-operator: #5c4a38;
+  --code-punctuation: #6b5a48;
+  --code-comment: #9a8a70;
+  --scroll-ink-bleed: rgba(46, 36, 27, 0.35);
+}
+body.theme-dark {
+  --code-normal: #e2d6c0;
+  --code-keyword: #d4826f;
+  --code-important: #d4826f;
+  --code-tag: #d4826f;
+  --code-function: #ead9b9;
+  --code-property: #d8c7a8;
+  --code-string: #c9ad7f;
+  --code-value: #d6a37c;
+  --code-operator: #bfae95;
+  --code-punctuation: #a8977f;
+  --code-comment: #8c7e6a;
+  --scroll-ink-bleed: rgba(226, 214, 192, 0.25);
+}
 body.theme-light, body.theme-dark {
   --code-background: var(--scroll-sheet);
   --scroll-rod: 0.92em;   /* the rolled end's thickness */
@@ -679,6 +709,20 @@ body.theme-light, body.theme-dark {
 .markdown-source-view.mod-cm6 .HyperMD-codeblock-end { position: relative; padding-bottom: calc(var(--scroll-rod) * 0.9) !important; }
 .markdown-source-view.mod-cm6 .HyperMD-codeblock-begin::before { top: calc(var(--scroll-rod) * -0.35); left: -0.6em; right: -0.6em; }
 .markdown-source-view.mod-cm6 .HyperMD-codeblock-end::after { bottom: calc(var(--scroll-rod) * -0.35); left: -0.6em; right: -0.6em; }
+/* the ink: a faint bleed into the parchment, comments in the italic of a marginal note */
+.markdown-rendered pre code,
+.markdown-source-view.mod-cm6 .HyperMD-codeblock {
+  color: var(--code-normal);
+  text-shadow: 0 0 0.6px var(--scroll-ink-bleed), 0.2px 0.3px 0.4px var(--scroll-ink-bleed);
+}
+.markdown-rendered pre code .token.comment,
+.markdown-source-view.mod-cm6 .HyperMD-codeblock .cm-comment {
+  font-style: italic;
+}
+.markdown-rendered pre code .token.keyword,
+.markdown-source-view.mod-cm6 .HyperMD-codeblock .cm-keyword {
+  font-weight: 600;
+}
 @media print {
   .markdown-rendered pre { box-shadow: none; }
 }
