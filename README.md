@@ -92,7 +92,7 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
 - **Updating (Windows):** open a newer `Scriptorium-Setup.exe` and choose your vault folder (by default
   `Documents\Scriptorium`). When the folder is a Scriptorium vault, the button reads **Update** and the window says which
   version is in it. Update replaces Scriptorium's own files with the new ones: the `manuscript` snippet, the code of the
-  Scriptorium, Manuscriptum and Typewriter Mode plugins (and Longform's, if ticked), the Typewriter theme and the vault's
+  Scriptorium, Lagrange, Manuscriptum and Typewriter Mode plugins (and Longform's, if ticked), the Typewriter theme and the vault's
   `README.md`. It keeps everything of yours: your notes, the plugins' settings (`data.json`, such as Fancy mode),
   Obsidian's settings and workspace, and the Lorem Ipsum note; files of the configuration that are missing are added
   back, and nothing is deleted. It turns the `manuscript` snippet and Scriptorium's community plugins back on if they

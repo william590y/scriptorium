@@ -1,7 +1,7 @@
 {
   "id": "scriptorium",
   "name": "Scriptorium",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "minAppVersion": "1.0.0",
   "description": "Switch between Scriptorium's regular and fancy typography, choose the drop cap, set footnotes in the margin and see images in focus.",
   "author": "William Liaw",
