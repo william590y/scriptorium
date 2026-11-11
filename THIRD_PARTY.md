@@ -1,7 +1,8 @@
 # Third-party components
 
-Scriptorium's own files (the Scriptorium and Lagrange plugins apart from the font embedded in Lagrange's `styles.css`, the
-`manuscript` snippet apart from the embedded Yinit font, the installers and the build tools) are licensed under the GNU General Public License, version 3 or later (see
+Scriptorium's own files (the Scriptorium and Lagrange plugins apart from the font embedded in Lagrange's `styles.css`,
+the `manuscript` snippet apart from the embedded Yinit and Scriptorium Mono fonts, the installers and the build tools)
+are licensed under the GNU General Public License, version 3 or later (see
 [LICENSE](LICENSE)). The components below keep their own licenses.
 
 ## Included in `vault/` (and so in `Scriptorium.zip` and `Scriptorium-Setup.exe`)
@@ -34,6 +35,16 @@ Scriptorium's own files (the Scriptorium and Lagrange plugins apart from the fon
 - Author: Davis Riedel
 - License: MIT, Copyright (c) 2023-2026 Davis Riedel: `vault/.obsidian/plugins/typewriter-mode/LICENSE`
   (upstream `LICENSE.md`)
+
+### Scriptorium Mono (IBM Plex Mono, renamed)
+
+- Path: embedded (WOFF2: regular, italic, bold, bold italic; Latin subset) in `vault/.obsidian/snippets/manuscript.css`
+  as the font "Scriptorium Mono"
+- Source: IBM Plex Mono from <https://github.com/google/fonts/tree/main/ofl/ibmplexmono> (upstream
+  <https://github.com/IBM/plex>), subset with fontTools `pyftsubset`
+- Copyright © 2017 IBM Corp., with Reserved Font Name "Plex". This subset is a Modified Version under the OFL, so it is
+  renamed "Scriptorium Mono" in its name table and in the CSS.
+- License: SIL Open Font License 1.1: [`licenses/ScriptoriumMono-OFL.txt`](licenses/ScriptoriumMono-OFL.txt)
 
 ### Yinit decorative initials
 
