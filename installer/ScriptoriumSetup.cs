@@ -285,7 +285,7 @@ namespace ScriptoriumSetup
                                      Red = Color.FromArgb(0x8B, 0x23, 0x23), Pencil = Color.FromArgb(0x6E, 0x69, 0x63),
                                      Edge = Color.FromArgb(0xCF, 0xC6, 0xB4);
         public static float S = 1f;              // device pixels per 96-dpi pixel
-        public const float Faded = 0.38f;        // how strongly a disabled control is inked
+        public const float Faded = 0.42f;        // how strongly a disabled control is inked
 
         public static int R(float logical) { return (int)Math.Round(logical * S); }
         public static Color A(Color c, float alpha) { return Color.FromArgb((int)Math.Round(255 * Math.Max(0f, Math.Min(1f, alpha))), c.R, c.G, c.B); }
@@ -339,7 +339,8 @@ namespace ScriptoriumSetup
                 if (d < 1e-4f) { dx = 1; dy = 0; d = 1; }
                 float nx = -dy / d, ny = dx / d;
                 float tin = taperIn > 0 ? Math.Min(1f, dist[i] / taperIn) : 1f, tout = taperOut > 0 ? Math.Min(1f, (total - dist[i]) / taperOut) : 1f;
-                float w = width * (0.42f + 0.58f * (float)Math.Sqrt(Math.Min(tin, tout))) * (1f + 0.14f * (float)Math.Sin(phase + dist[i] / wave));
+                float w = width * (0.42f + 0.58f * (float)Math.Sqrt(Math.Min(tin, tout)))
+                          * (1f + 0.16f * (float)Math.Sin(phase + dist[i] / wave) + 0.07f * (float)Math.Sin(2.3f * phase + dist[i] / (wave * 0.29f)));
                 shape[i] = new PointF(p[i].X + nx * w / 2, p[i].Y + ny * w / 2);
                 shape[2 * n - 1 - i] = new PointF(p[i].X - nx * w / 2, p[i].Y - ny * w / 2);
             }
@@ -589,11 +590,25 @@ namespace ScriptoriumSetup
 
         public static float Ascent(Font f) { return f.Size * f.FontFamily.GetCellAscent(f.Style) / f.FontFamily.GetEmHeight(f.Style); }
 
-        public static float Width(Graphics g, string s, Font f) { return s.Length == 0 ? 0 : g.MeasureString(s, f, PointF.Empty, Format).Width; }
+        public static float Width(Graphics g, string s, Font f) { return s.Length == 0 ? 0 : g.MeasureString(Quotes(s), f, PointF.Empty, Format).Width; }
 
         public static void Line(Graphics g, string s, Font f, Color c, float x, float baseline)
         {
-            using (var b = new SolidBrush(c)) g.DrawString(s, f, b, x, baseline - Ascent(f), Format);
+            using (var b = new SolidBrush(c)) g.DrawString(Quotes(s), f, b, x, baseline - Ascent(f), Format);
+        }
+
+        // Straight quotes are set as curly ones, as a compositor would.
+        public static string Quotes(string s)
+        {
+            if (s.IndexOf('"') < 0 && s.IndexOf('\'') < 0) return s;
+            var c = s.ToCharArray();
+            for (int i = 0; i < c.Length; i++)
+            {
+                bool opening = i == 0 || char.IsWhiteSpace(c[i - 1]) || c[i - 1] == '(';
+                if (c[i] == '"') c[i] = opening ? '\u201C' : '\u201D';
+                else if (c[i] == '\'') c[i] = opening ? '\u2018' : '\u2019';
+            }
+            return new string(c);
         }
 
         public static float SpacedWidth(Graphics g, string s, Font f, float tracking)
@@ -823,7 +838,7 @@ namespace ScriptoriumSetup
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             AutoSize = false; UseVisualStyleBackColor = false; BackColor = Ink.Paper;
-            Font = Typefaces.Make(Typefaces.Text, 16f, FontStyle.Regular);
+            Font = Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular);
         }
 
         float BoxSize { get { return 18 * Ink.S; } }
@@ -984,7 +999,7 @@ namespace ScriptoriumSetup
                 if (b - a > 2 * s)
                 {
                     PointF[] p = PenLine(a, b);
-                    Ink.Stroke(g, p, 2.3f * s, ink, 0xC0FFEEu, span * 0.85f, head > X1 ? 6 * s : 0);
+                    Ink.Stroke(g, p, 2.1f * s, ink, 0xC0FFEEu, span * 0.85f, head > X1 ? 6 * s : 0);
                     if (head <= X1) Blot(g, p[p.Length - 1]);
                 }
             }
@@ -992,7 +1007,7 @@ namespace ScriptoriumSetup
             {
                 float head = X0 + (X1 - X0) * value / 100f;
                 PointF[] p = PenLine(X0, Math.Max(X0 + 2 * s, head));
-                Ink.Stroke(g, p, 2.3f * s, ink, 0xC0FFEEu, 7 * s, 0);
+                Ink.Stroke(g, p, 2.1f * s, ink, 0xC0FFEEu, 7 * s, 0);
                 Blot(g, p[p.Length - 1]);
             }
         }
@@ -1009,12 +1024,12 @@ namespace ScriptoriumSetup
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             SetStyle(ControlStyles.Selectable, false);
             TabStop = false; AccessibleName = "Details"; AccessibleRole = AccessibleRole.StaticText;
-            Font = Typefaces.Make(Typefaces.Text, 15f, FontStyle.Italic);
+            Font = Typefaces.Make(Typefaces.Text, 15.5f, FontStyle.Italic);
             ContextMenu = new ContextMenu(new[] { new MenuItem("Copy the details", (s, e) => { try { if (AllText.Length > 0) Clipboard.SetText(AllText); } catch { } }) });
         }
 
         public string AllText { get { return string.Join(Environment.NewLine, entries.Select(e => e.Key)); } }
-        public float LineHeight { get { return (float)Math.Round(21 * Ink.S); } }
+        public float LineHeight { get { return (float)Math.Round(22 * Ink.S); } }
 
         public void Append(string line, bool error) { entries.Add(new KeyValuePair<string, bool>(line, error)); AccessibleDescription = line; Invalidate(); }
         public void Clear() { entries.Clear(); AccessibleDescription = null; Invalidate(); }
@@ -1038,7 +1053,7 @@ namespace ScriptoriumSetup
                 foreach (string line in Lettering.Wrap(g, e.Key, Font, Width - textX - 4 * s)) lines.Add(new KeyValuePair<string, bool>(line, e.Value));
             int first = Math.Max(0, lines.Count - rows);
             for (int i = first; i < lines.Count; i++)
-                Lettering.Line(g, lines[i].Key, Font, lines[i].Value ? Ink.Red : Ink.A(Ink.Black, 0.92f), textX, RuleY(i - first + 1) - (float)Math.Round(4.5f * s));
+                Lettering.Line(g, lines[i].Key, Font, lines[i].Value ? Ink.Red : Ink.Black, textX, RuleY(i - first + 1) - (float)Math.Round(4.5f * s));
         }
 
         float RuleY(int k) { return (float)Math.Round(k * LineHeight + 2 * Ink.S); }
@@ -1080,18 +1095,18 @@ namespace ScriptoriumSetup
             Font = Typefaces.Make(Typefaces.Text, 16f, FontStyle.Regular);
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-            title = new InkLabel("Scriptorium", Typefaces.Make(Typefaces.Display, 50f, FontStyle.Regular), Ink.Red, true);
+            title = new InkLabel("Scriptorium", Typefaces.Make(Typefaces.Display, 48f, FontStyle.Regular), Ink.Red, true);
             tagline = new InkLabel("Book-page typography for Obsidian.", Typefaces.Make(Typefaces.Text, 18f, FontStyle.Italic), Ink.Muted, true);
-            intro = new InkLabel("This creates a new vault with the Scriptorium configuration and a Lorem Ipsum sample note.",
-                                 Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular), Ink.Black, false);
+            intro = new InkLabel("This creates a new vault with the Scriptorium configuration and a Lorem\u00A0Ipsum sample note.",
+                                 Typefaces.Make(Typefaces.Text, 17f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
             folderLabel = new InkLabel("New vault folder", Typefaces.Make(Typefaces.Semi, 16f, FontStyle.Regular), Ink.Black, false) { SmallCaps = true, Tracking = 0.06f };
             folderHint = new InkLabel("The folder must not exist yet. An existing folder is never changed.",
-                                      Typefaces.Make(Typefaces.Text, 15.5f, FontStyle.Italic), Ink.Muted, false);
+                                      Typefaces.Make(Typefaces.Text, 16f, FontStyle.Italic), Ink.Muted, false);
             status = new InkLabel("Ready.", Typefaces.Make(Typefaces.Text, 16f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2, Leading = 1.3f };
 
             pathBox.Text = preview ? @"C:\Users\Ada\Documents\Scriptorium" : Installer.DefaultVault;
-            pathBox.BorderStyle = BorderStyle.None; pathBox.ForeColor = Ink.Black; pathBox.BackColor = Ink.Paper;
-            pathBox.Font = Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular);
+            pathBox.BorderStyle = BorderStyle.None; pathBox.AutoSize = false; pathBox.ForeColor = Ink.Black; pathBox.BackColor = Ink.Paper;
+            pathBox.Font = Typefaces.Make(Typefaces.Text, 17f, FontStyle.Regular);
             pathBox.AccessibleName = "New vault folder";
             pathBox.EnabledChanged += (s, e) => { pathBox.Visible = pathBox.Enabled; Invalidate(); };
             browse.Name = "browse"; browse.Click += OnBrowse;
@@ -1126,7 +1141,7 @@ namespace ScriptoriumSetup
         bool ObsidianInstalled() { return !preview && (Installer.FindObsidian() != null || Installer.ObsidianProtocolRegistered()); }
 
         // ---------- the page ----------
-        const float PageWidth = 580, PageMargin = 40;
+        const float PageWidth = 600, PageMargin = 40;
         int bottomY;
 
         void Place(Control c, float x, ref float y, float width, float after)
@@ -1137,35 +1152,50 @@ namespace ScriptoriumSetup
             y += h + after * Ink.S;
         }
 
+        // The page is laid out once (its width is fixed); the ledger gets as many lines as the screen has room for, up to
+        // four, so the window always fits (1080p at 150% included).
         void LayoutPage()
         {
-            float s = Ink.S, cw = PageWidth - 2 * PageMargin, y = 10 * s;
-            Place(title, PageMargin, ref y, cw, -6);
+            LayoutPage(4);
+            if (preview) return;
+            try
+            {
+                int room = Screen.FromPoint(Cursor.Position).WorkingArea.Height - SizeFromClientSize(Size.Empty).Height;
+                for (int rows = 3; rows >= 2 && ClientSize.Height > room; rows--) LayoutPage(rows);
+            }
+            catch { }
+        }
+
+        void LayoutPage(int logRows)
+        {
+            float s = Ink.S, cw = PageWidth - 2 * PageMargin, y = 8 * s;
+            Place(title, PageMargin, ref y, cw, -8);
             Place(tagline, PageMargin, ref y, cw, 0);
-            ornamentY = y + 14 * s; y += 30 * s;
-            Place(intro, PageMargin, ref y, cw, 14);
+            ornamentY = y + 12 * s; y += 26 * s;
+            Place(intro, PageMargin, ref y, cw, 12);
             Place(folderLabel, PageMargin, ref y, cw, 0);
 
             int bw = Ink.R(108), bh = Ink.R(36);
             browse.SetBounds(Ink.R(PageWidth - PageMargin + 3.5f) - bw, (int)Math.Round(y), bw, bh);
-            int th = pathBox.PreferredHeight;
-            pathBox.SetBounds(Ink.R(PageMargin), (int)Math.Round(y + (bh - th) / 2f - 3 * s), browse.Left - Ink.R(PageMargin + 18), th);
-            ruleY = (float)Math.Round(pathBox.Top + Lettering.Ascent(pathBox.Font) + 5 * s);
+            // The text box is cut just below its descenders, so the ruled line drawn under it stays visible.
+            int th = (int)Math.Ceiling(Lettering.Ascent(pathBox.Font) + 0.31f * pathBox.Font.Size);
+            pathBox.SetBounds(Ink.R(PageMargin), (int)Math.Round(y + (bh - th) / 2f - 1 * s), browse.Left - Ink.R(PageMargin + 18), th);
+            ruleY = (float)Math.Round(pathBox.Bottom + 1.5f * s);
             y += bh + 2 * s;
-            Place(folderHint, PageMargin, ref y, cw, 12);
+            Place(folderHint, PageMargin, ref y, cw, 9);
 
             foreach (InkCheck c in new[] { fontsBox, obsidianBox, longformBox, openBox })
             {
-                c.SetBounds(Ink.R(PageMargin - 1.5f), (int)Math.Round(y), c.PreferredWidth(), Ink.R(28));
-                y += 28 * s;
+                c.SetBounds(Ink.R(PageMargin - 1.5f), (int)Math.Round(y), c.PreferredWidth(), Ink.R(27));
+                y += 27 * s;
             }
-            y += 12 * s;
-            bar.SetBounds(Ink.R(PageMargin - 2), (int)Math.Round(y), Ink.R(cw + 4), Ink.R(20)); y += 22 * s;
-            Place(status, PageMargin, ref y, cw, 4);
-            details.SetBounds(Ink.R(PageMargin), (int)Math.Round(y), Ink.R(cw), (int)Math.Round(5 * details.LineHeight + 6 * s)); y += details.Height + 16 * s;
+            y += 9 * s;
+            bar.SetBounds(Ink.R(PageMargin - 2), (int)Math.Round(y), Ink.R(cw + 4), Ink.R(20)); y += 20 * s;
+            Place(status, PageMargin, ref y, cw, 2);
+            details.SetBounds(Ink.R(PageMargin), (int)Math.Round(y), Ink.R(cw), (int)Math.Round(logRows * details.LineHeight + 6 * s)); y += details.Height + 12 * s;
             bottomY = (int)Math.Round(y);
             LayoutButtons();
-            ClientSize = new Size(Ink.R(PageWidth), bottomY + bh + Ink.R(20));
+            ClientSize = new Size(Ink.R(PageWidth), bottomY + Ink.R(38) + Ink.R(16));
             if (paper != null) { paper.Dispose(); paper = null; }
             pathBox.BackColor = AveragePaper(pathBox.Bounds);
         }
@@ -1229,6 +1259,13 @@ namespace ScriptoriumSetup
             pathBox.SelectionStart = pathBox.TextLength; pathBox.SelectionLength = 0;
         }
 
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            // A preview drawn at a larger scale may be taller than the (small) CI screen: do not let Windows clip it.
+            if (preview && m.Msg == 0x0024 /* WM_GETMINMAXINFO */) { Marshal.WriteInt32(m.LParam, 32, 20000); Marshal.WriteInt32(m.LParam, 36, 20000); }
+        }
+
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void OnPaint(PaintEventArgs e) { PaintPage(e.Graphics); }
 
@@ -1241,12 +1278,12 @@ namespace ScriptoriumSetup
             float s = Ink.S, cx = ClientSize.Width / 2f;
 
             // Under the subtitle: a fleuron between two short pen rules.
-            using (Font f = Typefaces.Make(Typefaces.Display, 23f, FontStyle.Regular))
+            using (Font f = Typefaces.Make(Typefaces.Display, 25f, FontStyle.Regular))
             {
                 const string fleuron = "\u2766";
                 float w = Lettering.Width(g, fleuron, f), baseline = (float)Math.Round(ornamentY + f.Size * 0.30f);
                 Lettering.Line(g, fleuron, f, Ink.A(Ink.Muted, 0.95f), (float)Math.Round(cx - w / 2), baseline);
-                float gap = 12 * s, len = 54 * s;
+                float gap = 12 * s, len = 62 * s;
                 Ink.Stroke(g, Ink.Ruled(cx - w / 2 - gap - len, cx - w / 2 - gap, ornamentY, 0.35f * s, 0xA11Eu), 1.25f * s, Ink.A(Ink.Black, 0.6f), 0xA11Fu, 10 * s, 3 * s);
                 Ink.Stroke(g, Ink.Ruled(cx + w / 2 + gap, cx + w / 2 + gap + len, ornamentY, 0.35f * s, 0xA120u), 1.25f * s, Ink.A(Ink.Black, 0.6f), 0xA121u, 3 * s, 10 * s);
             }
@@ -1473,7 +1510,7 @@ namespace ScriptoriumSetup
                     States(dir);
                     Animation(dir);
                     Ink.S = 1.5f;
-                    using (SetupForm f = Open()) Save(f, dir, "08-ready-150.png");
+                    using (SetupForm f = Open()) { log.WriteLine("Client size at 150%: " + f.ClientSize); Save(f, dir, "08-ready-150.png"); }
                     Ink.S = 1f;
                     log.WriteLine("OK");
                     return 0;
@@ -1495,6 +1532,7 @@ namespace ScriptoriumSetup
             Ink.S = 1f;
             using (SetupForm f = Open())
             {
+                log.WriteLine("Client size: " + f.ClientSize);
                 Save(f, dir, "01-ready.png");
                 try { f.DrawToBitmapCheck(dir); } catch (Exception e) { log.WriteLine("DrawToBitmap: " + e.Message); }
                 CaptureScreen(f, dir);
