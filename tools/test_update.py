@@ -33,7 +33,7 @@ OBS = ".obsidian"
 
 # Scriptorium's own files: an update must make each of these equal to the package.
 MANAGED = [f"{OBS}/snippets/manuscript.css", "README.md"] + [
-    f"{OBS}/plugins/{p}/{f}" for p in ("scriptorium", "manuscriptum", "typewriter-mode")
+    f"{OBS}/plugins/{p}/{f}" for p in ("scriptorium", "manuscriptum", "typewriter-mode", "lagrange")
     for f in ("main.js", "manifest.json", "styles.css", "LICENSE")
 ] + sorted(p.relative_to(PACKAGE).as_posix() for p in (PACKAGE / OBS / "themes" / "Typewriter").iterdir())
 
@@ -125,8 +125,8 @@ def test_update(exe, work):
     check(appearance.get("theme") == "moonstone" and appearance.get("accentColor") == "#123456",
           "the rest of appearance.json kept")
     plugins = json.loads(after[f"{OBS}/community-plugins.json"])
-    check(plugins == ["longform", "manuscriptum", "scriptorium", "calendar", "typewriter-mode"],
-          "the missing plugin re-added, the list's order and the user's plugin kept")
+    check(plugins == ["longform", "manuscriptum", "scriptorium", "calendar", "typewriter-mode", "lagrange"],
+          "the missing plugins added, the list's order and the user's plugin kept")
 
     found = backups(vault)
     check(len(found) == 1, "one backup folder in .obsidian")

@@ -9,6 +9,8 @@ small-cap headings, italic subtitles, ornamental Yinit drop caps and floral scen
   Lorem Ipsum sample note;
 - **the Scriptorium plugin** (`vault/.obsidian/plugins/scriptorium`), which switches between the regular and the
   Fancy typography;
+- **Lagrange** (`vault/.obsidian/plugins/lagrange`), a writing companion: a chat about the open note, and edits
+  (revise a selection, proofread a note) that a pen strikes through and writes in;
 - **Scriptorium Setup** (`installer/`), a small Windows installer that creates a new vault from the template and, if
   you tick them, installs Obsidian, the fonts and the Longform plugin;
 - **script installers** for Windows, macOS and Linux (`installers/`).
@@ -34,6 +36,18 @@ choice is remembered for that vault.
 - `---` creates an ornamental scene break.
 - Images are centred. Put `left`, `right` or `center` before the size to place one: `![[image.png|left|300]]`,
   `![[image.png|right|240]]`, `![[image.png|center]]`. Left and right images float in Reading view.
+
+## Lagrange
+
+Lagrange talks with you about the note you have open and edits it when you ask. Click the **pen-nib icon** (or run
+**Lagrange: Open**) for the chat in the right sidebar; select a passage and run **Lagrange: Revise selection**, or run
+**Lagrange: Proofread note**. Each edit is struck through and written in by a pen, then listed in the chat with its
+reason; one **Undo** (or the **Undo Lagrange's edits** button) takes back all the edits of a request.
+
+Choose who writes the replies in **Settings → Lagrange**: Anthropic's Claude (with your API key), an OpenAI-compatible
+server such as a local Ollama, or **Demo (offline)**, which gives canned replies and edits so you can try it without a
+key. The API key is kept, as other Obsidian AI plugins keep theirs, in plain text in the vault's
+`.obsidian/plugins/lagrange/data.json`.
 
 ## Install
 
@@ -73,6 +87,7 @@ Everything is built from this repository; the release files are built by GitHub 
 | `dist/Scriptorium.zip` | `python3 tools/build_zip.py` | Python 3.9 or later |
 | `dist/Scriptorium-Setup.exe` | `tools/build_exe.sh` (rebuilds the zip first) | [Mono](https://www.mono-project.com) (`csc` on `PATH`, or `MONO=<prefix>`) |
 | `installer/fonts/*.ttf` (committed) | `python3 tools/build_fonts.py` | Python 3.9 or later, [fontTools](https://github.com/fonttools/fonttools) |
+| Lagrange's unit tests | `node --test plugins-tests/lagrange.test.js` | Node.js 18 or later |
 
 The zip is deterministic: sorted entries, one fixed timestamp (or `SOURCE_DATE_EPOCH`) and fixed permissions, so the
 same `vault/` gives the same bytes. CI rebuilds it on Linux and checks that it matches the Windows build. The installer
@@ -104,7 +119,8 @@ frames of a whole install) and saves them as PNGs. CI does this on every build a
 ## Repository layout
 
 ```
-vault/        the vault template (the Scriptorium plugin and snippet live here)
+vault/        the vault template (the Scriptorium and Lagrange plugins and the snippet live here)
+plugins-tests/ unit tests for Lagrange's plain functions (not packaged)
 installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico, and fonts/ (the window's type)
 installers/   the script installers
 tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py
@@ -159,6 +175,10 @@ Scriptorium Setup downloads the following, and only when you tick the matching o
 
 Each download is verified against a SHA-256 hash pinned in the installer. Nothing is uploaded, and there is no
 telemetry, analytics or update check. The Scriptorium plugin makes no network requests.
+
+Lagrange, the writing companion, sends the open note and what you write to it to the provider you choose in its
+settings (Anthropic's API at `api.anthropic.com`, or the OpenAI-compatible server whose address you enter), and only
+when you send it a message or run one of its commands. It makes no other requests, and none in Demo mode.
 
 ## Uninstalling
 

@@ -11,6 +11,10 @@ Fancy mode is disabled by default. Switch it under **Settings → Scriptorium �
 
 Both modes use 22 px text and the same 1.45 line spacing. Chapter openings use ornamental Yinit initials (Yannis Haralambous, public domain), embedded in the manuscript snippet, so they need no installation. Both styles are included in the manuscript snippet. The bundled Scriptorium plugin supplies the switch. Enable community plugins when opening this vault; if they remain disabled, the compact style is used.
 
+## Lagrange, the writing companion
+
+Click the pen-nib icon, or run **Lagrange: Open**, to talk about the open note in the right sidebar. Select a passage and run **Lagrange: Revise selection**, or run **Lagrange: Proofread note**: a pen strikes out the old words and writes the new ones, and the chat lists each edit with its reason. One undo takes back all the edits of a request. Choose Anthropic's Claude (with your API key), an OpenAI-compatible server such as a local Ollama, or Demo (offline) under **Settings → Lagrange**. The key is stored in plain text in `.obsidian/plugins/lagrange/data.json`; Lagrange sends the note only to the provider you choose, and only when you ask it something.
+
 ## Open the demonstration
 
 1. Install Obsidian from https://obsidian.md/download.
@@ -19,7 +23,7 @@ Both modes use 22 px text and the same 1.45 line spacing. Chapter openings use o
 4. In Obsidian, choose **Open folder as vault** and select the extracted folder.
 5. Open **Lorem Ipsum** and switch to **Reading view** to see the Yinit drop caps, subtitle rule, quotations, and ornamental scene breaks.
 
-The Typewriter theme and manuscript CSS snippet are enabled in the configuration. Scriptorium, Manuscriptum, and Typewriter Mode are bundled community plugins. Longform is enabled in the configuration but not bundled: Scriptorium Setup downloads it from its official release, or install it from **Settings → Community plugins**. Review the plugins before choosing to enable community plugins in Obsidian.
+The Typewriter theme and manuscript CSS snippet are enabled in the configuration. Scriptorium, Lagrange, Manuscriptum, and Typewriter Mode are bundled community plugins. Longform is enabled in the configuration but not bundled: Scriptorium Setup downloads it from its official release, or install it from **Settings → Community plugins**. Review the plugins before choosing to enable community plugins in Obsidian.
 
 ## Writing conventions
 
