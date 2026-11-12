@@ -7,11 +7,17 @@ build tools and the tests) are licensed under the GNU General Public License, ve
 
 ## Included in `vault/` (and so in `Scriptorium.zip` and `Scriptorium-Setup.exe`)
 
-### Pinyon Script (embedded in Lagrange's styles as "Lagrange Hand")
+### La Belle Aurore (embedded in Lagrange's styles as "Lagrange Hand")
 
-- Path: `vault/.obsidian/plugins/lagrange/styles.css` (a base64 WOFF2, Latin subset made with fontTools `pyftsubset`)
-- Source: <https://github.com/google/fonts/tree/main/ofl/pinyonscript> (upstream <https://github.com/SorkinType/Pinyon>)
-- Authors: The Pinyon Project Authors
+- Path: `vault/.obsidian/plugins/lagrange/styles.css` (a base64 WOFF2, 20 kB): the handwriting of Lagrange's pen and of
+  the captions under its loading plates. Nothing is fetched at run time.
+- Source: `LaBelleAurore.ttf` (version 1.001, SHA-256
+  `ed67462999e05f0cdac92f686374661e4d68c56fdcd7d05725c6df7b41eabd2a`) from
+  <https://github.com/google/fonts/tree/main/ofl/labelleaurore>
+- Modified: a Latin subset (Basic Latin, Latin-1, Latin Extended-A and common punctuation) made with fontTools
+  `pyftsubset`, hinting removed, as WOFF2; the outlines and the name table are unchanged. The font has no Reserved Font
+  Name.
+- Copyright (c) 2010, Kimberly Geswein (kimberlygeswein.com)
 - License: SIL Open Font License 1.1: `vault/.obsidian/plugins/lagrange/LagrangeHand-OFL.txt`
 
 ### Typewriter theme 2.3.4

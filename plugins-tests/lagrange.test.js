@@ -75,7 +75,7 @@ const ANTHROPIC_STREAM = sse([
 ]);
 
 function baseSettings(over) {
-  return Object.assign({}, L.DEFAULT_SETTINGS, { anthropicApiKey: 'sk-ant-test' }, over);
+  return Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'anthropic', anthropicApiKey: 'sk-ant-test' }, over);
 }
 
 /* ---------- SSE parsing ---------- */
@@ -471,14 +471,99 @@ test('Demo: revisions follow the instruction', () => {
   assert.match(L.demoChatReply('What is this?', { title: 'Lorem Ipsum', text: LOREM }), /\*\*Lorem Ipsum\*\*: \d+ words/);
 });
 
+test('Demo: a chat message that asks for a change gets edits the pen can make; a question gets none', () => {
+  const note = { title: 'Lorem Ipsum', text: LOREM };
+  assert.deepEqual(L.parseAgentReply(L.demoChatReply('What is this?', note, true)).ops, []);
+  assert.deepEqual(L.parseAgentReply(L.demoChatReply('fix the typography', note, false)).ops, [], 'not when the chat only talks');
+  const fix = L.parseAgentReply(L.demoChatReply('Please fix the typography', note, true));
+  assert.equal(fix.error, null);
+  assert.ok(fix.ops.length >= 3);
+  assert.doesNotMatch(fix.text, /lagrange-edits|"find"/);
+  const { located, skipped } = L.locateOps(LOREM, fix.ops);
+  assert.equal(located.length, fix.ops.length);
+  assert.equal(skipped.length, 0);
+  const eq = L.parseAgentReply(L.demoChatReply('add an equation', note, true));
+  assert.equal(eq.ops.length, 1);
+  assert.equal(eq.ops[0].op, 'append');
+  assert.ok(L.hasMath(eq.ops[0].text));
+  assert.match(eq.ops[0].text, /\$\$\\frac\{d\}\{dt\}/);
+});
+
 /* ---------- Settings and the shipped files ---------- */
+
+test('Defaults: a Claude subscription is the provider, the chat edits with the pen, and the trail is on', () => {
+  const d = L.DEFAULT_SETTINGS;
+  assert.equal(d.provider, 'claude-code');
+  assert.equal(d.claudeCodeModel, 'sonnet');
+  assert.equal(d.agenticEdits, true);
+  assert.equal(d.penTrail, true);
+  assert.equal(d.effort, '');
+  assert.equal(L.sanitizeSettings(null).provider, 'claude-code');
+  assert.equal(L.sanitizeSettings({}).provider, 'claude-code');
+  // A vault that chose a provider keeps it.
+  for (const p of ['anthropic', 'codex', 'openai-api', 'openai', 'demo']) assert.equal(L.sanitizeSettings({ provider: p }).provider, p);
+  assert.equal(L.footLabel(d), 'Claude (subscription, sonnet)');
+  // On a phone the subscription can't run: the plugin says so (and the file loads no Node module at the top level).
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /On a phone or tablet, choose an API key provider \(or the Demo\)/);
+});
+
+test('The trebuchet is gone: no plate, no caption, no setting; a saved "trebuchet" becomes "random"', () => {
+  assert.deepEqual(L.LOADER_THEMES, ['random', 'clockwork', 'alchemy', 'orbit']);
+  assert.deepEqual(Object.keys(L.LOADER_CAPTIONS).sort(), ['alchemy', 'clockwork', 'orbit']);
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'trebuchet' }).loaderTheme, 'random');
+  const kept = L.sanitizeSettings({ loaderTheme: 'trebuchet', provider: 'demo', penSpeed: 2 });
+  assert.equal(kept.provider, 'demo', 'the rest of the saved settings are kept');
+  assert.equal(kept.penSpeed, 2);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  // The word survives only in the comment on the fallback.
+  assert.deepEqual(js.split('\n').filter(l => /trebuchet/i.test(l)).map(l => l.trim()),
+    ["// A plate that no longer exists (a saved 'trebuchet', from 0.1) falls back to 'random'."]);
+  assert.doesNotMatch(css, /trebuchet/i);
+  assert.doesNotMatch(js, /taking aim|\bsling\b/i);
+  for (const f of ['README.md', 'THIRD_PARTY.md']) assert.doesNotMatch(fs.readFileSync(path.join(ROOT, f), 'utf8'), /trebuchet/i, f);
+});
+
+test('The pen’s handwriting is bundled in the styles (no network font), with its licence next to it', () => {
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  const faces = css.match(/@font-face\s*\{[^}]*\}/g) || [];
+  assert.equal(faces.length, 1);
+  assert.match(faces[0], /font-family: "Lagrange Hand"/);
+  assert.match(faces[0], /src: url\(data:font\/woff2;base64,[A-Za-z0-9+/=]{20000,}\) format\("woff2"\)/);
+  assert.doesNotMatch(css, /url\(\s*["']?https?:/i, 'nothing is fetched');
+  assert.match(css, /--lagrange-hand: "Lagrange Hand",/);
+  assert.match(css, /\.lagrange-loader-caption \{[^}]*font-family: var\(--lagrange-hand\)/);
+  assert.match(css, /\.lagrange-pen-hand \{[^}]*font-family: var\(--lagrange-hand\)/);
+  const ofl = fs.readFileSync(path.join(PLUGIN, 'LagrangeHand-OFL.txt'), 'utf8');
+  assert.match(ofl, /Kimberly Geswein/);
+  assert.match(ofl, /SIL OPEN FONT LICENSE Version 1\.1/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'THIRD_PARTY.md'), 'utf8'), /La Belle Aurore/);
+});
+
+test('Light theme: the panel takes the site’s paper, ink and accent, whatever the vault’s theme', () => {
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  const light = css.match(/\nbody \{[^}]*\}/)[0];
+  for (const [name, value] of [['paper', '#f7f2e7'], ['ink', '#2a2420'], ['muted', '#595959'], ['faint', '#9e9e9e'], ['rule', '#e6e6e6'],
+    ['rubric', '#8b2323'], ['rubric-deep', '#7d2219'], ['wash', '#fcf5e4']]) {
+    assert.match(light, new RegExp(`--lagrange-${name}: ${value};`), name);
+  }
+  const dark = css.match(/\nbody\.theme-dark \{[^}]*\}/)[0];
+  assert.match(dark, /--lagrange-paper: var\(--background-primary\);/);
+  assert.match(dark, /--lagrange-ink: var\(--text-normal\);/);
+  assert.match(css, /\.lagrange-view \{[^}]*background: var\(--lagrange-paper\);[^}]*color: var\(--lagrange-ink\);/);
+});
 
 test('Settings: junk is replaced by defaults; the shipped data.json is the defaults, with no key', () => {
   const s = L.sanitizeSettings({ provider: 'gpt', penSpeed: 99, loaderTheme: 'steam', anthropicModel: 'claude-2', showPen: 'yes' });
-  assert.equal(s.provider, 'anthropic');
+  assert.equal(s.provider, 'claude-code');
   assert.equal(s.penSpeed, 1);
   assert.equal(s.loaderTheme, 'random');
-  for (const t of ['clockwork', 'alchemy', 'trebuchet', 'orbit', 'random']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
+  for (const t of ['clockwork', 'alchemy', 'orbit', 'random']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
+  assert.equal(L.sanitizeSettings({ effort: 'extreme' }).effort, '');
+  for (const e of ['', 'low', 'medium', 'high']) assert.equal(L.sanitizeSettings({ effort: e }).effort, e);
+  assert.equal(L.sanitizeSettings({ agenticEdits: false, penTrail: false }).agenticEdits, false);
+  assert.equal(L.sanitizeSettings({ agenticEdits: 'no' }).agenticEdits, true);
   assert.equal(s.anthropicModel, 'claude-sonnet-5-5');
   assert.equal(s.showPen, true);
   const shipped = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'data.json'), 'utf8'));
@@ -487,6 +572,7 @@ test('Settings: junk is replaced by defaults; the shipped data.json is the defau
   const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'manifest.json'), 'utf8'));
   assert.equal(manifest.id, 'lagrange');
   assert.equal(manifest.isDesktopOnly, false);
+  assert.match(manifest.version, /^0\.[2-9]\.\d+$/);
   const enabled = JSON.parse(fs.readFileSync(path.join(ROOT, 'vault', '.obsidian', 'community-plugins.json'), 'utf8'));
   assert.ok(enabled.includes('lagrange'));
 });
@@ -623,4 +709,352 @@ test('live: the real Claude Code and Codex answer through Lagrange', { skip: pro
   assert.match(c.text.toLowerCase(), /ink and paper/);
   const x = await L.streamCodex({ codexPath: '', codexModel: '' }, req, {});
   assert.match(x.text.toLowerCase(), /ink and paper/);
+});
+
+
+// ---------------------------------------------------------------- edits in a chat reply (the agentic chat)
+const FENCE = '```';
+test('Chat reply: a plain answer has no edits and is shown whole', () => {
+  for (const text of ['It is a note about tides.', 'Use a list:\n\n- one\n- two\n\n```js\nconst a = [1];\n```\nDone.', 'Brackets [1] and {braces} in prose.', '']) {
+    const r = L.parseAgentReply(text);
+    assert.deepEqual(r.ops, []);
+    assert.equal(r.error, null);
+    assert.equal(r.open, false);
+    assert.equal(r.text, text.trim());
+  }
+});
+
+test('Chat reply: the edits block is taken out of the prose and parsed (fence, tildes, tags; three kinds of edit)', () => {
+  const block = '[{"find": "teh", "replace": "the", "reason": "spelling"},\n {"insert_after": "End.", "text": " More."},\n {"append": "Last line."}]';
+  const expected = [
+    { op: 'replace', find: 'teh', replace: 'the', reason: 'spelling' },
+    { op: 'insert', after: 'End.', text: ' More.', reason: '' },
+    { op: 'append', text: 'Last line.', reason: '' },
+  ];
+  for (const reply of [
+    `I fixed the spelling and added two lines.\n\n${FENCE}lagrange-edits\n${block}\n${FENCE}`,
+    `I fixed the spelling and added two lines.\n\n${FENCE} lagrange-edits\n${block}\n${FENCE}\n`,
+    `I fixed the spelling and added two lines.\n~~~lagrange-edits\n${block}\n~~~`,
+    `I fixed the spelling and added two lines.\n\n<lagrange-edits>\n${block}\n</lagrange-edits>`,
+    `I fixed the spelling and added two lines.\n\n${FENCE}${FENCE[0]}lagrange-edits\n{"edits": ${block}}\n${FENCE}${FENCE[0]}`,
+  ]) {
+    const r = L.parseAgentReply(reply);
+    assert.equal(r.text, 'I fixed the spelling and added two lines.');
+    assert.deepEqual(r.ops, expected);
+    assert.equal(r.error, null);
+    assert.equal(r.dropped, 0);
+    assert.equal(r.open, false);
+  }
+  // Only the block: no prose at all. Prose after the block is kept. LaTeX survives JSON escaping.
+  assert.equal(L.parseAgentReply(`${FENCE}lagrange-edits\n[]\n${FENCE}`).text, '');
+  const after = L.parseAgentReply(`Before.\n\n${FENCE}lagrange-edits\n[{"append": "$\\\\frac{a}{b}$"}]\n${FENCE}\n\nAfter.`);
+  assert.equal(after.text, 'Before.\n\nAfter.');
+  assert.equal(after.ops[0].text, '$\\frac{a}{b}$');
+  // other key names, a deletion, insert_before, and items that are not edits
+  const odd = L.parseAgentReply(`${FENCE}lagrange-edits\n[{"original": "a b", "replacement": ""}, {"insert_before": "X", "text": "Y", "reason": " why "}, {"find": 3}, "junk", {"append": ""}]\n${FENCE}`);
+  assert.deepEqual(odd.ops, [{ op: 'replace', find: 'a b', replace: '', reason: '' }, { op: 'insert', before: 'X', text: 'Y', reason: 'why' }]);
+  assert.equal(odd.dropped, 3);
+  // An ordinary code block that merely mentions the word is not an edits block.
+  assert.deepEqual(L.parseAgentReply(`${FENCE}json\n["lagrange-edits"]\n${FENCE}`).ops, []);
+});
+
+test('Chat reply: while it streams, and when it is cut off or malformed, the block never shows and nothing is edited', () => {
+  const full = `Fixing it.\n\n${FENCE}lagrange-edits\n[{"find": "teh", "replace": "the"}]\n${FENCE}`;
+  for (let i = 0; i <= full.length; i++) {
+    const part = L.splitAgentReply(full.slice(0, i));
+    assert.doesNotMatch(part.text, /"find"|\[\{/, `at ${i}`);
+    assert.ok('Fixing it.'.startsWith(part.text.replace(/\n?`{0,3}[a-z-]*$/i, '')) || part.text.startsWith('Fixing it.'), `at ${i}: ${JSON.stringify(part.text)}`);
+  }
+  const cut = L.parseAgentReply(full.slice(0, full.length - 12));
+  assert.equal(cut.open, true);
+  assert.deepEqual(cut.ops, []);
+  assert.match(cut.error, /cut off/);
+  assert.equal(cut.text, 'Fixing it.');
+  const bad = L.parseAgentReply(`Fixing it.\n\n${FENCE}lagrange-edits\nfind teh, replace the\n${FENCE}`);
+  assert.deepEqual(bad.ops, []);
+  assert.match(bad.error, /not a JSON list/);
+  assert.equal(bad.text, 'Fixing it.');
+  const broken = L.parseAgentReply(`${FENCE}lagrange-edits\n[{"find": "a", "replace": "b"\n${FENCE}`);
+  assert.deepEqual(broken.ops, []);
+  assert.ok(broken.error);
+});
+
+test('locateOps: replacements by the proofreader’s rules; insertions next to their anchor; appends after a blank line', () => {
+  const doc = 'One fish.\nTwo fish.\n\nRed fish, blue fish.';
+  const { located, skipped } = L.locateOps(doc, [
+    { op: 'append', text: 'The end.', reason: 'closing' },
+    { op: 'replace', find: 'Two fish', replace: 'Three fish', reason: 'count' },
+    { op: 'insert', after: 'One fish.', text: ' (Small.)', reason: '' },
+    { op: 'insert', before: 'Red fish', text: 'Old fish. ', reason: '' },
+    { op: 'insert', after: 'fish', text: '!', reason: '' },
+    { op: 'insert', after: 'whale', text: '!', reason: '' },
+    { op: 'replace', find: 'cat', replace: 'dog', reason: '' },
+    { op: 'insert', after: 'Two fi', text: 'n', reason: '' },
+  ]);
+  assert.deepEqual(located.map(e => [e.from, e.to, e.replace, Boolean(e.insert)]), [
+    [9, 9, ' (Small.)', true],
+    [10, 18, 'Three fish', false],
+    [21, 21, 'Old fish. ', true],
+    [doc.length, doc.length, '\n\nThe end.', true],
+  ]);
+  assert.deepEqual(skipped.map(e => e.why), ['not found in the note', 'the place appears 4 times', 'the place was not found in the note', 'overlaps another edit']);
+  // Applying them from the end gives the text the model meant.
+  let out = doc;
+  for (const e of located.slice().reverse()) out = out.slice(0, e.from) + e.replace + out.slice(e.to);
+  assert.equal(out, 'One fish. (Small.)\nThree fish.\n\nOld fish. Red fish, blue fish.\n\nThe end.');
+  assert.equal(L.locateOps('', [{ op: 'append', text: 'First.', reason: '' }]).located[0].replace, 'First.');
+  assert.equal(L.locateOps('A.\n', [{ op: 'append', text: 'B.', reason: '' }]).located[0].replace, '\nB.');
+  assert.equal(L.locateOps('A.\n\n', [{ op: 'append', text: 'B.', reason: '' }]).located[0].replace, 'B.');
+  // the loose search finds an anchor copied with straight quotes
+  assert.equal(L.locateOps('She said “no”. Then left.', [{ op: 'insert', after: 'said "no".', text: ' Twice.', reason: '' }]).located[0].from, 14);
+});
+
+test('The chat’s system prompt: the edits contract when the pen is on, the old advice when it is off', () => {
+  const note = { title: 'Tides', text: 'The sea.' };
+  const clip = L.clipText(note.text, 1000, 0);
+  const on = L.chatSystemPrompt(note, clip, true), off = L.chatSystemPrompt(note, clip, false);
+  assert.match(on, /```lagrange-edits\n\[\{"find": /);
+  assert.match(on, /"insert_after"/);
+  assert.match(on, /"append"/);
+  assert.match(on, /answer in prose with no block/);
+  assert.doesNotMatch(on, /You cannot change the note yourself/);
+  assert.match(off, /You cannot change the note yourself/);
+  assert.doesNotMatch(off, /lagrange-edits/);
+  for (const p of [on, off]) assert.match(p, /<note>\nThe sea\.\n<\/note>/);
+  assert.match(L.chatSystemPrompt(null, null, true), /No note is open/);
+  // The example in the prompt is itself a valid block.
+  const example = on.slice(on.indexOf('```lagrange-edits'), on.indexOf('```\n\n', on.indexOf('```lagrange-edits') + 5) + 3);
+  assert.equal(L.parseAgentReply(example).ops.length, 3);
+});
+
+
+// ---------------------------------------------------------------- model and effort
+test('Effort: which providers and models take one', () => {
+  const s = over => Object.assign({}, L.DEFAULT_SETTINGS, { effort: 'high' }, over);
+  assert.equal(L.effortFor(s({})), 'high', 'Claude Code');
+  assert.equal(L.effortFor(s({ provider: 'codex' })), 'high');
+  for (const m of L.ANTHROPIC_MODELS) assert.equal(L.effortFor(s({ provider: 'anthropic', anthropicModel: m.id })), 'high', m.id);
+  const custom = id => L.effortFor(s({ provider: 'anthropic', anthropicModel: 'custom', anthropicCustomModel: id }));
+  for (const id of ['claude-opus-4-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-fable-5-2', 'claude-opus-5']) assert.equal(custom(id), 'high', id);
+  for (const id of ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-1', 'claude-3-7-sonnet-latest', '']) assert.equal(custom(id), '', id);
+  const openai = m => L.effortFor(s({ provider: 'openai-api', openaiPlatformModel: m }));
+  for (const m of ['gpt-5', 'gpt-5.2-mini', 'o3', 'o4-mini']) assert.equal(openai(m), 'high', m);
+  for (const m of ['gpt-4o', 'gpt-4.1', 'gpt-5-chat-latest', '']) assert.equal(openai(m), '', m);
+  assert.equal(L.effortFor(s({ provider: 'openai', openaiModel: 'gpt-5' })), '', 'a local server is sent none');
+  assert.equal(L.effortFor(s({ provider: 'demo' })), '');
+  assert.equal(L.effortFor(s({ effort: '' })), '');
+  assert.equal(L.effortFor(s({ effort: 'max' })), '', 'only low, medium and high');
+  assert.equal(L.footLabel(s({})), 'Claude (subscription, sonnet) · high effort');
+  assert.equal(L.footLabel(s({ provider: 'demo' })), 'Demo (offline)');
+  assert.equal(L.footLabel(s({ provider: 'anthropic', effort: 'low' })), 'Claude Sonnet 5.5 · low effort');
+  assert.equal(L.footLabel(s({ provider: 'openai', openaiModel: 'llama3.1' })), 'llama3.1');
+});
+
+test('Effort, Anthropic: sent as output_config.effort; left out by default and for models that take none; a 400 naming it is retried without', async () => {
+  const run = async (over, fetch, session) => {
+    const calls = [];
+    const res = await L.streamAnthropic(baseSettings(over), { system: 's', messages: [] }, {
+      fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return fetch ? fetch(JSON.parse(init.body)) : streamResponse([ANTHROPIC_STREAM]); },
+    }, session || {});
+    return { calls, res };
+  };
+  assert.equal((await run({})).calls[0].output_config, undefined);
+  for (const e of ['low', 'medium', 'high']) {
+    const body = (await run({ effort: e })).calls[0];
+    assert.deepEqual(body.output_config, { effort: e });
+    assert.equal(body.thinking, undefined, 'thinking is left adaptive');
+    assert.equal(body.effort, undefined, 'never top-level');
+  }
+  assert.deepEqual((await run({ effort: 'high', anthropicModel: 'claude-opus-5-5' })).calls[0].output_config, { effort: 'high' });
+  assert.equal((await run({ effort: 'high', anthropicModel: 'custom', anthropicCustomModel: 'claude-haiku-4-5' })).calls[0].output_config, undefined);
+  // a model we believe takes effort but doesn't: one retry without it, remembered for the session
+  const session = {};
+  const refuse = body => (body.output_config
+    ? jsonResponse(400, { type: 'error', error: { type: 'invalid_request_error', message: 'output_config.effort: this model does not support the effort parameter' } })
+    : streamResponse([ANTHROPIC_STREAM]));
+  const over = { effort: 'medium', anthropicModel: 'custom', anthropicCustomModel: 'claude-opus-9-preview' };
+  const first = await run(over, refuse, session);
+  assert.equal(first.res.text, 'Ink on “paper”.');
+  assert.deepEqual(first.calls.map(b => Boolean(b.output_config)), [true, false]);
+  assert.deepEqual(session.noEffort, { 'anthropic:claude-opus-9-preview': true });
+  assert.deepEqual((await run(over, refuse, session)).calls.map(b => Boolean(b.output_config)), [false]);
+  assert.deepEqual((await run({ effort: 'medium' }, null, session)).calls[0].output_config, { effort: 'medium' }, 'other models still get it');
+  // another 400 is still an error
+  await assert.rejects(run({ effort: 'low' }, () => jsonResponse(400, { type: 'error', error: { type: 'invalid_request_error', message: 'messages: at least one message is required' } })), /could not accept the request/);
+});
+
+test('Effort, OpenAI: reasoning_effort only for OpenAI’s reasoning models; never for a local server; a 400 naming it is retried without', async () => {
+  const chunks = ['data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'];
+  const run = async (over, fetch, session) => {
+    const calls = [];
+    const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai-api', openaiPlatformKey: 'sk-x', effort: 'low' }, over);
+    const res = await L.complete(s, { system: 's', messages: [] }, {
+      fetch: async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return fetch ? fetch(JSON.parse(init.body)) : streamResponse(chunks); },
+    }, session || {});
+    return { calls, res };
+  };
+  const a = await run({ openaiPlatformModel: 'gpt-5' });
+  assert.equal(a.calls[0].url, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(a.calls[0].body.reasoning_effort, 'low');
+  assert.equal((await run({ openaiPlatformModel: 'gpt-4o' })).calls[0].body.reasoning_effort, undefined);
+  assert.equal((await run({ openaiPlatformModel: 'gpt-5', effort: '' })).calls[0].body.reasoning_effort, undefined);
+  assert.equal((await run({ provider: 'openai', openaiModel: 'gpt-5' })).calls[0].body.reasoning_effort, undefined);
+  const session = {};
+  const refuse = body => (body.reasoning_effort ? jsonResponse(400, { error: { message: "Unsupported parameter: 'reasoning_effort' is not supported with this model." } }) : streamResponse(chunks));
+  const r = await run({ openaiPlatformModel: 'o9-mini' }, refuse, session);
+  assert.equal(r.res.text, 'ok');
+  assert.deepEqual(r.calls.map(c => c.body.reasoning_effort), ['low', undefined]);
+  assert.deepEqual(session.noEffort, { 'openai:o9-mini': true });
+});
+
+test('Effort, Claude subscription: --effort is passed; a Claude Code without the flag is run again without it', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const echo = fakeCli(dir, 'claude', `
+process.stdin.resume(); process.stdin.on('end', () => {
+  const a = process.argv.slice(2), i = a.indexOf('--effort');
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: 'effort=' + (i < 0 ? 'none' : a[i + 1]) + ' model=' + a[a.indexOf('--model') + 1] }));
+});`);
+  const req = { system: '', messages: [{ role: 'user', content: 'x' }] };
+  const s = over => Object.assign({}, L.DEFAULT_SETTINGS, { claudeCodePath: echo }, over);
+  assert.equal((await L.complete(s({}), req, {}, {})).text, 'effort=none model=sonnet');
+  assert.equal((await L.complete(s({ effort: 'high', claudeCodeModel: 'opus' }), req, {}, {})).text, 'effort=high model=opus');
+  assert.equal((await L.complete(s({ effort: 'low' }), req, {})).text, 'effort=low model=sonnet', 'works without a session');
+  const old = fakeCli(dir, 'claude-old', `
+process.stdin.resume(); process.stdin.on('end', () => {
+  if (process.argv.includes('--effort')) { console.error("error: unknown option '--effort'"); process.exit(1); }
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: 'old ok' }));
+});`);
+  const session = {};
+  assert.equal((await L.complete(s({ effort: 'medium', claudeCodePath: old }), req, {}, session)).text, 'old ok');
+  assert.deepEqual(session.noEffort, { 'claude-code': true });
+  assert.equal((await L.complete(s({ effort: 'medium', claudeCodePath: old }), req, {}, session)).text, 'old ok');
+  // an unrelated failure is not retried
+  const broken = fakeCli(dir, 'claude-broken', `process.stdin.resume(); process.stdin.on('end', () => { console.error('boom'); process.exit(2); });`);
+  await assert.rejects(L.complete(s({ effort: 'medium', claudeCodePath: broken }), req, {}, {}), /stopped with an error: boom/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('Effort, ChatGPT subscription: Codex gets -c model_reasoning_effort=…, before the "-" that reads stdin', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const exe = fakeCli(dir, 'codex', `
+process.stdin.resume(); process.stdin.on('end', () => {
+  const a = process.argv.slice(2), i = a.indexOf('-c');
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: (i < 0 ? 'none' : a[i + 1]) + (a[a.length - 1] === '-' ? ' stdin-last' : ' WRONG') } }));
+});`);
+  const req = { system: '', messages: [{ role: 'user', content: 'x' }] };
+  const s = over => Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'codex', codexPath: exe }, over);
+  assert.equal((await L.complete(s({}), req, {}, {})).text, 'none stdin-last');
+  assert.equal((await L.complete(s({ effort: 'high' }), req, {}, {})).text, 'model_reasoning_effort=high stdin-last');
+  const picky = fakeCli(dir, 'codex-picky', `
+process.stdin.resume(); process.stdin.on('end', () => {
+  if (process.argv.includes('-c')) console.log(JSON.stringify({ type: 'error', message: 'unsupported value for reasoning effort' }));
+  else console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'plain ok' } }));
+});`);
+  const session = {};
+  assert.equal((await L.complete(s({ effort: 'low', codexPath: picky, codexModel: 'm1' }), req, {}, session)).text, 'plain ok');
+  assert.deepEqual(session.noEffort, { 'codex:m1': true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('The footer’s picker: each provider’s models, a typed model, and where the choice is saved', () => {
+  const s = over => Object.assign({}, L.DEFAULT_SETTINGS, over);
+  let c = L.modelChoices(s({}));
+  assert.deepEqual(c.options.map(o => o.value), ['sonnet', 'opus', 'haiku']);
+  assert.equal(c.current, 'sonnet');
+  assert.equal(c.free, true);
+  c = L.modelChoices(s({ claudeCodeModel: 'claude-fable-5-2' }));
+  assert.deepEqual(c.options.map(o => o.value), ['sonnet', 'opus', 'haiku', 'claude-fable-5-2'], 'a custom value is offered too');
+  assert.equal(c.current, 'claude-fable-5-2');
+  c = L.modelChoices(s({ provider: 'anthropic' }));
+  assert.deepEqual(c.options.map(o => o.value), L.ANTHROPIC_MODELS.map(m => m.id));
+  assert.deepEqual(c.options.map(o => o.label), L.ANTHROPIC_MODELS.map(m => m.name));
+  c = L.modelChoices(s({ provider: 'anthropic', anthropicModel: 'custom', anthropicCustomModel: 'claude-opus-5' }));
+  assert.equal(c.current, 'claude-opus-5');
+  assert.equal(c.options.length, L.ANTHROPIC_MODELS.length + 1);
+  c = L.modelChoices(s({ provider: 'codex', codexModel: 'gpt-5.2-codex' }));
+  assert.deepEqual(c.options.map(o => o.value), ['', 'gpt-5.2-codex']);
+  assert.deepEqual(L.modelChoices(s({ provider: 'codex' })).options.map(o => o.value), ['']);
+  assert.deepEqual(L.modelChoices(s({ provider: 'openai-api', openaiPlatformModel: 'gpt-5' })).options.map(o => o.value), ['gpt-5']);
+  assert.deepEqual(L.modelChoices(s({ provider: 'openai' })).options, []);
+  c = L.modelChoices(s({ provider: 'demo' }));
+  assert.deepEqual([c.options.length, c.free], [0, false]);
+
+  const a = s({ provider: 'anthropic' });
+  L.setModel(a, 'claude-opus-5-5');
+  assert.equal(a.anthropicModel, 'claude-opus-5-5');
+  L.setModel(a, ' claude-opus-5 ');
+  assert.deepEqual([a.anthropicModel, a.anthropicCustomModel, L.anthropicModelId(a)], ['custom', 'claude-opus-5', 'claude-opus-5']);
+  L.setModel(a, '');
+  assert.equal(L.anthropicModelId(a), 'claude-opus-5', 'an empty entry changes nothing');
+  assert.equal(L.sanitizeSettings(a).anthropicModel, 'custom');
+  assert.equal(L.setModel(s({}), 'opus').claudeCodeModel, 'opus');
+  assert.equal(L.setModel(s({ provider: 'codex', codexModel: 'x' }), '').codexModel, '', 'Codex’s default');
+  assert.equal(L.setModel(s({ provider: 'openai-api' }), 'o4-mini').openaiPlatformModel, 'o4-mini');
+  assert.equal(L.setModel(s({ provider: 'openai' }), 'qwen2.5:14b').openaiModel, 'qwen2.5:14b');
+  assert.deepEqual(L.setModel(s({ provider: 'demo' }), 'x'), s({ provider: 'demo' }));
+});
+
+
+// ---------------------------------------------------------------- the pen's script: mathematics and the trail
+test('mathSegments: $…$ and $$…$$ as Obsidian reads them; prices, escapes and code are text', () => {
+  const seg = t => L.mathSegments(t).map(g => (g.type === 'math' ? [g.display ? 'D' : 'I', g.source] : g.text));
+  assert.deepEqual(seg('Energy is $E = mc^2$, always.'), ['Energy is ', ['I', 'E = mc^2'], ', always.']);
+  assert.deepEqual(seg('$$\\int_0^1 x\\,dx = \\frac12$$'), [['D', '\\int_0^1 x\\,dx = \\frac12']]);
+  assert.deepEqual(seg('So\n$$\na^2 + b^2 = c^2\n$$\nholds.'), ['So\n', ['D', 'a^2 + b^2 = c^2'], '\nholds.']);
+  assert.deepEqual(seg('$a$ and $b$'), [['I', 'a'], ' and ', ['I', 'b']]);
+  assert.deepEqual(seg('It costs $5 and $10.'), ['It costs $5 and $10.']);
+  assert.deepEqual(seg('From $5 to $10 a head'), ['From $5 to $10 a head']);
+  assert.deepEqual(seg('A lone $ sign, and \\$x\\$ escaped'), ['A lone $ sign, and \\$x\\$ escaped']);
+  assert.deepEqual(seg('Code `$x$` and\n```\n$y$\n```\nstay'), ['Code `$x$` and\n```\n$y$\n```\nstay']);
+  assert.deepEqual(seg('$x$\nnot $across\nlines$'), [['I', 'x'], '\nnot $across\nlines$']);
+  assert.deepEqual(seg('$\\$5$'), [['I', '\\$5']]);
+  assert.deepEqual(seg('$$ $$ and $$unclosed'), ['$$ $$ and $$unclosed']);
+  assert.deepEqual(seg(''), []);
+  assert.equal(L.hasMath('no sums here, only $5'), false);
+  assert.equal(L.hasMath('but $x^2$ here'), true);
+});
+
+test('penScript: text is cut to the limit, an equation is kept whole; without a renderer the pen writes the source', () => {
+  const show = s => s.map(g => (g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  assert.equal(show(L.penScript('a   short\n line', 48)), 'a short line');
+  const long = L.penScript('word '.repeat(30), 48);
+  assert.ok(show(long).length <= 48);
+  assert.match(show(long), / …$/);
+  assert.equal(show(L.penScript('The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$', 48)),
+    'The Euler–Lagrange equation: <\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0>');
+  assert.equal(show(L.penScript(`so $${'x+'.repeat(100)}y$ ends`, 48)), 'so  …', 'an equation too long to draw ends the script');
+  assert.equal(show(L.penScript('$a$ then ' + 'word '.repeat(30), 48)).startsWith('<a> then word'), true);
+  assert.deepEqual(L.penScript('', 48), []);
+  // the fallback: no renderer, a renderer that throws, or one that returns no element
+  const el = { nodeType: 1 };
+  assert.equal(L.renderPenMath('x', false, undefined), null);
+  assert.equal(L.renderPenMath('x', false, () => { throw new Error('MathJax is not loaded'); }), null);
+  assert.equal(L.renderPenMath('x', false, () => null), null);
+  assert.equal(L.renderPenMath('x', false, () => 'x'), null);
+  const seen = [];
+  assert.equal(L.renderPenMath('x^2', true, (src, display) => { seen.push([src, display]); return el; }), el);
+  assert.deepEqual(seen, [['x^2', true]]);
+  // Under Node, Obsidian's renderMath is a stub that cannot be called: the pen falls back rather than throwing.
+  assert.equal(L.renderPenMath('x', false, stubs.obsidian.renderMath), null);
+});
+
+test('trailBands: the newest ink is the darkest and widest, old ink is dropped, and the strokes join up', () => {
+  assert.deepEqual(L.trailBands([], 1000, 500, 5), []);
+  assert.deepEqual(L.trailBands([{ x: 0, y: 0, t: 990 }], 1000, 500, 5), []);
+  const pts = [];
+  for (let i = 0; i <= 60; i++) pts.push({ x: i * 2, y: 10, t: 400 + i * 10 });     // t = 400 … 1000
+  const bands = L.trailBands(pts, 1000, 500, 5);
+  assert.equal(bands.length, 5);
+  for (let i = 1; i < bands.length; i++) {
+    assert.ok(bands[i].opacity < bands[i - 1].opacity);
+    assert.ok(bands[i].width < bands[i - 1].width);
+    // each older stroke ends where the newer one starts
+    assert.equal(bands[i].d.split('L').pop(), bands[i - 1].d.slice(1).split('L')[0]);
+  }
+  assert.ok(bands[0].opacity <= 0.5);
+  assert.match(bands[0].d, /^M[\d.]+ [\d.]+(L[\d.]+ [\d.]+)+$/);
+  assert.ok(bands[0].d.endsWith('L120.0 10.0'), 'the newest stroke ends at the nib');
+  const xs = bands.flatMap(b => b.d.slice(1).split('L').map(p => Number(p.split(' ')[0])));
+  assert.equal(Math.min(...xs), 20, 'points older than the trail’s life are gone');
+  assert.deepEqual(L.trailBands(pts, 5000, 500, 5), [], 'all of it fades');
 });

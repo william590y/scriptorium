@@ -1,9 +1,9 @@
 {
   "id": "lagrange",
   "name": "Lagrange",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.3.0",
-  "description": "A writing companion for Scriptorium: talk about the open note, revise a passage or proofread, with each edit set down by pen.",
+  "description": "A writing companion for Scriptorium: talk about the open note and have it edited, revised or proofread, with each edit set down by pen.",
   "author": "William Liaw",
   "authorUrl": "https://williamliaw.com/scriptorium",
   "isDesktopOnly": false
