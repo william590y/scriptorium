@@ -24,6 +24,137 @@ function normalizeSettings(saved) {
   return settings;
 }
 
+/* ==========================================================
+   A drop cap for one note
+   ==========================================================
+   A note can ask for a drop cap of its own with the property "dropcap" (yinit, goudy, plain or none); without it the
+   note has the vault's (Settings → Scriptorium → Drop cap). "Scriptorium: Choose the drop cap for this note" sets
+   it, showing each choice in the note as you move through the list. In Reading view (and wherever a note is
+   rendered: embeds, hover previews, PDF export) the plugin marks each block of such a note with .scriptorium-dropcap
+   and .scriptorium-dropcap-<which>; the snippet does the rest. */
+
+const DROPCAP_KEYS = ['dropcap', 'drop-cap', 'dropCap', 'drop cap'];
+
+/* The drop cap a note's properties ask for: 'yinit' | 'goudy' | 'plain' | 'none', or null (the vault's). Forgiving
+   about case, about the labels in the settings ("Goudy Initialen") and about no/off/false for none. */
+function noteDropcap(frontmatter) {
+  if (!frontmatter || typeof frontmatter !== 'object') return null;
+  let v;
+  for (const k of DROPCAP_KEYS) if (k in frontmatter) { v = frontmatter[k]; break; }
+  if (v === false) return 'none';
+  if (typeof v !== 'string') return null;
+  const t = v.trim().toLowerCase();
+  if (['none', 'no', 'off', 'false'].includes(t)) return 'none';
+  if (t.startsWith('yinit')) return 'yinit';
+  if (t.startsWith('goudy')) return 'goudy';
+  if (t.startsWith('plain') || t.startsWith('cormorant')) return 'plain';
+  return null;
+}
+
+/* Marks (or unmarks) one rendered block with a note's drop cap. */
+function markDropcap(el, which) {
+  for (const c of Array.from(el.classList)) if (c.startsWith('scriptorium-dropcap')) el.classList.remove(c);
+  if (which) el.classList.add('scriptorium-dropcap', `scriptorium-dropcap-${which}`);
+}
+
+/* The choices of the command: the vault's, then each drop cap. */
+function dropcapChoices(vaultInitials) {
+  const name = (INITIALS.find(([value]) => value === vaultInitials) || INITIALS[0])[1];
+  return [{ value: null, label: `The vault’s drop cap (${name})` }].concat(INITIALS.map(([value, label]) => ({ value, label })));
+}
+
+/* ==========================================================
+   Export to PDF: the page as Reading view sets it
+   ==========================================================
+   Obsidian builds the page it prints in a window of its own, and not as Reading view builds a note: each block is in
+   a plain <div> (Reading view's are marked el-p, el-h1 and so on), there is no header block, and the note's title,
+   if "Include file name as title" is ticked, is a bare <h1>. The snippet's rules for chapter openings look for those
+   marks, so an exported PDF had no drop caps and no small-capped first lines, and its title was set as a chapter
+   heading. dressPrint gives the printed page the same marks: each block gets its el-<tag> class (and the note's own
+   drop cap, if it has one), and the bare <h1> becomes the header block with the title in it, as in Reading view.
+   The body of the print window gets the vault's mode and drop cap classes, and the drop cap's font is loaded before
+   the page is printed. The title is included by default (the plugin ticks Obsidian's option once; untick it in the
+   export dialogue and it stays unticked). */
+
+/* Whether el is the page Obsidian is about to print. */
+function isPrintPage(el) {
+  return Boolean(el && el.classList && el.classList.contains('markdown-preview-view') && el.parentElement &&
+    el.parentElement.classList.contains('print'));
+}
+
+/* Marks the blocks of a page about to be printed as Reading view marks them; which is the note's own drop cap or
+   null. Returns the title element it made, or null. */
+function dressPrint(page, which) {
+  const doc = page.ownerDocument;
+  let title = null;
+  for (const child of Array.from(page.children)) {
+    if (child.tagName === 'H1' && child === page.firstElementChild) {
+      // the file name, added by "Include file name as title": Reading view's header block
+      const header = doc.createElement('div');
+      header.className = 'mod-header mod-ui';
+      title = doc.createElement('div');
+      title.className = 'inline-title';
+      title.textContent = child.textContent;
+      header.appendChild(title);
+      page.replaceChild(header, child);
+      continue;
+    }
+    if (child.tagName !== 'DIV' || child.classList.contains('mod-header')) continue;
+    const first = child.firstElementChild;
+    if (first && !Array.from(child.classList).some(c => c.startsWith('el-'))) child.classList.add(`el-${first.tagName.toLowerCase()}`);
+    markDropcap(child, which);
+  }
+  return title;
+}
+
+class DropcapModal extends Modal {
+  constructor(plugin, view) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.view = view;
+    this.chosen = false;
+  }
+
+  onOpen() {
+    const file = this.view.file;
+    this.modalEl.addClass('scriptorium-dropcap-modal');
+    this.titleEl.setText('Drop cap for this note');
+    const cache = this.app.metadataCache.getFileCache(file);
+    const current = noteDropcap(cache && cache.frontmatter);
+    this.contentEl.createEl('p', { cls: 'scriptorium-dropcap-file', text: file.basename });
+    const list = this.contentEl.createDiv({ cls: 'scriptorium-dropcap-list', attr: { role: 'listbox', 'aria-label': 'Drop cap' } });
+    const items = [];
+    for (const choice of dropcapChoices(this.plugin.settings.initials)) {
+      const item = list.createEl('button', {
+        cls: 'scriptorium-dropcap-choice', text: choice.label,
+        attr: { role: 'option', 'aria-selected': String(choice.value === current) },
+      });
+      if (choice.value === current) item.addClass('is-current');
+      // Moving through the list shows each drop cap in the note; nothing is saved until one is chosen.
+      const show = () => this.plugin.previewDropcap(this.view, choice.value);
+      item.addEventListener('focus', show);
+      item.addEventListener('mouseenter', () => item.focus());
+      item.addEventListener('click', () => { this.chosen = true; this.close(); void this.plugin.setNoteDropcap(file, choice.value); });
+      item.addEventListener('keydown', ev => {
+        const i = items.indexOf(item);
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); items[(i + 1) % items.length].focus(); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); items[(i + items.length - 1) % items.length].focus(); }
+      });
+      items.push(item);
+    }
+    this.contentEl.createEl('p', {
+      cls: 'scriptorium-dropcap-hint',
+      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view, where drop caps are drawn.',
+    });
+    window.setTimeout(() => (items.find(i => i.hasClass('is-current')) || items[0]).focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.chosen) this.plugin.previewDropcap(this.view, undefined);   // back to what the note says
+  }
+}
+
 class ScriptoriumSettings extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -108,7 +239,11 @@ function wrapWord(nodes, a, b) {
 
 function keepFirstLineWords(p) {
   unwrapKept(p);
-  if (!p.isConnected || !p.matches(KEEP_SEL) || document.body.classList.contains('scriptorium-initials-none')) return;
+  // No drop cap, no small caps: the note's own choice first, then the vault's.
+  const block = p.parentElement;
+  const none = block && block.classList.contains('scriptorium-dropcap')
+    ? block.classList.contains('scriptorium-dropcap-none') : document.body.classList.contains('scriptorium-initials-none');
+  if (!p.isConnected || !p.matches(KEEP_SEL) || none) return;
   const nodes = [], walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
   let n;
   while ((n = walker.nextNode())) if (!n.parentElement.closest('mjx-container, .math, code')) nodes.push(n);
@@ -1027,6 +1162,9 @@ function setupPackage(fs, path, dir) {
     const kept = (a || []).filter(id => mine.includes(id));
     return kept.concat(SETUP_PLUGINS.filter(id => !kept.includes(id)));
   });
+  // The Scriptorium plugin's own note that it has ticked the PDF title option here: the other vault has not been.
+  const own = '.obsidian/plugins/scriptorium/data.json';
+  if (files[own]) reshape(own, 'object', a => { const out = Object.assign({}, a); delete out.pdfTitleSet; return out; });
   const lagrange = '.obsidian/plugins/lagrange/data.json';
   if (files[lagrange]) {
     reshape(lagrange, 'object', a => {
@@ -1382,8 +1520,34 @@ class Scriptorium extends Plugin {
         try { keepFirstLineWords(p); } catch (e) { /* never break rendering */ }
       }
     });
-    this.registerMarkdownPostProcessor(el => {
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const which = noteDropcap(ctx && ctx.frontmatter);      // a note's own drop cap (see "A drop cap for one note")
+      if (isPrintPage(el)) return this.dressPrint(el, which); // Export to PDF: the whole page comes at once
+      markDropcap(el, which);
       el.querySelectorAll(':scope > p').forEach(p => { this.kept.add(p); this.resizeObserver.observe(p); });
+    });
+    // Export to PDF prints the note's title by default: tick Obsidian's "Include file name as title" once.
+    this.app.workspace.onLayoutReady(() => { void this.includeTitleInPdf(); });
+    // When a note's "dropcap" property changes, its Reading views are drawn again with the new one.
+    this.dropcaps = new Map();
+    this.registerEvent(this.app.metadataCache.on('changed', (file, data, cache) => {
+      const now = noteDropcap(cache && cache.frontmatter);
+      if (this.dropcaps.has(file.path) ? this.dropcaps.get(file.path) === now : now === null) { this.dropcaps.set(file.path, now); return; }
+      this.dropcaps.set(file.path, now);
+      for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+        const view = leaf.view;
+        if (view instanceof MarkdownView && view.file && view.file.path === file.path) this.previewDropcap(view, now);
+      }
+    }));
+    this.addCommand({
+      id: 'choose-dropcap',
+      name: 'Choose the drop cap for this note',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) new DropcapModal(this, view).open();
+        return true;
+      }
     });
     this.registerEvent(this.app.workspace.on('css-change', () => this.recheck()));
     if (document.fonts) this.registerDomEvent(document.fonts, 'loadingdone', () => this.recheck());
@@ -1394,6 +1558,57 @@ class Scriptorium extends Plugin {
     this.imageFocus.load();
     this.applyMode();
     this.applyFeatures();
+  }
+
+  /* Export to PDF (see "Export to PDF: the page as Reading view sets it"). The returned promise is awaited by Obsidian
+     before it prints: by then the drop cap's font has loaded. */
+  dressPrint(page, which) {
+    const doc = page.ownerDocument, body = doc.body, s = this.settings;
+    body.classList.toggle('scriptorium-fancy', s.fancyMode);
+    for (const [value] of INITIALS) body.classList.toggle(`scriptorium-initials-${value}`, value === s.initials && value !== 'yinit');
+    dressPrint(page, which);
+    const fonts = ['"Scriptorium Yinit"', '"Scriptorium Goudy"', '500 1em "Cormorant Garamond"', '1em "EB Garamond"', 'italic 1em "EB Garamond"'];
+    const loaded = doc.fonts && doc.fonts.load
+      ? Promise.all(fonts.map(f => doc.fonts.load(f.includes('1em') ? f : `1em ${f}`, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ').catch(() => null)))
+      : Promise.resolve();
+    return Promise.race([loaded, new Promise(resolve => window.setTimeout(resolve, 2500))]);
+  }
+
+  /* Ticks "Include file name as title" in Obsidian's PDF export settings, once per vault: after that the choice is
+     the writer's. */
+  async includeTitleInPdf() {
+    if (this.settings.pdfTitleSet) return;
+    try {
+      const now = this.app.vault.getConfig('pdfExportSettings') || {};
+      if (!now.includeName) this.app.vault.setConfig('pdfExportSettings', Object.assign({}, now, { includeName: true }));
+      this.settings.pdfTitleSet = true;
+      await this.saveData(this.settings);
+    } catch (e) { /* an Obsidian without these settings: nothing to tick */ }
+  }
+
+  /* Shows a drop cap in a note's Reading view without saving it: which is 'yinit' | 'goudy' | 'plain' | 'none', null
+     for the vault's, or undefined for what the note's properties say. */
+  previewDropcap(view, which) {
+    if (which === undefined) {
+      const cache = view.file && this.app.metadataCache.getFileCache(view.file);
+      which = noteDropcap(cache && cache.frontmatter);
+    }
+    const root = view.containerEl.querySelector('.markdown-preview-view');
+    if (!root) return;
+    root.querySelectorAll('.markdown-preview-sizer > div').forEach(el => markDropcap(el, which));
+    this.recheck();
+  }
+
+  /* Saves a note's drop cap in its properties (null removes the property: the vault's drop cap). */
+  async setNoteDropcap(file, which) {
+    try {
+      await this.app.fileManager.processFrontMatter(file, fm => {
+        for (const k of DROPCAP_KEYS) if (k !== 'dropcap') delete fm[k];
+        if (which) fm.dropcap = which; else delete fm.dropcap;
+      });
+    } catch (e) {
+      new Notice(`Could not save the drop cap in this note’s properties: ${e.message}`);
+    }
   }
 
   recheck() {
@@ -1455,5 +1670,6 @@ module.exports = Scriptorium;
 Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
-  setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder
+  setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
+  noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint
 });

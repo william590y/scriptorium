@@ -313,3 +313,100 @@ test('set up a vault: the folder typed or chosen', () => {
   assert.equal(S.setupFolder(win, 'C:\\'), 'C:\\');
   assert.equal(S.setupFolder(win, 'Notes\\Mine'), '');
 });
+
+
+// ---------------------------------------------------------------- a drop cap for one note
+test('a note’s drop cap: read from its properties, forgiving about spelling; anything else is the vault’s', () => {
+  for (const [fm, want] of [
+    [{ dropcap: 'goudy' }, 'goudy'], [{ dropcap: 'Goudy Initialen' }, 'goudy'], [{ dropcap: ' YINIT ' }, 'yinit'],
+    [{ dropcap: 'plain' }, 'plain'], [{ dropcap: 'Cormorant' }, 'plain'], [{ dropcap: 'none' }, 'none'],
+    [{ dropcap: 'off' }, 'none'], [{ dropcap: false }, 'none'], [{ 'drop-cap': 'goudy' }, 'goudy'], [{ dropCap: 'none' }, 'none'],
+    [{ dropcap: 'comic-sans' }, null], [{ dropcap: '' }, null], [{ dropcap: true }, null], [{ dropcap: 3 }, null], [{ dropcap: null }, null],
+    [{ title: 'x' }, null], [{}, null], [null, null], [undefined, null], ['goudy', null],
+  ]) assert.equal(S.noteDropcap(fm), want, JSON.stringify(fm));
+});
+
+test('a note’s drop cap: the command offers the vault’s and each drop cap; a block is marked and unmarked', () => {
+  const choices = S.dropcapChoices('goudy');
+  assert.deepEqual(choices.map(c => c.value), [null, 'yinit', 'goudy', 'plain', 'none']);
+  assert.match(choices[0].label, /vault’s drop cap \(Goudy Initialen/);
+  assert.match(S.dropcapChoices('nonsense')[0].label, /Yinit/);
+  const classes = new Set(['el-p', 'scriptorium-dropcap', 'scriptorium-dropcap-none']);
+  const el = { classList: { add: (...c) => c.forEach(x => classes.add(x)), remove: c => classes.delete(c), [Symbol.iterator]: () => classes[Symbol.iterator]() } };
+  S.markDropcap(el, 'goudy');
+  assert.deepEqual([...classes].sort(), ['el-p', 'scriptorium-dropcap', 'scriptorium-dropcap-goudy']);
+  S.markDropcap(el, null);
+  assert.deepEqual([...classes], ['el-p']);
+});
+
+test('a note’s drop cap: the snippet has a rule for each, and the vault’s "None" gives way to a note’s own', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8');
+  for (const which of ['yinit', 'goudy', 'plain']) assert.match(css, new RegExp(`\\.el-p\\.scriptorium-dropcap-${which}[\\s,{]`), which);
+  assert.match(css, /\.scriptorium-dropcap\.scriptorium-dropcap-none > p::first-letter/);
+  const none = css.split('\n').filter(l => l.startsWith('body.scriptorium-initials-none '));
+  assert.ok(none.length >= 6);
+  for (const l of none) assert.match(l, /\.el-p:not\(\.scriptorium-dropcap\) > p/, l);
+});
+
+
+// ---------------------------------------------------------------- Export to PDF
+// A very small DOM: enough for dressPrint, which only reads tag names and classes and moves a few elements.
+function fakeDoc() {
+  const make = (tag, cls) => {
+    const el = {
+      tagName: tag.toUpperCase(), children: [], parentElement: null, textContent: '', ownerDocument: doc,
+      classList: {
+        list: new Set((cls || '').split(' ').filter(Boolean)),
+        contains(c) { return this.list.has(c); },
+        add(...c) { c.forEach(x => this.list.add(x)); },
+        remove(c) { this.list.delete(c); },
+        [Symbol.iterator]() { return this.list[Symbol.iterator](); },
+      },
+      get className() { return [...this.classList.list].join(' '); },
+      set className(v) { this.classList.list = new Set(String(v).split(' ').filter(Boolean)); },
+      get firstElementChild() { return this.children[0] || null; },
+      appendChild(c) { c.parentElement = this; this.children.push(c); return c; },
+      replaceChild(n, o) { n.parentElement = this; this.children[this.children.indexOf(o)] = n; return o; },
+    };
+    return el;
+  };
+  const doc = { createElement: tag => make(tag) };
+  return { doc, make };
+}
+
+test('Export to PDF: the printed page gets Reading view’s marks, the title its header block, and the note’s own drop cap', () => {
+  const { make } = fakeDoc();
+  const print = make('div', 'print');
+  const page = print.appendChild(make('div', 'markdown-preview-view markdown-rendered'));
+  const title = page.appendChild(make('h1'));
+  title.textContent = 'Of Gardens';
+  const wrap = tag => { const d = page.appendChild(make('div')); d.appendChild(make(tag)); return d; };
+  const blocks = ['h6', 'p', 'h2', 'blockquote', 'p', 'pre', 'ul'].map(wrap);
+  const hr = page.appendChild(make('hr'));
+  const empty = page.appendChild(make('div'));
+  assert.equal(S.isPrintPage(page), true);
+  assert.equal(S.isPrintPage(blocks[0]), false);
+  assert.equal(S.isPrintPage(make('div', 'markdown-preview-view')), false, 'a Reading view is not a page being printed');
+
+  const made = S.dressPrint(page, 'goudy');
+  assert.equal(page.children[0].className, 'mod-header mod-ui');
+  assert.equal(page.children[0].children[0], made);
+  assert.equal(made.className, 'inline-title');
+  assert.equal(made.textContent, 'Of Gardens');
+  assert.deepEqual(blocks.map(b => b.className), ['h6', 'p', 'h2', 'blockquote', 'p', 'pre', 'ul'].map(t => `el-${t} scriptorium-dropcap scriptorium-dropcap-goudy`));
+  assert.equal(hr.className, '', 'a rule is left as it is');
+  assert.equal(empty.className, 'scriptorium-dropcap scriptorium-dropcap-goudy');
+  assert.equal(page.children.length, 10);
+
+  // without the title option there is no header block, and without a drop cap of its own a note is only marked up
+  const bare = fakeDoc();
+  const page2 = bare.make('div', 'print').appendChild(bare.make('div', 'markdown-preview-view'));
+  const h1 = page2.appendChild(bare.make('div'));
+  h1.appendChild(bare.make('h1'));
+  const p = page2.appendChild(bare.make('div'));
+  p.appendChild(bare.make('p'));
+  assert.equal(S.dressPrint(page2, null), null);
+  assert.deepEqual(page2.children.map(c => c.className), ['el-h1', 'el-p'], 'the note’s own first heading stays a heading');
+  S.dressPrint(page2, null);
+  assert.deepEqual(page2.children.map(c => c.className), ['el-h1', 'el-p'], 'doing it twice changes nothing');
+});

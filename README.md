@@ -38,6 +38,9 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   Initialen** (floriated), a **plain capital** in Cormorant Garamond, or **none**. Each is a three-line drop in the
   accent colour, with the rest of the first line in small capitals; with none, the opening paragraph starts with an
   ordinary letter, without small capitals, justified like the rest.
+  **One note can have its own:** run **Scriptorium: Choose the drop cap for this note** and move through the list (the
+  note shows each as you go); the choice is kept in the note's properties as `dropcap: goudy` (or `yinit`, `plain`,
+  `none`), which you can also type yourself. Choosing **The vault's drop cap** removes the property.
 - **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
   margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
   rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
@@ -51,6 +54,10 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   the mouse wheel zooms and dragging pans, double-click zooms in and out, and **Esc**, a click outside the image or the
   × button returns to the note.
 
+**Export to PDF** sets the page as Reading view does: the note's title at the top (Scriptorium ticks Obsidian's
+**Include file name as title** once; untick it in the export dialogue if you do not want it), the drop caps, a note's
+own drop cap included, and the small-capped opening lines.
+
 Callouts (`> [!note]`, `> [!tip]`, `> [!warning]`, `> [!error]` and the others) are set as gwern.net's admonitions, in
 the snippet: a tinted slip with a broad band and a printer's mark (☞ for a note, † for danger), darker for the more
 urgent kinds, in Reading view and Live Preview, light and dark.
@@ -62,6 +69,7 @@ urgent kinds, in Reading view and Live Preview, light and dark.
 - `## Chapter heading` creates a centered small-cap chapter heading; `### Section heading` a smaller one.
 - `> Quotation` creates an italic quotation.
 - `---` creates an ornamental scene break.
+- `dropcap: goudy` (or `yinit`, `plain`, `none`) in a note's properties gives that note its own drop cap.
 - `[^1]` with `[^1]: The note.` creates a footnote, set in the margin in Reading view when there is room.
 - `> [!margin]` followed by `> Text` creates an unnumbered marginal note beside the paragraph that follows it.
 - `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` and the other callouts create admonitions.
