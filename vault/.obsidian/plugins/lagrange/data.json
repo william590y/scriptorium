@@ -9,6 +9,7 @@
   "openaiModel": "",
   "openaiPlatformKey": "",
   "openaiPlatformModel": "",
+  "openaiImageModel": "gpt-image-2.5-sunburst",
   "claudeCodePath": "",
   "claudeCodeModel": "sonnet",
   "codexPath": "",

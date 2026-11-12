@@ -1,4 +1,4 @@
-const { Plugin, PluginSettingTab, Setting, MarkdownView, MarkdownRenderer, Component, Scope, Modal, Notice, Platform } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, MarkdownView, MarkdownRenderer, Component, Scope, Modal, Notice, Platform, requestUrl } = require('obsidian');
 
 /* ==========================================================
    Settings
@@ -19,7 +19,8 @@ function normalizeSettings(saved) {
     for (const key of ['fancyMode', 'marginalia', 'imageFocus']) {
       if (typeof saved[key] === 'boolean') settings[key] = saved[key];
     }
-    if (INITIALS.some(([value]) => value === saved.initials)) settings.initials = saved.initials;
+    // one of the four built in, or a set of drop caps by name ("set:Dropcat", "set:My initials"; see "Sets of drop caps")
+    if (INITIALS.some(([value]) => value === saved.initials) || (typeof saved.initials === 'string' && /^set:.+/.test(saved.initials))) settings.initials = saved.initials;
   }
   return settings;
 }
@@ -27,16 +28,17 @@ function normalizeSettings(saved) {
 /* ==========================================================
    A drop cap for one note
    ==========================================================
-   A note can ask for a drop cap of its own with the property "dropcap" (yinit, goudy, plain or none); without it the
-   note has the vault's (Settings → Scriptorium → Drop cap). "Scriptorium: Choose the drop cap for this note" sets
+   A note can ask for a drop cap of its own with the property "dropcap" (yinit, goudy, plain, none, or the name of a
+   set of drop caps); without it the note has the vault's (Settings → Scriptorium → Drop cap). "Scriptorium: Choose the drop cap for this note" sets
    it, showing each choice in the note as you move through the list. In Reading view (and wherever a note is
    rendered: embeds, hover previews, PDF export) the plugin marks each block of such a note with .scriptorium-dropcap
    and .scriptorium-dropcap-<which>; the snippet does the rest. */
 
 const DROPCAP_KEYS = ['dropcap', 'drop-cap', 'dropCap', 'drop cap'];
 
-/* The drop cap a note's properties ask for: 'yinit' | 'goudy' | 'plain' | 'none', or null (the vault's). Forgiving
-   about case, about the labels in the settings ("Goudy Initialen") and about no/off/false for none. */
+/* The drop cap a note's properties ask for: 'yinit' | 'goudy' | 'plain' | 'none', 'set:<name>' for anything else
+   that is written there (the name of a set of drop caps), or null (the vault's). Forgiving about case, about the
+   labels in the settings ("Goudy Initialen") and about no/off/false for none. */
 function noteDropcap(frontmatter) {
   if (!frontmatter || typeof frontmatter !== 'object') return null;
   let v;
@@ -48,19 +50,477 @@ function noteDropcap(frontmatter) {
   if (t.startsWith('yinit')) return 'yinit';
   if (t.startsWith('goudy')) return 'goudy';
   if (t.startsWith('plain') || t.startsWith('cormorant')) return 'plain';
+  return t ? `set:${v.trim()}` : null;
+}
+
+const DROPCAP_VARS = ['--scriptorium-dropcap-light', '--scriptorium-dropcap-dark', '--scriptorium-dropcap-ratio', '--scriptorium-dropcap-ratio-dark',
+  '--scriptorium-initial-font', '--scriptorium-initial-size', '--scriptorium-initial-margin', '--scriptorium-initial-weight'];
+
+/* A number from a text, the same each time (FNV-1a): which of a letter's several images a paragraph has. */
+function seedOf(text) {
+  let h = 2166136261;
+  const t = String(text || '');
+  for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+
+/* Marks (or unmarks) one rendered block with a drop cap: which is one of the four built in, or `set` is a set of
+   drop caps (see "Sets of drop caps"). A set of images marks the block only if it has an image for the letter the
+   block's paragraph begins with; otherwise the block keeps the vault's drop cap. Where a set has several images of a
+   letter, `key` (the note's path) and the paragraph's opening words choose one, the same one each time the note is
+   drawn. Returns the image chosen ({light, dark}), or null. */
+function markDropcap(el, which, set, key) {
+  for (const c of Array.from(el.classList)) if (c.startsWith('scriptorium-dropcap') && c !== 'scriptorium-dropcap-inked') el.classList.remove(c);
+  if (el.style && el.style.removeProperty) for (const v of DROPCAP_VARS) el.style.removeProperty(v);
+  if (set) {
+    if (set.kind === 'font') {
+      el.classList.add('scriptorium-dropcap', 'scriptorium-dropcap-font');
+      el.style.setProperty('--scriptorium-initial-font', `"${set.family}", var(--manuscript-display)`);
+      el.style.setProperty('--scriptorium-initial-size', `${set.size || 4.2}em`);
+      el.style.setProperty('--scriptorium-initial-margin', set.margin || '0.1em 0.1em -0.12em 0');
+      el.style.setProperty('--scriptorium-initial-weight', 'normal');
+      return null;
+    }
+    const p = el.querySelector ? el.querySelector(':scope > p') : null;
+    const text = p ? String(p.textContent || '') : '';
+    const slot = p && set.letters[openingLetter(text)];
+    if (!slot) return null;
+    const seed = seedOf(`${key || ''}\n${text.slice(0, 48)}`);
+    const one = v => (Array.isArray(v) ? v[seed % v.length] : v) || '';
+    const image = { light: one(slot.light) || one(slot.dark), dark: one(slot.dark) || one(slot.light) };
+    if (!image.light) return null;
+    el.classList.add('scriptorium-dropcap', 'scriptorium-dropcap-image');
+    if (set.mono) el.classList.add('scriptorium-dropcap-mono');
+    const url = u => `url("${String(u).replace(/["\\\n]/g, encodeURIComponent)}")`;
+    el.style.setProperty('--scriptorium-dropcap-light', url(image.light));
+    el.style.setProperty('--scriptorium-dropcap-dark', url(image.dark));
+    return image;
+  }
+  if (which && !which.startsWith('set:')) el.classList.add('scriptorium-dropcap', `scriptorium-dropcap-${which}`);
   return null;
 }
 
-/* Marks (or unmarks) one rendered block with a note's drop cap. */
-function markDropcap(el, which) {
-  for (const c of Array.from(el.classList)) if (c.startsWith('scriptorium-dropcap')) el.classList.remove(c);
-  if (which) el.classList.add('scriptorium-dropcap', `scriptorium-dropcap-${which}`);
+/* The choices of the command: the vault's, then each drop cap built in, then each set, then the sets Scriptorium
+   knows of but may not pass on (`missing`: the writer adds the font; the value is 'add:<name>'). */
+function dropcapChoices(vaultInitials, sets, missing) {
+  const all = INITIALS.map(([value, label]) => ({ value, label }))
+    .concat((sets || []).map(set => ({ value: `set:${set.name}`, label: set.label })));
+  const name = (all.find(c => c.value === vaultInitials) || all[0]).label;
+  return [{ value: null, label: `The vault’s drop cap (${name})` }].concat(all,
+    (missing || []).map(m => ({ value: `add:${m.name}`, label: `${m.name} (not included: add the font yourself)` })));
 }
 
-/* The choices of the command: the vault's, then each drop cap. */
-function dropcapChoices(vaultInitials) {
-  const name = (INITIALS.find(([value]) => value === vaultInitials) || INITIALS[0])[1];
-  return [{ value: null, label: `The vault’s drop cap (${name})` }].concat(INITIALS.map(([value, label]) => ({ value, label })));
+/* ==========================================================
+   Sets of drop caps
+   ==========================================================
+   Beside the four built in, a drop cap can come from a set: a folder of images, one or several per letter, or a
+   font of initials (one file, or one file per letter).
+     - gwern.net shows eight kinds of initial (https://gwern.net/dropcap). Yinit and Goudy Initialen are built in.
+       Five more come with Scriptorium as sets, in the plugin's dropcaps folder, as gwern.net publishes them: the
+       fonts Kanzlei Initialen and Deutsche Zierschrift (one small font per letter), and a selection of the images
+       Dropcat, Gene Wolfe and Ninit (CC0). The image sets have a few letters each (B C G I Q T; F T V; A B C): a
+       paragraph that begins with another letter keeps the vault's drop cap. "Scriptorium: Download more drop caps
+       from gwern.net" fetches every image of one of them into the vault, when the writer asks (dropcaps/gwern.json
+       lists what there is). The eighth, Cheshire Initials, has terms that forbid passing it on, so it is named
+       in the list but not included: a writer who has the font adds it as a set of their own.
+     - The writer's own sets live in the vault, in "Scriptorium/Drop caps/<name>/": images named for their letter
+       (A.svg, b.png, initial-C.svg, D-dark.png for the dark theme), or a font (.ttf, .otf, .woff, .woff2). An
+       optional set.json gives {"mono": true} (the images are one colour and take the page's accent colour, drawn
+       through a CSS mask, so they follow the light and dark themes), and for a font {"size": 4.2, "margin": "…"}.
+       "Scriptorium: Add a set of drop caps" makes such a folder from files the writer picks, checking each one.
+       A folder with the name of a set that comes with Scriptorium adds to that set (its letters come first).
+   A set is named in a note's "dropcap" property by its name, and can be the vault's drop cap (Settings). An image
+   takes the place of the paragraph's first letter: the snippet floats it where the initial would be and hides the
+   letter itself, which stays in the text. */
+
+const DROPCAP_FOLDER = 'Scriptorium/Drop caps';
+const BUNDLED_SETS = [
+  { name: 'Kanzlei Initialen', dir: 'kanzlei', about: 'blackletter', also: ['kanzlei'], meta: { size: 3.95, margin: '0.2em 0.12em -0.1em 0' } },
+  { name: 'Deutsche Zierschrift', dir: 'de-zs', about: 'Rudolf Koch’s blackletter', also: ['de-zs', 'zierschrift'], meta: { size: 4.3, margin: '0.07em 0.1em -0.2em 0' } },
+  { name: 'Dropcat', dir: 'dropcat', about: 'cats, from gwern.net', more: true },
+  { name: 'Gene Wolfe', dir: 'gene-wolfe', about: 'wolves and suns, from gwern.net', more: true },
+  { name: 'Ninit', dir: 'ninit', about: 'machines and flowers, from gwern.net', more: true },
+];
+/* Known, but not Scriptorium's to pass on: the writer fetches the font and adds it as a set of this name. */
+const YOUR_OWN_SETS = [
+  {
+    name: 'Cheshire Initials', also: ['cheshire'], by: 'House of Lime (2001)',
+    where: 'https://www.1001fonts.com/cheshire-initials-font.html',
+    why: 'Its licence (the 1001Fonts Free For Commercial Use License) lets you download and use it, but not publish it, so Scriptorium cannot include it.',
+    meta: { size: 4.1, margin: '0.12em 0.1em -0.12em 0' },
+  },
+];
+const DROPCAP_IMAGE_MAX = 600 * 1024, DROPCAP_FONT_MAX = 3 * 1024 * 1024, DROPCAP_FETCH_MAX = 2 * 1024 * 1024;
+
+/* The letter a paragraph opens with, as a capital A-Z ('' if it opens with anything else): the letter a drop cap
+   image must show. Opening quotation marks and brackets are passed over. */
+function openingLetter(text) {
+  const m = String(text || '').match(/^[\s"'“”‘’«»(\[¿¡—–-]*(\p{L})/u);
+  if (!m) return '';
+  const c = m[1].normalize('NFD')[0].toUpperCase();
+  return /^[A-Z]$/.test(c) ? c : '';
+}
+
+/* What a file of a set is, from its name: {letter, theme} for an image ('light' unless the name says dark), {font:
+   true} for a font ({font: true, letter} for a font of one letter), or null. The letter is the first part of the
+   name that is a single letter: "A.svg", "b.png", "initial-C.svg", "Goudy_D-dark.png", "Q-light-1-small-2x.png",
+   "Kanzlei-Initialen-A.ttf". */
+function dropcapFile(name) {
+  const m = String(name || '').match(/^(.*)\.([A-Za-z0-9]+)$/);
+  if (!m) return null;
+  const ext = m[2].toLowerCase();
+  const parts = m[1].split(/[-_ .]+/).filter(Boolean);
+  const letter = parts.find(t => /^[A-Za-z]$/.test(t));
+  if (['ttf', 'otf', 'woff', 'woff2'].includes(ext)) return letter ? { font: true, letter: letter.toUpperCase() } : { font: true };
+  if (!['svg', 'png'].includes(ext)) return null;
+  if (!letter) return null;
+  return { letter: letter.toUpperCase(), theme: parts.some(t => /^dark$/i.test(t)) ? 'dark' : 'light' };
+}
+
+/* A set from its folder's file names and its set.json (if any): {name, label, kind: 'images' | 'font', mono, letters:
+   {A: {light: [files], dark: [files]}}, font: file, fonts: {A: file}, size, margin}; null if the folder has nothing
+   a set can use. */
+function describeSet(name, files, meta) {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  const set = { name, label: typeof m.label === 'string' && m.label ? m.label : name, kind: 'images', mono: Boolean(m.mono), letters: {} };
+  const fonts = {};
+  for (const file of files.slice().sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))) {
+    const what = dropcapFile(file);
+    if (!what) continue;
+    if (what.font) {
+      if (what.letter) { if (!fonts[what.letter]) fonts[what.letter] = file; } else if (!set.font) set.font = file;
+      continue;
+    }
+    const slot = set.letters[what.letter] || (set.letters[what.letter] = {});
+    (slot[what.theme] || (slot[what.theme] = [])).push(file);
+  }
+  if (Object.keys(set.letters).length) { delete set.font; return set; }
+  if (!set.font && !Object.keys(fonts).length) return null;
+  set.kind = 'font';
+  if (Object.keys(fonts).length) set.fonts = fonts;
+  set.family = `Scriptorium Set ${name.replace(/[^A-Za-z0-9 _-]/g, '')}`;
+  if (typeof m.size === 'number' && m.size > 0.5 && m.size < 12) set.size = m.size;
+  if (typeof m.margin === 'string' && /^[-0-9.a-z %]+$/i.test(m.margin)) set.margin = m.margin;
+  return set;
+}
+
+/* The @font-face rules of a set that is a font: url gives a file's address. A font of one letter is asked for only
+   where that letter is set, so one small file is read, not twenty-six. */
+function fontFaces(set, url) {
+  const face = (file, range) => `@font-face { font-family: "${set.family}"; src: url("${url(file)}"); font-display: block;${range ? ` unicode-range: ${range};` : ''} }`;
+  const out = set.font ? [face(set.font, '')] : [];
+  for (const [letter, file] of Object.entries(set.fonts || {})) {
+    const hex = n => `U+${n.toString(16).toUpperCase()}`;
+    out.push(face(file, `${hex(letter.charCodeAt(0))}, ${hex(letter.toLowerCase().charCodeAt(0))}`));
+  }
+  return out.join('\n');
+}
+
+/* A set's line in the lists: its name, what it is, and (a set of images) the letters it has. */
+function setLabel(set, about) {
+  const letters = set.kind === 'images' ? Object.keys(set.letters).sort() : [];
+  const bits = [about, letters.length && letters.length < 26 ? letters.join(' ') : ''].filter(Boolean);
+  return bits.length ? `${set.name} (${bits.join('; ')})` : set.name;
+}
+
+/* A name a set's folder can have: letters, digits, spaces, hyphens and underscores, 40 at most; '' if nothing is left. */
+function setName(text) {
+  return String(text || '').normalize('NFKC').replace(/[^\p{L}\p{N} _-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 40).trim();
+}
+
+/* An SVG made safe to keep in the vault: scripts, foreign content, event handlers, and every reference outside the
+   file are taken out. Returns {svg, removed} or {problem}. (A drop cap is only ever shown as an image, where none of
+   these would run or load; this is so that the file is harmless wherever else it is opened.) */
+function sanitizeSvg(text) {
+  let t = String(text || '').replace(/^﻿/, '');
+  if (/<!ENTITY/i.test(t)) return { problem: 'it declares XML entities' };
+  if (!/<svg[\s>]/i.test(t)) return { problem: 'it is not an SVG image' };
+  let removed = 0;
+  const cut = re => { t = t.replace(re, () => { removed++; return ''; }); };
+  cut(/<!DOCTYPE[^>]*>/gi);
+  cut(/<\?xml-stylesheet[^>]*\?>/gi);
+  for (const tag of ['script', 'foreignObject', 'iframe', 'object', 'embed', 'audio', 'video', 'animate', 'set', 'a']) {
+    if (tag === 'a') { cut(/<a(\s[^>]*)?>/gi); cut(/<\/a\s*>/gi); continue; }   // a link's content stays, the link goes
+    cut(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}\\s*>`, 'gi'));
+    cut(new RegExp(`<${tag}\\b[^>]*\\/?>`, 'gi'));
+  }
+  cut(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi);
+  cut(/\s+(?:xlink:)?href\s*=\s*(?:"(?!#|data:image\/(?:png|jpeg|gif);)[^"]*"|'(?!#|data:image\/(?:png|jpeg|gif);)[^']*')/gi);
+  cut(/@import[^;]*;?/gi);
+  cut(/url\(\s*(['"]?)(?!#|data:image\/(?:png|jpeg|gif);)[^)]*\1\s*\)/gi);
+  cut(/(?:java|vb)script\s*:/gi);
+  if (/<script|<foreignObject|\son[a-z]+\s*=|javascript\s*:/i.test(t)) return { problem: 'it holds script that could not be taken out' };
+  return { svg: t, removed };
+}
+
+/* Checks one file picked for a set: {ok: true, name, kind: 'svg' | 'png' | 'font', letter, theme, bytes} with the
+   bytes to store (an SVG's are the sanitised ones), or {ok: false, name, problem}. bytes is a Uint8Array. max is the
+   largest image taken (600 kB unless given). */
+function checkDropcapFile(name, bytes, max) {
+  const what = dropcapFile(name);
+  const no = problem => ({ ok: false, name, problem });
+  if (!what) return no('its name has no single letter in it (name each image for its letter: A.svg, b.png), and it is not a font');
+  const head = Array.from(bytes.slice(0, 4));
+  const tag = String.fromCharCode(...head);
+  if (what.font) {
+    if (bytes.length > DROPCAP_FONT_MAX) return no('the font is larger than 3 MB');
+    const ok = ['wOFF', 'wOF2', 'OTTO', 'true'].includes(tag) || (head[0] === 0 && head[1] === 1 && head[2] === 0 && head[3] === 0);
+    if (!ok) return no('it is not a TrueType, OpenType or WOFF font');
+    return what.letter ? { ok: true, name, kind: 'font', letter: what.letter, bytes } : { ok: true, name, kind: 'font', bytes };
+  }
+  const limit = max || DROPCAP_IMAGE_MAX;
+  if (bytes.length > limit) return no(`the image is larger than ${limit >= 1048576 ? `${Math.round(limit / 1048576)} MB` : `${Math.round(limit / 1024)} kB`}`);
+  if (/\.png$/i.test(name)) {
+    const png = head[0] === 0x89 && tag.slice(1) === 'PNG';
+    return png ? { ok: true, name, kind: 'png', letter: what.letter, theme: what.theme, bytes } : no('it is not a PNG image');
+  }
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) { return no('it is not text'); }
+  const clean = sanitizeSvg(text);
+  if (clean.problem) return no(clean.problem);
+  return { ok: true, name, kind: 'svg', letter: what.letter, theme: what.theme, bytes: new TextEncoder().encode(clean.svg), removed: clean.removed };
+}
+
+/* An image of one colour as a mask: the ink keeps its place and the ground becomes clear, so the snippet can draw
+   the letter in the page's accent colour (see .scriptorium-dropcap-mono). rgba is the image's pixels (four bytes
+   each). An image that already has a clear ground needs nothing: null. Otherwise the ground is the paper's
+   shade (or, for a white letter on a black plate, the plate's), and each pixel is as opaque as it is far from the ground; the result
+   is black ink, the same size. */
+function monoMask(rgba, width, height) {
+  const n = width * height;
+  if (!n || !rgba || rgba.length < 4 * n) return null;
+  let clear = 0;
+  for (let i = 0; i < n; i++) if (rgba[4 * i + 3] < 32) clear++;
+  if (clear > n * 0.02) return null;
+  const lum = i => 0.2126 * rgba[4 * i] + 0.7152 * rgba[4 * i + 1] + 0.0722 * rgba[4 * i + 2];
+  const all = new Uint32Array(256), rim = new Uint32Array(256);
+  const edge = Math.max(1, Math.round(Math.min(width, height) * 0.02));
+  let rims = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const l = Math.round(lum(y * width + x));
+      all[l]++;
+      if (x < edge || x >= width - edge || y < edge || y >= height - edge) { rim[l]++; rims++; }
+    }
+  }
+  const at = (hist, total, part) => { let seen = 0; for (let l = 0; l < 256; l++) { seen += hist[l]; if (seen >= total * part) return l; } return 255; };
+  // paper, unless the image is dark at its edge and three quarters dark in all (a white letter on a black plate)
+  const dark = at(rim, rims, 0.5) < 96 && at(all, n, 0.75) < 96;
+  const ground = dark ? at(all, n, 0.1) : at(all, n, 0.9), span = Math.max(ground, 255 - ground) || 1;
+  const out = new Uint8ClampedArray(4 * n);
+  for (let i = 0; i < n; i++) {
+    const d = Math.abs(lum(i) - ground) / span;
+    const a = Math.min(1, Math.max(0, (d - 0.12) / 0.45));
+    out[4 * i + 3] = Math.round(a * rgba[4 * i + 3]);
+  }
+  return out;
+}
+
+/* What "Download more drop caps from gwern.net" would fetch for one set: list is the plugin's dropcaps/gwern.json,
+   id the set's folder there. Each image at the size gwern.net shows on its pages where it has one; with `all`, also
+   the images it keeps only at full size. Returns {files: [{url, file, bytes}], bytes}. */
+function downloadPlan(list, id, all) {
+  const set = list && list.sets && list.sets[id];
+  const base = list && typeof list.from === 'string' && /^https:\/\/gwern\.net\//.test(list.from) ? list.from : null;
+  const files = [];
+  if (set && base) {
+    for (const [path, bytes] of (set.web || []).concat(all ? set.rest || [] : [])) {
+      if (!/^(?:light|dark)\/[A-Za-z0-9._-]+\.png$/.test(path)) continue;
+      files.push({ url: `${base}${id}/${path}`, file: path.slice(path.indexOf('/') + 1), bytes: Number(bytes) || 0 });
+    }
+  }
+  return { files, bytes: files.reduce((sum, f) => sum + f.bytes, 0) };
+}
+
+/* "12 MB", "900 kB". */
+function sizeText(bytes) {
+  return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} kB`;
+}
+
+/* Fetches a plan's images one at a time. io: get(url) → the bytes (rejects when it cannot), has(file) → whether the
+   vault has it already, put(file, bytes), progress(done, total, file), stopped() → the writer has had enough.
+   An image already there is kept, one that fails is passed over, and if the first three all fail nothing more is
+   asked for (there is no connection, or gwern.net is away). Returns {saved, kept, failed: [{file, problem}], bytes,
+   offline, stopped}. */
+async function fetchDropcapSet(plan, io) {
+  const out = { saved: 0, kept: 0, failed: [], bytes: 0, offline: false, stopped: false };
+  let done = 0;
+  for (const f of plan.files) {
+    if (io.stopped && io.stopped()) { out.stopped = true; break; }
+    if (io.progress) io.progress(done, plan.files.length, f.file);
+    done++;
+    try {
+      if (await io.has(f.file)) { out.kept++; continue; }
+      const got = await io.get(f.url);
+      const bytes = got instanceof Uint8Array ? got : new Uint8Array(got);
+      const checked = checkDropcapFile(f.file, bytes, DROPCAP_FETCH_MAX);
+      if (!checked.ok || checked.kind !== 'png') throw new Error(checked.problem || 'it is not a PNG image');
+      await io.put(f.file, bytes);
+      out.saved++;
+      out.bytes += bytes.length;
+    } catch (e) {
+      out.failed.push({ file: f.file, problem: String((e && e.message) || e) });
+      if (!out.saved && !out.kept && out.failed.length >= 3) { out.offline = true; break; }
+    }
+  }
+  if (io.progress) io.progress(done, plan.files.length, '');
+  return out;
+}
+
+/* "Scriptorium: Add a set of drop caps": a name, the files, and whether the images are of one colour. `preset` is
+   one of YOUR_OWN_SETS: a font Scriptorium names but may not include. */
+class DropcapSetModal extends Modal {
+  constructor(plugin, preset) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.preset = preset || null;
+    this.files = [];
+  }
+
+  onOpen() {
+    this.modalEl.addClass('scriptorium-setup');
+    const preset = this.preset;
+    this.titleEl.setText(preset ? `Add ${preset.name}` : 'Add a set of drop caps');
+    const el = this.contentEl;
+    if (preset) {
+      const p = el.createEl('p');
+      p.appendText(`${preset.name}, by ${preset.by}, is one of the initials gwern.net uses. ${preset.why} Download it from `);
+      p.createEl('a', { text: preset.where.replace(/^https:\/\/(www\.)?/, ''), href: preset.where });
+      p.appendText(', unzip it, and pick the font file below.');
+    }
+    el.createEl('p', {
+      text: (preset ? 'In general: pick' : 'Pick') + ' one image for each letter you have (SVG or PNG, named for its letter: A.svg, b.png, initial-C.svg; ' +
+        'add “-dark” for a dark-theme version), or a font of initials (.ttf, .otf, .woff, .woff2). The set is kept in ' +
+        `the vault, in “${DROPCAP_FOLDER}”, and then appears in “Choose the drop cap for this note” and in the settings.`,
+    });
+    const name = el.createEl('input', { type: 'text', cls: 'scriptorium-setup-path', attr: { placeholder: 'A name for the set', 'aria-label': 'A name for the set' } });
+    if (preset) name.value = preset.name;
+    const pick = el.createEl('input', { type: 'file', attr: { multiple: 'true', accept: '.svg,.png,.ttf,.otf,.woff,.woff2', 'aria-label': 'The images, or the font' } });
+    pick.style.display = 'block';
+    pick.style.margin = '10px 0';
+    const monoRow = el.createEl('label', { cls: 'scriptorium-setup-mono' });
+    const mono = monoRow.createEl('input', { type: 'checkbox' });
+    monoRow.appendText(' The images are of one colour: draw them in the page’s accent colour, in the light and the dark theme (ink on white paper is made into ink alone)');
+    const list = el.createEl('pre', { cls: 'scriptorium-setup-plan', attr: { tabindex: '0' } });
+    list.style.display = 'none';
+    const said = el.createEl('p', { cls: 'scriptorium-setup-problem' });
+    const buttons = el.createDiv({ cls: 'modal-button-container' });
+    const save = buttons.createEl('button', { cls: 'mod-cta', text: 'Add the set' });
+    buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    this.take = async files => {     // the files picked
+      this.files = [];
+      for (const f of files) {
+        try { this.files.push(checkDropcapFile(f.name, new Uint8Array(await f.arrayBuffer()))); }
+        catch (e) { this.files.push({ ok: false, name: f.name, problem: 'it could not be read' }); }
+      }
+      list.style.display = this.files.length ? '' : 'none';
+      list.setText(this.files.map(f => (f.ok
+        ? `${f.name}: ${f.kind === 'font' ? (f.letter ? `a font of the letter ${f.letter}` : 'a font of initials') : `the letter ${f.letter}${f.theme === 'dark' ? ' (dark theme)' : ''}`}${f.removed ? `; ${f.removed} unsafe part${f.removed === 1 ? '' : 's'} taken out` : ''}`
+        : `${f.name}: left out, ${f.problem}`)).join('\n'));
+    };
+    pick.addEventListener('change', () => this.take(Array.from(pick.files || [])));
+    save.addEventListener('click', async () => {
+      const n = setName(name.value);
+      const good = this.files.filter(f => f.ok);
+      if (!n) { said.setText('Give the set a name (letters, digits and spaces).'); name.focus(); return; }
+      if (INITIALS.some(([v, label]) => v === n.toLowerCase() || label.toLowerCase() === n.toLowerCase()) || BUNDLED_SETS.some(b => b.name.toLowerCase() === n.toLowerCase())) {
+        said.setText('That is the name of a drop cap Scriptorium already has: choose another.'); name.focus(); return;
+      }
+      if (!good.length) { said.setText('Pick at least one image named for its letter, or a font.'); return; }
+      save.disabled = true;
+      try {
+        const own = YOUR_OWN_SETS.find(y => y.name.toLowerCase() === n.toLowerCase());
+        await this.plugin.saveDropcapSet(n, good, mono.checked, own && own.meta);
+        new Notice(`The set “${n}” was added. Choose it with “Scriptorium: Choose the drop cap for this note”, or in the settings.`, 8000);
+        this.close();
+      } catch (e) {
+        save.disabled = false;
+        said.setText(`The set could not be saved: ${e.message}`);
+      }
+    });
+    window.setTimeout(() => (preset ? pick : name).focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/* "Scriptorium: Download more drop caps from gwern.net": every image of Dropcat, Gene Wolfe or Ninit, fetched into
+   the vault. Nothing is asked of gwern.net until a button here is pressed. */
+class DropcapDownloadModal extends Modal {
+  constructor(plugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.busy = false;
+    this.halt = false;
+  }
+
+  async onOpen() {
+    this.modalEl.addClass('scriptorium-setup');
+    this.titleEl.setText('More drop caps from gwern.net');
+    const el = this.contentEl;
+    el.createEl('p', {
+      text: 'Scriptorium comes with a few images of each of these sets. gwern.net has many more of the same letters, ' +
+        'released into the public domain (CC0). A button below fetches them from gwern.net, now, into this vault ' +
+        `(“${DROPCAP_FOLDER}”); a paragraph then has one of its letter’s images, the same one each time. Nothing is fetched until you ask.`,
+    });
+    let list;
+    try { list = await this.plugin.gwernList(); } catch (e) { list = null; }
+    const said = el.createEl('p', { cls: 'scriptorium-setup-note', attr: { 'aria-live': 'polite' } });
+    if (!list) { said.setText('The list of gwern.net’s images is missing from the plugin’s folder.'); return; }
+    const rows = el.createDiv({ cls: 'scriptorium-dropcap-downloads' });
+    const all = [];
+    for (const b of BUNDLED_SETS.filter(s => s.more)) {
+      const web = downloadPlan(list, b.dir, false), whole = downloadPlan(list, b.dir, true);
+      const row = rows.createDiv({ cls: 'scriptorium-dropcap-download' });
+      row.createEl('strong', { text: b.name });
+      const offer = (plan, text) => {
+        if (!plan.files.length) return;
+        const button = row.createEl('button', { text: `${text}: ${plan.files.length} images, ${sizeText(plan.bytes)}` });
+        all.push(button);
+        button.addEventListener('click', async () => {
+          if (this.busy) return;
+          this.busy = true;
+          this.halt = false;
+          all.forEach(x => { x.disabled = true; });
+          let result;
+          try {
+            result = await this.plugin.downloadDropcapSet(b, plan, {
+              progress: (done, total, file) => said.setText(file ? `${b.name}: ${done + 1} of ${total} (${file})` : `${b.name}: finishing`),
+              stopped: () => this.halt,
+            });
+          } catch (e) {
+            result = { saved: 0, kept: 0, failed: [{ file: '', problem: e.message }], bytes: 0, offline: false };
+          }
+          this.busy = false;
+          all.forEach(x => { x.disabled = false; });
+          if (this.halt) return;
+          said.setText(describeDownload(b.name, result));
+        });
+      };
+      if (web.files.length) offer(web, whole.files.length > web.files.length ? 'The images gwern.net shows' : 'Every image');
+      if (whole.files.length > web.files.length) offer(whole, web.files.length ? 'Every image, the rest at full size' : 'Every image, at full size');
+    }
+    const buttons = el.createDiv({ cls: 'modal-button-container' });
+    buttons.createEl('button', { text: 'Close' }).addEventListener('click', () => this.close());
+  }
+
+  onClose() {
+    this.halt = true;     // a download under way stops after the image it is on
+    this.contentEl.empty();
+  }
+}
+
+/* What a download came to, in a sentence. */
+function describeDownload(name, r) {
+  if (r.offline) return `${name}: gwern.net could not be reached (${r.failed[0] ? r.failed[0].problem : 'no connection'}). Nothing was changed; try again when you are online.`;
+  const bits = [];
+  if (r.saved) bits.push(`${r.saved} image${r.saved === 1 ? '' : 's'} added (${sizeText(r.bytes)})`);
+  if (r.kept) bits.push(`${r.kept} already there`);
+  if (r.failed.length) bits.push(`${r.failed.length} could not be fetched (${r.failed[0].problem}); ask again to try those`);
+  if (r.stopped) bits.push('stopped before the end');
+  return `${name}: ${bits.join(', ') || 'nothing to fetch'}.`;
 }
 
 /* ==========================================================
@@ -120,21 +580,31 @@ class DropcapModal extends Modal {
     this.modalEl.addClass('scriptorium-dropcap-modal');
     this.titleEl.setText('Drop cap for this note');
     const cache = this.app.metadataCache.getFileCache(file);
-    const current = noteDropcap(cache && cache.frontmatter);
+    const asked = noteDropcap(cache && cache.frontmatter);
+    const known = asked && asked.startsWith('set:') ? this.plugin.findSet(asked) : null;
+    const current = known ? `set:${known.name}` : (asked && asked.startsWith('set:') ? null : asked);
     this.contentEl.createEl('p', { cls: 'scriptorium-dropcap-file', text: file.basename });
     const list = this.contentEl.createDiv({ cls: 'scriptorium-dropcap-list', attr: { role: 'listbox', 'aria-label': 'Drop cap' } });
     const items = [];
-    for (const choice of dropcapChoices(this.plugin.settings.initials)) {
+    const missing = YOUR_OWN_SETS.filter(y => !this.plugin.findSet(y.name));
+    for (const choice of dropcapChoices(this.plugin.settings.initials, this.plugin.dropcapSets, missing)) {
+      const add = choice.value && choice.value.startsWith('add:') ? missing.find(m => `add:${m.name}` === choice.value) : null;
       const item = list.createEl('button', {
         cls: 'scriptorium-dropcap-choice', text: choice.label,
         attr: { role: 'option', 'aria-selected': String(choice.value === current) },
       });
       if (choice.value === current) item.addClass('is-current');
       // Moving through the list shows each drop cap in the note; nothing is saved until one is chosen.
-      const show = () => this.plugin.previewDropcap(this.view, choice.value);
+      const show = () => this.plugin.previewDropcap(this.view, add ? undefined : choice.value);
       item.addEventListener('focus', show);
       item.addEventListener('mouseenter', () => item.focus());
-      item.addEventListener('click', () => { this.chosen = true; this.close(); void this.plugin.setNoteDropcap(file, choice.value); });
+      item.addEventListener('click', () => {
+        if (add) { this.close(); new DropcapSetModal(this.plugin, add).open(); return; }   // a font the writer adds
+        this.chosen = true;
+        this.close();
+        void this.plugin.setNoteDropcap(file, choice.value);
+      });
+      if (add) item.addClass('is-missing');
       item.addEventListener('keydown', ev => {
         const i = items.indexOf(item);
         if (ev.key === 'ArrowDown') { ev.preventDefault(); items[(i + 1) % items.length].focus(); }
@@ -144,8 +614,14 @@ class DropcapModal extends Modal {
     }
     this.contentEl.createEl('p', {
       cls: 'scriptorium-dropcap-hint',
-      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view, where drop caps are drawn.',
+      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view, where drop caps are drawn. A set ' +
+        'of images shows where it has the paragraph’s first letter.',
     });
+    const more = this.contentEl.createDiv({ cls: 'scriptorium-dropcap-more' });
+    more.createEl('button', { text: 'Add a set of your own…' })
+      .addEventListener('click', () => { this.close(); new DropcapSetModal(this.plugin).open(); });
+    more.createEl('button', { text: 'More from gwern.net…' })
+      .addEventListener('click', () => { this.close(); new DropcapDownloadModal(this.plugin).open(); });
     window.setTimeout(() => (items.find(i => i.hasClass('is-current')) || items[0]).focus(), 0);
   }
 
@@ -175,6 +651,10 @@ class ScriptoriumSettings extends PluginSettingTab {
       .setDesc('The initial that opens a chapter in Reading view: an ornamental Yinit letter, a floriated Goudy Initialen letter, a plain Cormorant Garamond capital in the accent colour, or none (an ordinary first letter, without the small-capped first line).')
       .addDropdown(dropdown => {
         for (const [value, label] of INITIALS) dropdown.addOption(value, label);
+        for (const set of this.plugin.dropcapSets) dropdown.addOption(`set:${set.name}`, set.label);
+        if (!INITIALS.some(([value]) => value === settings.initials) && !this.plugin.findSet(settings.initials)) {
+          dropdown.addOption(settings.initials, `${settings.initials.replace(/^set:/, '')} (a set that is not in this vault)`);
+        }
         dropdown.setValue(settings.initials).onChange(value => this.plugin.updateSettings({ initials: value }));
       });
     new Setting(el)
@@ -1522,12 +2002,25 @@ class Scriptorium extends Plugin {
     });
     this.registerMarkdownPostProcessor((el, ctx) => {
       const which = noteDropcap(ctx && ctx.frontmatter);      // a note's own drop cap (see "A drop cap for one note")
-      if (isPrintPage(el)) return this.dressPrint(el, which); // Export to PDF: the whole page comes at once
-      markDropcap(el, which);
+      const path = (ctx && ctx.sourcePath) || '';
+      if (isPrintPage(el)) return this.dressPrint(el, which, path); // Export to PDF: the whole page comes at once
+      this.mark(el, which, path);
       el.querySelectorAll(':scope > p').forEach(p => { this.kept.add(p); this.resizeObserver.observe(p); });
     });
     // Export to PDF prints the note's title by default: tick Obsidian's "Include file name as title" once.
-    this.app.workspace.onLayoutReady(() => { void this.includeTitleInPdf(); });
+    this.app.workspace.onLayoutReady(() => { void this.includeTitleInPdf(); void this.loadDropcapSets(); });
+    this.dropcapSets = [];   // the sets of drop caps beside the four built in (see "Sets of drop caps")
+    this.ratios = new Map();  // an image's shape (width over height), by its address
+    this.addCommand({
+      id: 'add-dropcap-set',
+      name: 'Add a set of drop caps (your own images or a font of initials)',
+      callback: () => new DropcapSetModal(this).open()
+    });
+    this.addCommand({
+      id: 'download-dropcaps',
+      name: 'Download more drop caps from gwern.net (Dropcat, Gene Wolfe, Ninit)',
+      callback: () => new DropcapDownloadModal(this).open()
+    });
     // When a note's "dropcap" property changes, its Reading views are drawn again with the new one.
     this.dropcaps = new Map();
     this.registerEvent(this.app.metadataCache.on('changed', (file, data, cache) => {
@@ -1562,16 +2055,21 @@ class Scriptorium extends Plugin {
 
   /* Export to PDF (see "Export to PDF: the page as Reading view sets it"). The returned promise is awaited by Obsidian
      before it prints: by then the drop cap's font has loaded. */
-  dressPrint(page, which) {
+  dressPrint(page, which, path) {
     const doc = page.ownerDocument, body = doc.body, s = this.settings;
     body.classList.toggle('scriptorium-fancy', s.fancyMode);
     for (const [value] of INITIALS) body.classList.toggle(`scriptorium-initials-${value}`, value === s.initials && value !== 'yinit');
-    dressPrint(page, which);
+    dressPrint(page, null);
+    const shapes = [];
+    for (const child of Array.from(page.children)) if (child.tagName === 'DIV' && !child.classList.contains('mod-header')) shapes.push(this.mark(child, which, path));
+    const faces = document.getElementById('scriptorium-dropcap-fonts');   // the fonts of the writer's sets
+    if (faces && !doc.getElementById('scriptorium-dropcap-fonts')) doc.head.appendChild(doc.importNode(faces, true));
     const fonts = ['"Scriptorium Yinit"', '"Scriptorium Goudy"', '500 1em "Cormorant Garamond"', '1em "EB Garamond"', 'italic 1em "EB Garamond"'];
+    for (const set of this.dropcapSets) if (set.kind === 'font') fonts.push(`"${set.family}"`);
     const loaded = doc.fonts && doc.fonts.load
       ? Promise.all(fonts.map(f => doc.fonts.load(f.includes('1em') ? f : `1em ${f}`, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ').catch(() => null)))
       : Promise.resolve();
-    return Promise.race([loaded, new Promise(resolve => window.setTimeout(resolve, 2500))]);
+    return Promise.race([Promise.all([loaded].concat(shapes)), new Promise(resolve => window.setTimeout(resolve, 2500))]);
   }
 
   /* Ticks "Include file name as title" in Obsidian's PDF export settings, once per vault: after that the choice is
@@ -1586,17 +2084,256 @@ class Scriptorium extends Plugin {
     } catch (e) { /* an Obsidian without these settings: nothing to tick */ }
   }
 
-  /* Shows a drop cap in a note's Reading view without saving it: which is 'yinit' | 'goudy' | 'plain' | 'none', null
-     for the vault's, or undefined for what the note's properties say. */
-  previewDropcap(view, which) {
+  /* The set a name asks for ('set:Dropcat', or the bare name; 'kanzlei' and 'de-zs', gwern.net's names, are known
+     too), whatever its case; null if the vault has none such. */
+  findSet(value) {
+    const name = String(value || '').replace(/^set:/, '').trim().toLowerCase();
+    if (!name) return null;
+    return this.dropcapSets.find(s => s.name.toLowerCase() === name || s.label.toLowerCase() === name || (s.dir && s.dir === name) ||
+      (s.also && s.also.includes(name))) || null;
+  }
+
+  /* Marks one rendered block: with the note's own drop cap if it has one, else with the vault's if that is a set
+     (the four built in are classes on body, and need no mark). A set that is not in the vault counts as no choice.
+     path is the note's. Returns a promise: an image's shape is known (the text wraps round it closely). */
+  mark(el, which, path) {
+    let set = which && which.startsWith('set:') ? this.findSet(which) : null;
+    if (which && which.startsWith('set:') && !set) which = null;
+    if (!which && this.settings.initials.startsWith('set:')) { set = this.findSet(this.settings.initials); which = set ? this.settings.initials : null; }
+    const image = markDropcap(el, which, set, path);
+    el.scriptoriumImage = image;
+    if (!image) return Promise.resolve();
+    return Promise.all([['light', '--scriptorium-dropcap-ratio'], ['dark', '--scriptorium-dropcap-ratio-dark']].map(([theme, name]) =>
+      this.ratio(image[theme]).then(r => { if (r && el.scriptoriumImage === image) el.style.setProperty(name, String(r)); })));
+  }
+
+  /* An image's width over its height (0 if it cannot be read), found once. */
+  ratio(url) {
+    let known = this.ratios.get(url);
+    if (!known) {
+      known = new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => resolve(img.naturalHeight ? Math.round(100 * img.naturalWidth / img.naturalHeight) / 100 : 0);
+        img.onerror = () => resolve(0);
+        img.src = url;
+      });
+      this.ratios.set(url, known);
+    }
+    return known;
+  }
+
+  /* Shows a drop cap in a note's Reading view without saving it: which is 'yinit' | 'goudy' | 'plain' | 'none' or
+     'set:<name>', null for the vault's, or undefined for what the note's properties say. The initial is inked in
+     (the snippet's scriptorium-dropcap-inked), unless quiet is set. */
+  previewDropcap(view, which, quiet) {
     if (which === undefined) {
       const cache = view.file && this.app.metadataCache.getFileCache(view.file);
       which = noteDropcap(cache && cache.frontmatter);
     }
     const root = view.containerEl.querySelector('.markdown-preview-view');
     if (!root) return;
-    root.querySelectorAll('.markdown-preview-sizer > div').forEach(el => markDropcap(el, which));
+    const path = view.file ? view.file.path : '';
+    root.querySelectorAll('.markdown-preview-sizer > div').forEach(el => {
+      void this.mark(el, which, path);
+      if (quiet || !el.classList.contains('el-p')) return;
+      el.classList.remove('scriptorium-dropcap-inked');
+      void el.offsetWidth;                              // so the animation starts again
+      el.classList.add('scriptorium-dropcap-inked');
+      window.clearTimeout(el.scriptoriumInked);
+      el.scriptoriumInked = window.setTimeout(() => el.classList.remove('scriptorium-dropcap-inked'), 2600);
+    });
     this.recheck();
+  }
+
+  /* Reads the sets of drop caps: those that come with Scriptorium, and the writer's own in the vault. */
+  async loadDropcapSets() {
+    const adapter = this.app.vault.adapter;
+    const read = async (dir, name, extra) => {
+      let listing;
+      try { listing = await adapter.list(dir); } catch (e) { return null; }
+      let meta = null;
+      try { meta = JSON.parse(await adapter.read(`${dir}/set.json`)); } catch (e) { /* no set.json, or not JSON */ }
+      const set = describeSet(name, listing.files.map(f => f.slice(f.lastIndexOf('/') + 1)), Object.assign({}, extra, meta));
+      if (!set) return null;
+      const url = file => adapter.getResourcePath(`${dir}/${file}`);
+      if (set.kind === 'font') set.faces = fontFaces(set, url);
+      for (const slot of Object.values(set.letters)) for (const theme of ['light', 'dark']) if (slot[theme]) slot[theme] = slot[theme].map(url);
+      return set;
+    };
+    const sets = [];
+    for (const b of BUNDLED_SETS) {
+      const set = await read(`${this.manifest.dir}/dropcaps/${b.dir}`, b.name, b.meta);
+      if (!set) continue;
+      Object.assign(set, { dir: b.dir, about: b.about, also: b.also || [] });
+      sets.push(set);
+    }
+    try {
+      const mine = await adapter.list(DROPCAP_FOLDER);
+      for (const dir of mine.folders.slice().sort()) {
+        const name = dir.slice(dir.lastIndexOf('/') + 1);
+        const own = YOUR_OWN_SETS.find(y => y.name.toLowerCase() === name.toLowerCase());
+        const set = await read(dir, name, own && own.meta);
+        if (!set) continue;
+        const i = sets.findIndex(s => s.name.toLowerCase() === name.toLowerCase());
+        if (i < 0) { if (own) set.also = own.also; sets.push(set); continue; }
+        // a folder with the name of a set that comes with Scriptorium: its letters first, the others as they came
+        const base = sets[i];
+        if (set.kind === 'images' && base.kind === 'images') { set.letters = Object.assign({}, base.letters, set.letters); set.mono = set.mono || base.mono; }
+        sets[i] = Object.assign(set, { name: base.name, dir: base.dir, about: base.about, also: base.also });
+      }
+    } catch (e) { /* no sets of the writer's own */ }
+    for (const set of sets) if (set.label === set.name) set.label = setLabel(set, set.about);
+    this.dropcapSets = sets;
+    let style = document.getElementById('scriptorium-dropcap-fonts');
+    if (!style) { style = document.head.createEl('style', { attr: { id: 'scriptorium-dropcap-fonts' } }); this.register(() => style.remove()); }
+    style.textContent = sets.filter(s => s.kind === 'font').map(s => s.faces).join('\n');
+    this.remarkAll();
+    return sets;
+  }
+
+  /* Marks every open Reading view again (the sets, or the vault's drop cap, have changed). */
+  remarkAll() {
+    for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+      if (leaf.view instanceof MarkdownView) this.previewDropcap(leaf.view, undefined, true);
+    }
+  }
+
+  async makeFolder(dir) {
+    const adapter = this.app.vault.adapter;
+    let path = '';
+    for (const part of dir.split('/')) { path = path ? `${path}/${part}` : part; if (!(await adapter.exists(path))) await adapter.mkdir(path); }
+  }
+
+  /* An image drawn again as a PNG: as a mask if it is of one colour on an opaque ground (monoMask), and no larger
+     than `side` pixels. Returns the PNG's bytes, or null if the image can stay as it is. */
+  async redraw(bytes, kind, opts) {
+    const blob = new Blob([bytes], { type: kind === 'svg' ? 'image/svg+xml' : 'image/png' });
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error('the image could not be read'));
+        i.src = url;
+      });
+      const w0 = img.naturalWidth || 512, h0 = img.naturalHeight || 512, side = (opts && opts.side) || 640;
+      const k = Math.min(1, side / Math.max(w0, h0));
+      const w = Math.max(1, Math.round(w0 * k)), h = Math.max(1, Math.round(h0 * k));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const g = canvas.getContext('2d');
+      g.drawImage(img, 0, 0, w, h);
+      const data = g.getImageData(0, 0, w, h);
+      const mask = opts && opts.mono ? monoMask(data.data, w, h) : null;
+      if (mask) { data.data.set(mask); g.putImageData(data, 0, 0); }
+      else if (!(opts && opts.shrink && (k < 1 || kind !== 'png'))) return null;
+      const out = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      return new Uint8Array(await out.arrayBuffer());
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  /* Writes a set the writer has put together (DropcapSetModal) into the vault, and reads the sets again. */
+  async saveDropcapSet(name, files, mono, meta) {
+    const adapter = this.app.vault.adapter, dir = `${DROPCAP_FOLDER}/${name}`;
+    if (await adapter.exists(dir)) throw new Error(`there is already a set called “${name}” (in ${dir})`);
+    await this.makeFolder(dir);
+    const buffer = bytes => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const fonts = files.filter(f => f.kind === 'font');
+    const images = files.filter(f => f.kind !== 'font');
+    const ext = f => f.name.slice(f.name.lastIndexOf('.')).toLowerCase();
+    if (images.length) {
+      for (const f of images) {
+        let bytes = f.bytes, kind = f.kind;
+        if (mono) {
+          const mask = await this.redraw(bytes, kind, { mono: true }).catch(() => null);
+          if (mask) { bytes = mask; kind = 'png'; }
+        }
+        await adapter.writeBinary(`${dir}/${f.letter}${f.theme === 'dark' ? '-dark' : ''}.${kind}`, buffer(bytes));
+      }
+    } else if (fonts.some(f => f.letter)) {
+      for (const f of fonts.filter(x => x.letter)) await adapter.writeBinary(`${dir}/${f.letter}${ext(f)}`, buffer(f.bytes));
+    } else {
+      await adapter.writeBinary(`${dir}/initials${ext(fonts[0])}`, buffer(fonts[0].bytes));
+    }
+    await adapter.write(`${dir}/set.json`, JSON.stringify(Object.assign({ mono: Boolean(mono && images.length) }, images.length ? null : meta), null, 2) + '\n');
+    await this.loadDropcapSets();
+  }
+
+  /* The list of gwern.net's images (dropcaps/gwern.json, in the plugin's folder). */
+  async gwernList() {
+    return JSON.parse(await this.app.vault.adapter.read(`${this.manifest.dir}/dropcaps/gwern.json`));
+  }
+
+  /* Fetches a plan's images of one of Scriptorium's sets from gwern.net into the vault (DropcapDownloadModal), and
+     reads the sets again. The only request Scriptorium ever makes, and only when the writer asks. */
+  async downloadDropcapSet(bundled, plan, hooks) {
+    const adapter = this.app.vault.adapter, dir = `${DROPCAP_FOLDER}/${bundled.name}`;
+    const result = await fetchDropcapSet(plan, {
+      get: async url => {
+        const res = await requestUrl({ url, method: 'GET', throw: false });
+        if (res.status !== 200) throw new Error(`gwern.net answered ${res.status}`);
+        return new Uint8Array(res.arrayBuffer);
+      },
+      has: file => adapter.exists(`${dir}/${file}`),
+      put: async (file, bytes) => {
+        await this.makeFolder(dir);
+        await adapter.writeBinary(`${dir}/${file}`, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      },
+      progress: hooks && hooks.progress,
+      stopped: hooks && hooks.stopped,
+    });
+    if (result.saved) {
+      if (!(await adapter.exists(`${dir}/set.json`))) {
+        await adapter.write(`${dir}/set.json`, JSON.stringify({ source: `https://gwern.net/dropcap#${bundled.dir}`, license: 'CC0 1.0 (public domain)' }, null, 2) + '\n');
+      }
+      await this.loadDropcapSets();
+    }
+    return result;
+  }
+
+  /* For Lagrange, which draws drop caps: puts one image into a set of the writer's (made if need be), as that
+     letter's only image (an earlier one is kept in the set's "earlier" folder), and shows it, inked in, in `view`
+     if the note's drop cap is that set. req: {set, letter, bytes (Uint8Array), kind: 'png' | 'svg', mono}. Returns
+     {set, file}. Throws with a sentence if the image cannot be used. */
+  async addDrawnDropcap(req, view) {
+    const adapter = this.app.vault.adapter;
+    const name = setName(req.set);
+    const letter = openingLetter(req.letter);
+    if (!name || !letter) throw new Error('a drawn drop cap needs a set’s name and a letter');
+    if (INITIALS.some(([v]) => v === name.toLowerCase()) || BUNDLED_SETS.some(b => b.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error(`“${name}” is one of Scriptorium’s own drop caps: give the set another name`);
+    }
+    let checked = checkDropcapFile(`${letter}.${req.kind}`, req.bytes, 12 * 1024 * 1024);
+    if (!checked.ok) throw new Error(checked.problem);
+    let bytes = checked.bytes, kind = checked.kind;
+    const dir = `${DROPCAP_FOLDER}/${name}`;
+    let meta = {};
+    try { meta = JSON.parse(await adapter.read(`${dir}/set.json`)); } catch (e) { /* a new set */ }
+    const mono = typeof meta.mono === 'boolean' ? meta.mono : Boolean(req.mono);   // a set is of one colour, or it is not
+    const drawn = await this.redraw(bytes, kind, { mono, shrink: kind === 'png', side: 640 });
+    if (drawn) { bytes = drawn; kind = 'png'; }
+    checked = checkDropcapFile(`${letter}.${kind}`, bytes);
+    if (!checked.ok) throw new Error(checked.problem);
+    await this.makeFolder(dir);
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+    for (const f of (await adapter.list(dir)).files) {
+      const base = f.slice(f.lastIndexOf('/') + 1), what = dropcapFile(base);
+      if (!what || what.font || what.letter !== letter || what.theme !== 'light') continue;
+      await this.makeFolder(`${dir}/earlier`);
+      await adapter.rename(f, `${dir}/earlier/${stamp} ${base}`);
+    }
+    const file = `${dir}/${letter}.${kind}`;
+    await adapter.writeBinary(file, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    if (typeof meta.mono !== 'boolean') {
+      meta.mono = mono;
+      await adapter.write(`${dir}/set.json`, JSON.stringify(meta, null, 2) + '\n');
+    }
+    await this.loadDropcapSets();
+    if (view) this.previewDropcap(view, `set:${name}`);
+    return { set: name, file, mono: meta.mono };
   }
 
   /* Saves a note's drop cap in its properties (null removes the property: the vault's drop cap). */
@@ -1604,7 +2341,7 @@ class Scriptorium extends Plugin {
     try {
       await this.app.fileManager.processFrontMatter(file, fm => {
         for (const k of DROPCAP_KEYS) if (k !== 'dropcap') delete fm[k];
-        if (which) fm.dropcap = which; else delete fm.dropcap;
+        if (which) fm.dropcap = which.replace(/^set:/, ''); else delete fm.dropcap;
       });
     } catch (e) {
       new Notice(`Could not save the drop cap in this note’s properties: ${e.message}`);
@@ -1650,6 +2387,7 @@ class Scriptorium extends Plugin {
       if (body.classList.contains(cls) !== on) { body.classList.toggle(cls, on); changed = true; }
     }
     if (changed && this.kept) this.recheck();   // a different initial changes the opening line
+    if (this.dropcapSets && this.lastInitials !== s.initials) { this.lastInitials = s.initials; this.remarkAll(); }
     body.classList.toggle('scriptorium-image-focus', s.imageFocus);
     if (!s.imageFocus && this.imageFocus) this.imageFocus.close();
     if (this.marginalia) this.marginalia.refreshSoon();
@@ -1671,5 +2409,7 @@ Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
-  noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint
+  noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
+  openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
+  seedOf, fontFaces, setLabel, monoMask, downloadPlan, fetchDropcapSet, describeDownload, sizeText
 });

@@ -1203,3 +1203,145 @@ test('Rewind: the note is put back with one small change', () => {
   const pair = L.spliceChange('emoji 😀 here', 'emoji 😁 here');
   assert.ok(!/[\uD800-\uDBFF]$/.test('emoji 😀 here'.slice(0, pair.from)), 'no surrogate pair is cut in two');
 });
+
+// ---------------------------------------------------------------- drawing a drop cap
+const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+test('Draw a drop cap: which way each provider draws, and what it is asked for', () => {
+  const s = over => Object.assign({}, L.DEFAULT_SETTINGS, over);
+  assert.equal(L.DEFAULT_SETTINGS.openaiImageModel, 'gpt-image-2.5-sunburst');
+  assert.equal(L.dropcapRoute(s({ provider: 'openai-api' })), 'image-api');
+  assert.equal(L.dropcapRoute(s({ provider: 'codex' })), 'codex-image');
+  for (const p of ['claude-code', 'anthropic', 'openai', 'demo']) assert.equal(L.dropcapRoute(s({ provider: p })), 'svg', p);
+  assert.match(L.dropcapRouteNote(s({ provider: 'openai-api' })), /gpt-image-2\.5-sunburst.*charges for each image.*Experimental: this route has not been tried against the live API/);
+  assert.match(L.dropcapRouteNote(s({ provider: 'codex' })), /Codex’s image tool, on your subscription/);
+  assert.match(L.dropcapRouteNote(s({ provider: 'claude-code' })), /no image model.*line drawing \(SVG\).*Canva/);
+  assert.match(L.dropcapRouteNote(s({ provider: 'demo' })), /one drawing of its own/);
+  for (const [text, want] of [['t', 'T'], [' “Quietly', 'Q'], ['Élan', 'E'], ['7', ''], ['', ''], ['数', '']]) assert.equal(L.dropcapLetter(text), want, text);
+
+  const fresh = L.dropcapImagePrompt({ letter: 'T', style: 'a woodcut initial with oak leaves', mono: true });
+  assert.match(fresh, /capital letter T/);
+  assert.match(fresh, /Style: a woodcut initial with oak leaves\./);
+  assert.match(fresh, /Pure black ink only, on a plain white ground/);
+  assert.match(fresh, /no other letters, words/);
+  assert.match(L.dropcapImagePrompt({ letter: 'T', style: '', mono: false }), /Style: a woodcut initial with vine leaves\. On a plain, even ground/);
+  const changed = L.dropcapImagePrompt({ letter: 'T', mono: true, change: 'add a small owl' });
+  assert.match(changed, /^This image is an ornamental drop cap: the capital letter T/);
+  assert.match(changed, /Change it as follows, keeping the letter and the manner of the drawing otherwise: add a small owl\./);
+
+  assert.match(L.DROPCAP_SVG_SYSTEM, /no <text>, no fonts/);
+  assert.match(L.DROPCAP_SVG_SYSTEM, /no scripts, links, images, external references/);
+  assert.match(L.dropcapSvgMessage({ letter: 'G', style: '', mono: true }), /capital letter G as a drop cap.*pure black only/);
+  assert.match(L.dropcapSvgMessage({ letter: 'G', mono: false, change: 'thicker frame', base: '<svg><path d="M0 0"/></svg>' }), /<svg><path d="M0 0"\/><\/svg>\n\nChange it as follows.*thicker frame\. Use a few flat colours/);
+
+  assert.equal(L.extractSvg('Here you are:\n```svg\n<svg viewBox="0 0 4 4"><path d="M0 0h4"/></svg>\n```\nEnjoy.'), '<svg viewBox="0 0 4 4"><path d="M0 0h4"/></svg>');
+  assert.equal(L.extractSvg('<SVG><g><svg/></g></SVG> trailing'), '<SVG><g><svg/></g></SVG>');
+  assert.equal(L.extractSvg('I cannot draw.'), '');
+  assert.equal(L.extractSvg('<svg> never closed'), '');
+  const demo = L.demoDropcapSvg('w');
+  assert.match(demo, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 400 400">.*>W<\/text><\/svg>$/);
+  assert.doesNotMatch(demo, /script|href|url\(/i);
+
+  assert.deepEqual(Array.from(L.bytesFromBase64(L.base64FromBytes(PNG))), Array.from(PNG));
+  assert.equal(L.base64FromBytes(Uint8Array.from([104, 105])), 'aGk=');
+  const big = new Uint8Array(70000).map((_, i) => i % 251);
+  assert.deepEqual(L.bytesFromBase64(L.base64FromBytes(big)), big);
+  assert.equal(L.isPng(PNG), true);
+  assert.equal(L.isPng(new TextEncoder().encode('<html>not an image</html>')), false);
+  assert.equal(L.isPng(null), false);
+});
+
+test('Draw a drop cap, OpenAI API: the Images API is asked for one PNG, and an existing image goes to edits (a stand-in for the API; not tried live)', async () => {
+  const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai-api', openaiPlatformKey: 'sk-test', openaiPlatformModel: 'gpt-x' });
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    return jsonResponse(200, { created: 1, data: [{ b64_json: L.base64FromBytes(PNG) }] });
+  };
+  const made = await L.drawDropcap(s, { letter: 'T', style: 'oak leaves', mono: true }, { fetch });
+  assert.deepEqual([made.kind, made.model, Array.from(made.bytes)], ['png', 'gpt-image-2.5-sunburst', Array.from(PNG)]);
+  assert.equal(calls[0].url, 'https://api.openai.com/v1/images/generations');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers.authorization, 'Bearer sk-test');
+  assert.equal(calls[0].init.headers['content-type'], 'application/json');
+  assert.deepEqual(Object.keys(calls[0].body).sort(), ['background', 'model', 'n', 'output_format', 'prompt', 'size']);
+  assert.deepEqual([calls[0].body.model, calls[0].body.n, calls[0].body.size, calls[0].body.output_format, calls[0].body.background],
+    ['gpt-image-2.5-sunburst', 1, '1024x1024', 'png', 'opaque']);
+  assert.match(calls[0].body.prompt, /capital letter T.*oak leaves/);
+  // in colour: a clear ground is asked for; another image model, from the settings
+  await L.drawDropcap(Object.assign({}, s, { openaiImageModel: 'gpt-image-2' }), { letter: 'T', style: '', mono: false }, { fetch });
+  assert.deepEqual([calls[1].body.model, calls[1].body.background], ['gpt-image-2', 'transparent']);
+  // changing the present image
+  await L.drawDropcap(s, { letter: 'T', mono: true, change: 'add a small owl', base: { bytes: PNG, kind: 'png' } }, { fetch });
+  assert.equal(calls[2].url, 'https://api.openai.com/v1/images/edits');
+  assert.deepEqual(calls[2].body.images, [{ image_url: `data:image/png;base64,${L.base64FromBytes(PNG)}` }]);
+  assert.match(calls[2].body.prompt, /add a small owl/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T', mono: true, change: 'x', base: { bytes: new TextEncoder().encode('<svg/>'), kind: 'svg' } }, { fetch }), /line drawing \(SVG\), which an image model cannot be handed/);
+  assert.equal(calls.length, 3, 'nothing is sent for that');
+
+  // what can go wrong
+  await assert.rejects(L.drawDropcap(Object.assign({}, s, { openaiPlatformKey: '' }), { letter: 'T' }, { fetch }), /Add your OpenAI API key/);
+  await assert.rejects(L.drawDropcap(s, { letter: '7' }, { fetch }), /one letter, A to Z/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T' }, { fetch: async () => jsonResponse(200, { data: [] }) }), /answered without an image/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T' }, { fetch: async () => jsonResponse(200, { data: [{ b64_json: 'aGVsbG8gd29ybGQh' }] }) }), /not a PNG image/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T' }, { fetch: async () => jsonResponse(401, { error: { message: 'Incorrect API key provided', type: 'invalid_request_error' } }) }),
+    e => e instanceof L.LagrangeError && e.status === 401);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T' }, { fetch: async () => { throw new TypeError('Failed to fetch'); } }), e => e instanceof L.LagrangeError && e.kind === 'network');
+  let tries = 0;
+  const after = await L.drawDropcap(s, { letter: 'T' }, { retryDelays: [1, 1], fetch: async () => (++tries < 2 ? jsonResponse(503, {}) : jsonResponse(200, { data: [{ b64_json: L.base64FromBytes(PNG) }] })) });
+  assert.deepEqual([tries, after.kind], [2, 'png']);
+});
+
+test('Draw a drop cap, ChatGPT subscription: Codex paints in an empty folder it may write to, and the image is read from there', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const exe = fakeCli(dir, 'codex', `
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  const fs = require('fs'), path = require('path'), a = process.argv.slice(2);
+  const cwd = a[a.indexOf('-C') + 1];
+  const ok = a[0] === 'exec' && a.includes('--json') && a.includes('--ephemeral') && a.includes('--skip-git-repo-check') && a[a.indexOf('-s') + 1] === 'workspace-write'
+    && a[a.length - 1] === '-' && fs.readdirSync(cwd).filter(f => f !== 'present.png').length === 0 && /lagrange-dropcap-/.test(cwd);
+  fs.writeFileSync(${JSON.stringify(path.join('DIR', 'seen.json')).replace('DIR', "' + __dirname + '").replace(/^"/, "'").replace(/"$/, "'")}, JSON.stringify({ ok, cwd, input, image: a.includes('-i') ? Array.from(fs.readFileSync(a[a.indexOf('-i') + 1])) : null }));
+  if (!input.includes('NOPE')) fs.writeFileSync(path.join(cwd, 'dropcap.png'), Buffer.from(input.includes('JUNK') ? 'not an image' : ${JSON.stringify(Array.from(PNG))}));
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: input.includes('NOPE') ? 'NO-IMAGE-TOOL' : 'Saved dropcap.png' } }));
+  console.log(JSON.stringify({ type: 'turn.completed' }));
+});`);
+  const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'codex', codexPath: exe });
+  const seen = () => JSON.parse(fs.readFileSync(path.join(dir, 'seen.json'), 'utf8'));
+  const made = await L.drawDropcap(s, { letter: 'T', style: 'oak leaves', mono: true }, {});
+  assert.deepEqual([made.kind, Array.from(made.bytes)], ['png', Array.from(PNG)]);
+  assert.equal(seen().ok, true, 'the flags, and an empty folder of its own');
+  assert.match(seen().input, /built-in image generation tool \(do not write code, a script or an SVG\)[\s\S]*capital letter T[\s\S]*oak leaves[\s\S]*Save it in the current directory as dropcap\.png/);
+  assert.equal(seen().image, null);
+  assert.equal(fs.existsSync(seen().cwd), false, 'the folder is removed afterwards');
+  // changing the present image: it is attached
+  await L.drawDropcap(s, { letter: 'T', mono: true, change: 'add a small owl', base: { bytes: PNG, kind: 'png' } }, {});
+  assert.deepEqual(seen().image, Array.from(PNG));
+  assert.match(seen().input, /a changed version of the attached image[\s\S]*add a small owl/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T', mono: true, style: 'NOPE' }, {}), /This Codex has no image tool/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'T', mono: true, style: 'JUNK' }, {}), /not a PNG image/);
+  await assert.rejects(L.drawDropcap(Object.assign({}, s, { codexPath: path.join(dir, 'absent') }), { letter: 'T' }, {}), /Codex wasn’t found/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('Draw a drop cap, the other providers: the model writes an SVG; the Demo has its own', async () => {
+  const demo = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'demo' });
+  const d = await L.drawDropcap(demo, { letter: 'Q', style: 'anything', mono: true }, {});
+  assert.equal(d.kind, 'svg');
+  assert.equal(new TextDecoder().decode(d.bytes), L.demoDropcapSvg('Q'));
+  // an OpenAI-compatible server stands in for any language model
+  const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai', openaiBaseUrl: 'http://localhost:1/v1', openaiModel: 'm' });
+  const bodies = [];
+  const reply = text => async (url, init) => { bodies.push(JSON.parse(init.body)); return jsonResponse(200, { choices: [{ message: { content: text }, finish_reason: 'stop' }] }); };
+  const drawn = await L.drawDropcap(s, { letter: 'G', style: 'ivy', mono: true }, { fetch: reply('Here:\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><path d="M0 0h9"/></svg>\nDone.') });
+  assert.equal(new TextDecoder().decode(drawn.bytes), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><path d="M0 0h9"/></svg>');
+  assert.equal(bodies[0].messages[0].content, L.DROPCAP_SVG_SYSTEM);
+  assert.match(bodies[0].messages[1].content, /capital letter G as a drop cap\. Style: ivy\./);
+  // changing one: the present SVG goes back as text; a picture cannot
+  const base = { bytes: new TextEncoder().encode('<svg><circle r="3"/></svg>'), kind: 'svg' };
+  await L.drawDropcap(s, { letter: 'G', mono: true, change: 'a thicker frame', base }, { fetch: reply('<svg><circle r="4"/></svg>') });
+  assert.match(bodies[1].messages[1].content, /<svg><circle r="3"\/><\/svg>[\s\S]*a thicker frame/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'G', mono: true, change: 'x', base: { bytes: PNG, kind: 'png' } }, { fetch: reply('') }), /can only change a line drawing/);
+  await assert.rejects(L.drawDropcap(s, { letter: 'G', mono: true }, { fetch: reply('I would rather not draw.') }),
+    e => e instanceof L.LagrangeError && /no SVG drawing/.test(e.message) && e.reply === 'I would rather not draw.');
+});
+

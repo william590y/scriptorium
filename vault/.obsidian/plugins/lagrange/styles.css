@@ -525,6 +525,12 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
 }
 .lagrange-modal textarea.lagrange-modal-input:is(:focus, :focus-visible) { border-bottom-color: var(--lagrange-rubric); box-shadow: none; }
 .lagrange-modal textarea.lagrange-modal-input::placeholder { font-style: italic; color: var(--lagrange-faint); }
+.lagrange-modal-note { margin: 0 0 0.8em; font-size: 0.92em; color: var(--lagrange-faint, var(--text-muted)); }
+.lagrange-modal-problem { min-height: 1.3em; margin: 0.4em 0 0; color: var(--text-error); }
+.lagrange-dropcap-row { display: flex; gap: 8px; margin: 0 0 0.6em; }
+.lagrange-dropcap-row input.lagrange-dropcap-letter { flex: 0 0 3.2em; text-align: center; font-size: 1.3em; text-transform: uppercase; }
+.lagrange-dropcap-row input.lagrange-dropcap-set { flex: 1 1 auto; min-width: 0; }
+.lagrange-dropcap-check { display: block; margin: 0.5em 0 0; font-size: 0.92em; }
 .lagrange-modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 0.8em; }
 .lagrange-modal-buttons button { font-family: var(--lagrange-serif); font-variant: small-caps; letter-spacing: 0.05em; font-size: 1.05em; }
 .lagrange-modal-buttons button.mod-cta { background: var(--lagrange-rubric); color: var(--lagrange-paper); }

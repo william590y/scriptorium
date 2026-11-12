@@ -78,6 +78,7 @@ const DEFAULT_SETTINGS = {
   openaiModel: '',
   openaiPlatformKey: '',               // OpenAI API (platform.openai.com)
   openaiPlatformModel: '',
+  openaiImageModel: 'gpt-image-2.5-sunburst',   // the Images API model that draws drop caps (OpenAI API provider)
   claudeCodePath: '',                  // Claude subscription via Claude Code; empty = look in the usual places
   claudeCodeModel: 'sonnet',
   codexPath: '',                       // ChatGPT subscription via Codex; empty = look in the usual places
@@ -1057,6 +1058,105 @@ function demoChatReply(question, note, agentic) {
  * Throws LagrangeError with a sentence for the writer, or an AbortError when stopped.
  * ------------------------------------------------------------------------------------------------------------- */
 
+/* ---- Drawing a drop cap ----
+   "Lagrange: Draw a drop cap" has the provider draw an ornamental initial, which the Scriptorium plugin keeps as a
+   set of drop caps in the vault and inks into the note. How it is drawn depends on the provider (dropcapRoute):
+     - 'image-api': OpenAI's Images API (the OpenAI API provider), a PNG.
+     - 'codex-image': Codex's own image tool (the ChatGPT subscription provider), a PNG.
+     - 'svg': every other provider has no image model to call, so the language model writes the initial as an SVG
+       drawing; the Demo has one of its own.
+   An existing initial can be changed: an image goes back to the image model with the instruction (the Images API's
+   edits, or attached to Codex); an SVG goes back to the language model as text. */
+
+function dropcapRoute(s) {
+  if (s.provider === 'openai-api') return 'image-api';
+  if (s.provider === 'codex') return 'codex-image';
+  return 'svg';
+}
+
+/* How the chosen provider would draw, in a sentence for the dialogue. */
+function dropcapRouteNote(s) {
+  const route = dropcapRoute(s);
+  if (route === 'image-api') {
+    return `OpenAI’s image model (${String(s.openaiImageModel || '').trim() || DEFAULT_SETTINGS.openaiImageModel}) will paint it, through your API key; OpenAI charges for each image. Experimental: this route has not been tried against the live API.`;
+  }
+  if (route === 'codex-image') return 'ChatGPT will paint it with Codex’s image tool, on your subscription. It takes a minute or so.';
+  if (s.provider === 'demo') return 'The Demo has one drawing of its own, the same for every description. Choose a provider in Settings → Lagrange for a real one.';
+  return `${modelLabel(s)} has no image model that Lagrange can call, so it will write the initial as a line drawing (SVG). For a painted one, choose “ChatGPT: my subscription” or “OpenAI API” in Settings → Lagrange. (Image connectors such as Canva’s are not used: through Claude Code, Canva’s hands back only a thumbnail.)`;
+}
+
+function dropcapLetter(text) {
+  const m = String(text || '').match(/\p{L}/u);
+  const c = m ? m[0].normalize('NFD')[0].toUpperCase() : '';
+  return /^[A-Z]$/.test(c) ? c : '';
+}
+
+/* The request to an image model. req: {letter, style, mono, change}; change is the instruction when an existing
+   image is being changed. */
+function dropcapImagePrompt(req) {
+  const style = String(req.style || '').trim() || 'a woodcut initial with vine leaves';
+  const ink = req.mono
+    ? 'Pure black ink only, on a plain white ground: no grey wash, no colour, no paper texture.'
+    : 'On a plain, even ground with nothing else on it.';
+  const rules = `One letter only, large, upright and plainly legible as a capital ${req.letter}; square; the design fills the square to its edges; no other letters, words, signature or border of text.`;
+  if (req.change) {
+    return `This image is an ornamental drop cap: the capital letter ${req.letter}, the initial that opens a chapter in a printed book. ` +
+      `Change it as follows, keeping the letter and the manner of the drawing otherwise: ${String(req.change).trim()}. ${ink} ${rules}`;
+  }
+  return `An ornamental drop cap: the capital letter ${req.letter}, the initial that opens a chapter in a finely printed book. Style: ${style}. ${ink} ${rules}`;
+}
+
+const DROPCAP_SVG_SYSTEM =
+  'You draw ornamental initials (drop caps) for a book page as SVG. Answer with one complete SVG document and nothing ' +
+  'else: no prose, no code fence. Rules: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">; the letter ' +
+  'drawn with paths (no <text>, no fonts), large, bold and plainly legible; ornament around and behind it; a clear ' +
+  'ground (no background rectangle); no scripts, links, images, external references or animation; under 16 kB.';
+
+function dropcapSvgMessage(req) {
+  const style = String(req.style || '').trim() || 'a woodcut initial with vine leaves and a ruled square frame';
+  const ink = req.mono ? 'Use pure black only (fill="#000" or stroke="#000"): it will be printed in the page’s own ink colour.' : 'Use a few flat colours that suit a book page.';
+  if (req.change && req.base) {
+    return `Here is a drop cap, the capital letter ${req.letter}, as SVG:\n\n${req.base}\n\nChange it as follows, keeping the letter and the manner of the drawing otherwise: ${String(req.change).trim()}. ${ink} Answer with the whole changed SVG.`;
+  }
+  return `Draw the capital letter ${req.letter} as a drop cap. Style: ${style}. ${ink}`;
+}
+
+/* The SVG document in a reply ('' if it has none). */
+function extractSvg(text) {
+  const t = String(text || '');
+  const a = t.search(/<svg[\s>]/i), b = t.toLowerCase().lastIndexOf('</svg>');
+  return a >= 0 && b > a ? t.slice(a, b + 6) : '';
+}
+
+/* The Demo's drop cap: a ruled frame with corner leaves, and the letter in the reader's serif. */
+function demoDropcapSvg(letter) {
+  const leaf = (x, y, r) => `<path transform="translate(${x} ${y}) rotate(${r})" d="M0 0C14-22 44-26 62-8C44 6 16 10 0 0ZM6-2C24-10 40-10 54-7" fill="none" stroke="#000" stroke-width="3.5" stroke-linecap="round"/>`;
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">' +
+    '<rect x="14" y="14" width="372" height="372" fill="none" stroke="#000" stroke-width="8"/>' +
+    '<rect x="30" y="30" width="340" height="340" fill="none" stroke="#000" stroke-width="2.5"/>' +
+    leaf(52, 78, -20) + leaf(348, 78, 200) + leaf(52, 322, 20) + leaf(348, 322, 160) +
+    '<path d="M70 200C110 150 150 250 200 200S290 150 330 200" fill="none" stroke="#000" stroke-width="3" stroke-dasharray="2 9" stroke-linecap="round"/>' +
+    `<text x="200" y="296" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="300" font-weight="700" fill="#000">${dropcapLetter(letter) || 'A'}</text>` +
+    '</svg>';
+}
+
+function bytesFromBase64(b64) {
+  const bin = atob(String(b64 || '').replace(/\s+/g, ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function base64FromBytes(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+function isPng(bytes) {
+  return Boolean(bytes && bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47);
+}
+
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
 
 /* The effort for this request, unless this session has already seen `key` (a provider and model) refuse one. */
@@ -1575,6 +1675,100 @@ function complete(settings, req, hooks, session) {
   if (settings.provider === 'claude-code') return streamClaudeCode(settings, req, hooks, session);
   if (settings.provider === 'codex') return streamCodex(settings, req, hooks, session);
   return streamAnthropic(settings, req, hooks, session);
+}
+
+/* ---- Drawing a drop cap (see "Drawing a drop cap" among the pure helpers) ----
+   Each returns {bytes: Uint8Array, kind: 'png' | 'svg', model}. req: {letter, style, mono, change, base: {bytes,
+   kind} | null}. */
+
+const OPENAI_IMAGES_URL = 'https://api.openai.com/v1/images';
+
+/* OpenAI's Images API: POST /v1/images/generations, or /v1/images/edits with the present image as a data URL. GPT
+   Image models answer with the image in base64. */
+async function drawOpenAIImage(s, req, hooks) {
+  const key = String(s.openaiPlatformKey || '').trim();
+  if (!key) throw new LagrangeError('Add your OpenAI API key in Settings → Lagrange, or choose “ChatGPT: my subscription” to draw with a ChatGPT plan.', { kind: 'setup' });
+  const model = String(s.openaiImageModel || '').trim() || DEFAULT_SETTINGS.openaiImageModel;
+  const body = { model, prompt: dropcapImagePrompt(req), n: 1, size: '1024x1024', output_format: 'png', background: req.mono ? 'opaque' : 'transparent' };
+  const change = Boolean(req.change && req.base && req.base.kind === 'png');
+  if (req.change && !change) throw new LagrangeError('The present drop cap is a line drawing (SVG), which an image model cannot be handed. Draw a new one instead.', { kind: 'setup' });
+  if (change) body.images = [{ image_url: `data:image/png;base64,${base64FromBytes(req.base.bytes)}` }];
+  const url = `${OPENAI_IMAGES_URL}/${change ? 'edits' : 'generations'}`;
+  const res = await fetchWithRetry('openai-api', url, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` }, body: JSON.stringify(body), signal: hooks.signal,
+  }, hooks);
+  const text = await safeText(res);
+  if (!res.ok) throw httpError('openai-api', res, text, model);
+  let b64 = '';
+  try { const data = JSON.parse(text).data; b64 = (data && data[0] && data[0].b64_json) || ''; } catch (e) { /* not JSON */ }
+  if (!b64) throw new LagrangeError('OpenAI answered without an image. Try again, or try another image model in Settings → Lagrange.', { kind: 'stream' });
+  let bytes;
+  try { bytes = bytesFromBase64(b64); } catch (e) { bytes = null; }
+  if (!isPng(bytes)) throw new LagrangeError('OpenAI answered with something that is not a PNG image.', { kind: 'stream' });
+  return { bytes, kind: 'png', model };
+}
+
+/* Codex's image tool, on a ChatGPT subscription: Codex runs once in an empty temporary folder that it may write to
+   (and nowhere else), paints the image, and leaves it there as dropcap.png. */
+async function drawCodexImage(s, req, hooks) {
+  const exe = findCli('codex', s.codexPath);
+  if (!exe) throw new LagrangeError(`Codex wasn’t found${s.codexPath ? ` at ${s.codexPath}` : ''}. ${CLI.codex.install}`, { kind: 'setup' });
+  const fs = nodeModule('fs'), os = nodeModule('os'), path = nodeModule('path');
+  const change = Boolean(req.change && req.base && req.base.kind === 'png');
+  if (req.change && !change) throw new LagrangeError('The present drop cap is a line drawing (SVG), which an image model cannot be handed. Draw a new one instead.', { kind: 'setup' });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lagrange-dropcap-'));
+  try {
+    const args = ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-s', 'workspace-write', '-C', dir];
+    const model = String(s.codexModel || '').trim();
+    if (model) args.push('-m', model);
+    if (change) { fs.writeFileSync(path.join(dir, 'present.png'), Buffer.from(req.base.bytes)); args.push('-i', path.join(dir, 'present.png')); }
+    const input = 'Use your built-in image generation tool (do not write code, a script or an SVG) to make one image' +
+      (change ? ', a changed version of the attached image' : '') + ':\n\n' + dropcapImagePrompt(req) +
+      '\n\nSave it in the current directory as dropcap.png and do nothing else. If you have no image generation tool, reply exactly NO-IMAGE-TOOL.';
+    const st = { text: '', error: null, done: false };
+    const { code, stderr } = await runCli('codex', exe, args.concat('-c', 'model_reasoning_effort=low', '-'), input, line => { applyCodexLine(st, line); }, hooks);
+    const out = path.join(dir, 'dropcap.png');
+    if (!fs.existsSync(out)) {
+      if (/NO-IMAGE-TOOL/.test(st.text)) throw new LagrangeError('This Codex has no image tool. Update Codex (npm install -g @openai/codex), or choose “OpenAI API” in Settings → Lagrange.', { kind: 'setup' });
+      throw new LagrangeError(st.error || (!st.text && (stderr || code)) ? cliErrorMessage('codex', st.error || stderr || `exit code ${code}`)
+        : `Codex finished without leaving an image. It said: ${excerpt(st.text, 300)}`, { kind: 'stream' });
+    }
+    const bytes = new Uint8Array(fs.readFileSync(out));
+    if (!isPng(bytes)) throw new LagrangeError('Codex left a file that is not a PNG image.', { kind: 'stream' });
+    return { bytes, kind: 'png', model: model || 'Codex' };
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* left in the temporary folder */ }
+  }
+}
+
+/* The language model writes the initial as an SVG drawing. */
+async function drawSvg(settings, req, hooks, session) {
+  let base = '';
+  if (req.change) {
+    if (!req.base || req.base.kind !== 'svg') throw new LagrangeError('The present drop cap is a picture, and this provider can only change a line drawing (SVG). Draw a new one, or choose “ChatGPT: my subscription” in Settings → Lagrange.', { kind: 'setup' });
+    base = new TextDecoder().decode(req.base.bytes);
+  }
+  const res = await complete(settings, {
+    purpose: 'dropcap',
+    system: DROPCAP_SVG_SYSTEM,
+    messages: [{ role: 'user', content: dropcapSvgMessage(Object.assign({}, req, { base })) }],
+    demo: () => demoDropcapSvg(req.letter),
+  }, hooks, session);
+  if (res.stopReason === 'refusal') throw new LagrangeError('The model declined to draw this.');
+  const svg = extractSvg(res.text);
+  if (!svg) {
+    throw new LagrangeError(`The reply had no SVG drawing in it${res.stopReason === 'max_tokens' ? ' (it reached its length limit)' : ''}. Try again, or choose another model.`, { reply: res.text });
+  }
+  return { bytes: new TextEncoder().encode(svg), kind: 'svg', model: res.model };
+}
+
+function drawDropcap(settings, req, hooks, session) {
+  hooks = hooks || {};
+  if (!dropcapLetter(req.letter)) return Promise.reject(new LagrangeError('A drop cap is one letter, A to Z.', { kind: 'setup' }));
+  const route = dropcapRoute(settings);
+  if (route === 'image-api') return drawOpenAIImage(settings, req, hooks);
+  if (route === 'codex-image') return drawCodexImage(settings, req, hooks);
+  return drawSvg(settings, req, hooks, session);
 }
 
 
@@ -3299,6 +3493,72 @@ class ReviseModal extends Modal {
   }
 }
 
+/* "Lagrange: Draw a drop cap": the letter, what it should look like, and the set it goes into. */
+class DropcapDrawModal extends Modal {
+  constructor(plugin, view, known) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.view = view;
+    this.known = known;     // {letter, sets: [{name, letters: {T: 'png' | 'svg'}}]}: the writer's sets Lagrange could add to
+  }
+
+  onOpen() {
+    this.modalEl.addClass('lagrange-modal');
+    this.titleEl.setText('Draw a drop cap');
+    const { contentEl } = this;
+    const s = this.plugin.settings;
+    contentEl.createEl('p', { cls: 'lagrange-modal-note', text: dropcapRouteNote(s) });
+    const row = contentEl.createDiv({ cls: 'lagrange-dropcap-row' });
+    const letter = row.createEl('input', { type: 'text', cls: 'lagrange-dropcap-letter', attr: { maxlength: '1', 'aria-label': 'Letter', placeholder: 'A' } });
+    letter.value = this.known.letter || '';
+    const set = row.createEl('input', { type: 'text', cls: 'lagrange-dropcap-set', attr: { 'aria-label': 'Set of drop caps', placeholder: 'Set', list: 'lagrange-dropcap-sets' } });
+    set.value = (this.known.sets[0] && this.known.sets[0].name) || 'Lagrange';
+    const names = contentEl.createEl('datalist', { attr: { id: 'lagrange-dropcap-sets' } });
+    for (const k of this.known.sets) names.createEl('option', { attr: { value: k.name } });
+    const input = contentEl.createEl('textarea', {
+      cls: 'lagrange-modal-input',
+      attr: { rows: '2', placeholder: 'What should it look like? For example: a woodcut initial with vine leaves; an Art Nouveau letter with irises', 'aria-label': 'Description' },
+    });
+    const monoRow = contentEl.createEl('label', { cls: 'lagrange-dropcap-check' });
+    const mono = monoRow.createEl('input', { type: 'checkbox' });
+    mono.checked = true;
+    monoRow.appendText(' One colour: ink only, printed in the page’s accent colour in the light and the dark theme');
+    const changeRow = contentEl.createEl('label', { cls: 'lagrange-dropcap-check' });
+    const change = changeRow.createEl('input', { type: 'checkbox' });
+    changeRow.appendText(' Change the one this set has for this letter (the description says how), rather than draw afresh');
+    const present = () => {
+      const k = this.known.sets.find(x => x.name.toLowerCase() === set.value.trim().toLowerCase());
+      return k ? k.letters[dropcapLetter(letter.value)] : null;
+    };
+    const refresh = () => { const has = Boolean(present()); changeRow.style.display = has ? '' : 'none'; if (!has) change.checked = false; };
+    letter.addEventListener('input', refresh);
+    set.addEventListener('input', refresh);
+    refresh();
+    const said = contentEl.createEl('p', { cls: 'lagrange-modal-problem' });
+    const buttons = contentEl.createDiv({ cls: 'lagrange-modal-buttons' });
+    const cancel = buttons.createEl('button', { text: 'Cancel' });
+    const go = buttons.createEl('button', { cls: 'mod-cta', text: 'Draw' });
+    const submit = () => {
+      const l = dropcapLetter(letter.value);
+      if (!l) { said.setText('Give one letter, A to Z.'); letter.focus(); return; }
+      if (!set.value.trim()) { said.setText('Name the set it goes into.'); set.focus(); return; }
+      if (change.checked && !input.value.trim()) { said.setText('Say how it should change.'); input.focus(); return; }
+      this.close();
+      void this.plugin.drawDropcap(this.view, { letter: l, set: set.value.trim(), style: change.checked ? '' : input.value.trim(), mono: mono.checked, change: change.checked ? input.value.trim() : '' });
+    };
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); submit(); }
+    });
+    go.addEventListener('click', submit);
+    cancel.addEventListener('click', () => this.close());
+    window.setTimeout(() => (letter.value ? input : letter).focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 class LagrangeSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -3423,6 +3683,11 @@ class LagrangeSettingTab extends PluginSettingTab {
         .setDesc('The model ID, as listed at platform.openai.com/docs/models.')
         .addText(t => t.setPlaceholder('model ID').setValue(s.openaiPlatformModel)
           .onChange(async v => { s.openaiPlatformModel = v.trim(); await save(); }));
+      new Setting(containerEl)
+        .setName('Image model')
+        .setDesc('The model that paints for “Draw a drop cap”, through the Images API (OpenAI charges for each image). Experimental: not yet tried against the live API.')
+        .addText(t => t.setPlaceholder(DEFAULT_SETTINGS.openaiImageModel).setValue(s.openaiImageModel)
+          .onChange(async v => { s.openaiImageModel = v.trim() || DEFAULT_SETTINGS.openaiImageModel; await save(); }));
     } else if (s.provider === 'openai') {
       new Setting(containerEl).setName('OpenAI-compatible server').setHeading();
       new Setting(containerEl)
@@ -3533,6 +3798,16 @@ class LagrangePlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view || !view.file) return false;
         if (!checking) this.proofread(view);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'draw-dropcap',
+      name: 'Draw a drop cap (or change one)',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) void this.askDropcap(view);
         return true;
       },
     });
@@ -3947,6 +4222,78 @@ class LagrangePlugin extends Plugin {
     }
   }
 
+  /* The Scriptorium plugin, which keeps the sets of drop caps and draws them; null if it is off. */
+  scriptorium() {
+    const p = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins.scriptorium;
+    return p && typeof p.addDrawnDropcap === 'function' ? p : null;
+  }
+
+  /* "Draw a drop cap": asks what to draw (DropcapDrawModal). */
+  async askDropcap(view) {
+    const scriptorium = this.scriptorium();
+    if (!scriptorium) { new Notice('Drawing a drop cap needs the Scriptorium plugin (Settings → Community plugins), which keeps the drop caps.', 8000); return; }
+    const adapter = this.app.vault.adapter, folder = 'Scriptorium/Drop caps';
+    const known = { letter: '', sets: [] };
+    // the letter the note's first chapter opens with
+    const text = view.editor ? view.editor.getValue() : '';
+    const body = text.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const first = body.split(/\n\s*\n/).map(p => p.trim()).find(p => p && !/^(#|>|!\[|```|\||[-*+] |\d+\. |---)/.test(p));
+    known.letter = dropcapLetter(first || '');
+    try {
+      for (const dir of (await adapter.list(folder)).folders.sort()) {
+        const letters = {};
+        for (const f of (await adapter.list(dir)).files) {
+          const m = f.slice(f.lastIndexOf('/') + 1).match(/^([A-Z])\.(png|svg)$/);
+          if (m) letters[m[1]] = m[2];
+        }
+        known.sets.push({ name: dir.slice(dir.lastIndexOf('/') + 1), letters });
+      }
+    } catch (e) { /* no sets yet */ }
+    known.sets.sort((a, b) => (b.name === 'Lagrange') - (a.name === 'Lagrange'));
+    new DropcapDrawModal(this, view, known).open();
+  }
+
+  /* Has the provider draw (or change) the drop cap, hands it to Scriptorium, and sets it as the note's drop cap:
+     Scriptorium inks it in. want: {letter, set, style, mono, change}. */
+  async drawDropcap(view, want) {
+    const scriptorium = this.scriptorium();
+    if (!scriptorium || !view || !view.file) return;
+    if (this.drawing) { new Notice('Lagrange is already drawing.'); return; }
+    this.drawing = true;
+    const chat = await this.activateView(false);
+    const controller = new AbortController();
+    const task = chat ? chat.beginTask(want.change ? 'Change a drop cap' : 'Draw a drop cap', `${want.letter}, in “${want.set}”`, controller) : null;
+    try {
+      const adapter = this.app.vault.adapter;
+      let base = null;
+      if (want.change) {
+        for (const kind of ['png', 'svg']) {
+          const path = `Scriptorium/Drop caps/${want.set}/${want.letter}.${kind}`;
+          if (await adapter.exists(path)) { base = { bytes: new Uint8Array(await adapter.readBinary(path)), kind }; break; }
+        }
+        if (!base) throw new LagrangeError(`The set “${want.set}” has no ${want.letter} to change.`, { kind: 'setup' });
+      }
+      if (task) task.status(dropcapRoute(this.settings) === 'svg' ? 'Drawing…' : 'Painting… (a minute or so)');
+      const drawn = await drawDropcap(this.settings, Object.assign({}, want, { base }), { signal: controller.signal }, this.session);
+      let saved;
+      try { saved = await scriptorium.addDrawnDropcap({ set: want.set, letter: want.letter, bytes: drawn.bytes, kind: drawn.kind, mono: want.mono }); }
+      catch (e) { throw new LagrangeError(`The drawing could not be kept: ${e.message}.`, { reply: drawn.kind === 'svg' ? new TextDecoder().decode(drawn.bytes) : undefined }); }
+      await scriptorium.setNoteDropcap(view.file, `set:${saved.set}`);
+      // show it: Reading view is where drop caps are drawn
+      try {
+        const state = view.leaf.getViewState();
+        if (state.state && state.state.mode !== 'preview') { state.state.mode = 'preview'; await view.leaf.setViewState(state); }
+      } catch (e) { /* stays in the editor */ }
+      window.setTimeout(() => { try { scriptorium.previewDropcap(view, `set:${saved.set}`); } catch (e) { /* the view has gone */ } }, 350);
+      if (task) task.done(`${want.change ? 'Changed' : 'Drawn'}: ${saved.file}. It is this note’s drop cap now (the “dropcap” property), wherever a chapter opens with ${want.letter}.`);
+      else new Notice(`Lagrange drew the drop cap: ${saved.file}`);
+    } catch (err) {
+      this.reportFailure(err, task);
+    } finally {
+      this.drawing = false;
+    }
+  }
+
   reportFailure(err, task) {
     if (isAbort(err)) {
       if (task) task.done('Stopped.');
@@ -3981,4 +4328,6 @@ LagrangePlugin.internals = {
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,
   chatSystemPrompt, proofreadUserMessage, reviseUserMessage, runEdits, LagrangeError,
   transcriptPrompt, applyClaudeCodeLine, applyCodexLine, cliErrorMessage, findCli, runCli, streamClaudeCode, streamCodex, checkCli,
+  dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
+  bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
