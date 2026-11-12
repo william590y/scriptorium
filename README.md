@@ -76,8 +76,20 @@ Lagrange talks with you about the note you have open and edits it when you ask. 
 **Lagrange: Open**) for the chat in the right sidebar and type: a question gets an answer, and a request for a change
 ("fix the grammar", "tighten the second paragraph", "add the equation for kinetic energy") is carried out in the note.
 Each edit is struck through and written in by a pen, in handwriting, with a thin trail of ink behind the nib; an
-equation is typeset and drawn symbol by symbol. The edits are then listed in the chat with their reasons, and one
-**Undo** (or the **Undo Lagrange's edits** button) takes back all the edits of a request. The commands **Lagrange:
+equation is typeset and drawn symbol by symbol, and code (a fenced block, or a code span) is typed on a small
+typewriter that takes the pen's place. The edits are then listed in the chat with their reasons.
+
+**Undo and redo.** One **Undo** in the editor takes back all the edits of a request. The two arrows at the head of the
+chat do the same for Lagrange's edits only: **Undo** takes back its latest run of edits and **Redo** makes it again,
+run by run, and each run in the chat has its own **Undo Lagrange's edits** button. If you have typed in the note
+since, your typing is kept and Lagrange says so.
+
+**Rewind.** Each message you send has a small clock at its right (**Rewind to here**). It takes the conversation back
+to just before that message, for the model as well, puts the note back as it was when you sent it, and puts the
+message back in the box for you to change. If the note has changes of your own since then, Lagrange asks whether to
+put the note back or keep it as it is; Undo in the editor brings the later text back either way. Lagrange keeps the
+note's text for the last 20 messages; for an older message the clock is grey, and rewinding there leaves the note as
+it is. The commands **Lagrange:
 Revise selection** and **Lagrange: Proofread note** do the same for a selected passage or for the whole note. To keep
 the chat to talk only, turn off **Settings → Lagrange → Edit with the pen from the chat**; the ink trail has a switch
 there too, and neither the trail nor the flying pen is shown when your system asks for reduced motion.

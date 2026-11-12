@@ -1058,3 +1058,148 @@ test('trailBands: the newest ink is the darkest and widest, old ink is dropped, 
   assert.equal(Math.min(...xs), 20, 'points older than the trail’s life are gone');
   assert.deepEqual(L.trailBands(pts, 5000, 500, 5), [], 'all of it fades');
 });
+
+
+// ---------------------------------------------------------------- code is typed, not written
+test('code in an edit: fenced blocks and code spans of a few characters are the typewriter’s; the rest is the pen’s', () => {
+  const seg = t => L.mathSegments(t, { code: true }).map(g => (g.type === 'code' ? [g.block ? 'B' : 'S', g.text, g.lang] : g.type === 'math' ? ['M', g.source] : g.text));
+  assert.deepEqual(seg('Call `print(x)` here.'), ['Call ', ['S', 'print(x)', ''], ' here.']);
+  assert.deepEqual(seg('A short `x` and `ab` stay with the pen.'), ['A short `x` and `ab` stay with the pen.']);
+  assert.deepEqual(seg('Intro:\n\n```python\ndef f(x):\n    return x\n```\nAfter.'), ['Intro:\n\n', ['B', 'def f(x):\n    return x', 'python'], '\nAfter.']);
+  assert.deepEqual(seg('```\nplain\n```'), [['B', 'plain', '']]);
+  assert.deepEqual(seg('```js\nlet a = `$x$`;\n```'), [['B', 'let a = `$x$`;', 'js']], 'no math, and no span, inside a block');
+  assert.deepEqual(seg('`$notmath$` and $x^2$'), [['S', '$notmath$', ''], ' and ', ['M', 'x^2']]);
+  assert.deepEqual(seg('``a `tick` inside``'), [['S', 'a `tick` inside', '']]);
+  assert.deepEqual(seg('an `unclosed span'), ['an `unclosed span']);
+  // without the option nothing changes: code is text
+  assert.deepEqual(L.mathSegments('Call `print(x)` here.'), [{ type: 'text', text: 'Call `print(x)` here.' }]);
+  assert.equal(L.hasCode('Call `print(x)` here.'), true);
+  assert.equal(L.hasCode('```\na\n```'), true);
+  assert.equal(L.hasCode('A `b` c, and $5.'), false);
+  assert.equal(L.hasCode('plain prose'), false);
+});
+
+test('penScript with code: the code keeps its lines and is never left out; long code is cut with an ellipsis', () => {
+  const show = s => s.map(g => (g.type === 'code' ? `[${g.block ? 'B' : 'S'}:${g.text}]` : g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  assert.equal(show(L.penScript('Use `printf("%d", n)`   to   print.', 48)), 'Use [S:printf("%d", n)] to print.');
+  const long = 'The distance to the first Lagrange point, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    return r\n```';
+  assert.equal(show(L.penScript(long, 48)), 'The distance to the first Lagrange point, with [S:hill_radius(m1, m2, r)] …[B:def hill_radius(m1, m2, r):\n    return r]');
+  const tall = '```\n' + Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n') + '\n```';
+  const block = L.penScript(tall, 48)[0];
+  assert.equal(block.type, 'code');
+  assert.deepEqual(block.text.split('\n'), ['line 0', 'line 1', 'line 2', 'line 3', 'line 4', '…']);
+  const wide = L.penScript('```\n' + 'x'.repeat(200) + '\n\tindented\n```', 48)[0].text.split('\n');
+  assert.equal(wide[0].length, 56);
+  assert.ok(wide[0].endsWith('…'));
+  assert.equal(wide[1], '  indented', 'a tab becomes two spaces');
+  // prose and equations are as before
+  assert.equal(show(L.penScript('a   short\n line', 48)), 'a short line');
+  assert.equal(show(L.penScript('so $x^2$ it is', 48)), 'so <x^2> it is');
+});
+
+test('typeCadence: one pause per character, uneven but repeatable, a carriage return at line ends, within the budget', () => {
+  const text = 'def f(x):\n    return x * 2\n';
+  const a = L.typeCadence(text, 0, 7), b = L.typeCadence(text, 0, 7), c = L.typeCadence(text, 0, 8);
+  assert.equal(a.length, text.length);
+  assert.deepEqual(a, b, 'the same seed gives the same rhythm');
+  assert.notDeepEqual(a, c);
+  assert.ok(new Set(a.map(v => Math.round(v))).size > 6, 'the pauses are not all alike');
+  assert.ok(a.every(v => v >= 30 && v <= 200));
+  [...text].forEach((ch, i) => { if (ch === '\n') assert.equal(a[i], 190); });
+  const fast = L.typeCadence('x'.repeat(1000), 3000, 1);
+  assert.ok(Math.abs(fast.reduce((p, q) => p + q, 0) - 3000) < 1, 'a long text is typed faster, to fit the budget');
+  assert.deepEqual(L.typeCadence('', 1000, 1), []);
+});
+
+
+// ---------------------------------------------------------------- undo, redo and rewinding a conversation
+test('Undo and Redo choose the right run: the latest still in the note; the one most lately taken back', () => {
+  const a = { name: 'a', undone: false, redo: null, undoneAt: 0 }, b = { name: 'b', undone: false, redo: null, undoneAt: 0 }, c = { name: 'c', undone: false, redo: null, undoneAt: 0 };
+  const runs = [a, b, c];
+  assert.equal(L.undoTarget([]), null);
+  assert.equal(L.redoTarget(runs), null);
+  assert.equal(L.undoTarget(runs), c);
+  Object.assign(c, { undone: true, redo: {}, undoneAt: 1 });
+  assert.equal(L.undoTarget(runs), b);
+  assert.equal(L.redoTarget(runs), c);
+  Object.assign(b, { undone: true, redo: {}, undoneAt: 2 });
+  assert.equal(L.undoTarget(runs), a);
+  assert.equal(L.redoTarget(runs), b, 'the one undone last is redone first');
+  b.redo = null;                                       // the note moved on: b can't be made again
+  assert.equal(L.redoTarget(runs), c);
+  Object.assign(a, { undone: true, undoneAt: 3 });
+  assert.equal(L.undoTarget(runs), null);
+});
+
+test('Rewind: the conversation is cut back to just before the message, for the model as well', () => {
+  const history = ['u1', 'a1', 'u2', 'a2', 'u3', 'a3'].map((c, i) => ({ role: i % 2 ? 'assistant' : 'user', content: c }));
+  const cps = [0, 2, 4].map((n, i) => ({ text: `u${i + 1}`, historyLength: n, path: 'N.md', before: 'x', after: null }));
+  const back = L.rewindTo(history, cps, 1);
+  assert.deepEqual(back.history.map(m => m.content), ['u1', 'a1']);
+  assert.deepEqual(back.checkpoints, [cps[0]]);
+  assert.equal(history.length, 6, 'the originals are not changed');
+  assert.deepEqual(L.rewindTo(history, cps, 0), { history: [], checkpoints: [] });
+  assert.deepEqual(L.rewindTo(history, cps, 2).history.map(m => m.content), ['u1', 'a1', 'u2', 'a2']);
+  // a turn that failed left no reply: its checkpoint still cuts where it began
+  const odd = [{ role: 'user', content: 'u1' }, { role: 'assistant', content: 'a1' }];
+  assert.deepEqual(L.rewindTo(odd, [{ historyLength: 0 }, { historyLength: 2 }], 1).history, odd);
+  assert.equal(L.rewindTo(history, cps, 9).history.length, 6, 'an unknown checkpoint changes nothing');
+});
+
+test('Rewind: Lagrange’s own changes since a message are told from the writer’s', () => {
+  const cp = (before, after, path) => ({ path: path || 'N.md', before, after: after === undefined ? null : after });
+  // three turns: a question (no change), an edit A -> B, an edit B -> C
+  const turns = [cp('A'), cp('A', 'B'), cp('B', 'C')];
+  for (const k of [0, 1, 2]) assert.equal(L.userChangedSince(turns, k, 'C'), false, `from ${k}: only Lagrange changed it`);
+  assert.equal(L.userChangedSince(turns, 0, 'C and more'), true, 'typing after the last turn');
+  assert.equal(L.userChangedSince(turns, 2, 'B'), true, 'the last edit was undone: the note is not as the turn left it');
+  // the writer typed between the second and third turns
+  const typed = [cp('A'), cp('A', 'B'), cp('B typed', 'C')];
+  assert.equal(L.userChangedSince(typed, 0, 'C'), true);
+  assert.equal(L.userChangedSince(typed, 1, 'C'), true);
+  assert.equal(L.userChangedSince(typed, 2, 'C'), false, 'nothing of the writer’s after the third message');
+  // a turn about another note is not this note's business
+  assert.equal(L.userChangedSince([cp('A', 'B'), cp('zzz', 'yyy', 'Other.md'), cp('B', 'C')], 0, 'C'), false);
+  // an expired copy: it cannot be told, so the writer is asked
+  assert.equal(L.userChangedSince([cp(null), cp('A', 'B')], 0, 'B'), true);
+  assert.equal(L.userChangedSince([cp('A', 'B'), cp(null)], 0, 'B'), true);
+  assert.equal(L.userChangedSince(turns, 7, 'C'), true);
+});
+
+test('Rewind: only the newest checkpoints keep their copy of the note, and the old ones say so', () => {
+  const make = n => Array.from({ length: n }, (_, i) => ({ path: 'N.md', before: `note ${i}`, after: i % 2 ? `after ${i}` : null, expired: false }));
+  let cps = make(25);
+  let gone = L.pruneCheckpoints(cps, 20, 1e9);
+  assert.equal(gone.length, 5);
+  assert.deepEqual(cps.map(c => c.expired), Array.from({ length: 25 }, (_, i) => i < 5));
+  assert.ok(cps.slice(0, 5).every(c => c.before === null && c.after === null));
+  assert.ok(cps.slice(5).every(c => typeof c.before === 'string'));
+  assert.deepEqual(L.pruneCheckpoints(cps, 20, 1e9), [], 'pruning again finds nothing more');
+  // by size: three notes of 1000 characters, room for 2500
+  cps = [0, 1, 2].map(() => ({ path: 'N.md', before: 'x'.repeat(1000), after: null, expired: false }));
+  gone = L.pruneCheckpoints(cps, 20, 2500);
+  assert.deepEqual(cps.map(c => c.expired), [true, false, false]);
+  // the newest keeps its copy even if it alone is over the limit
+  cps = [{ path: 'N.md', before: 'x'.repeat(10), after: null, expired: false }, { path: 'N.md', before: 'x'.repeat(5000), after: null, expired: false }];
+  L.pruneCheckpoints(cps, 20, 100);
+  assert.deepEqual(cps.map(c => c.expired), [true, false]);
+  assert.equal(L.CHECKPOINTS_KEPT, 20);
+});
+
+test('Rewind: the note is put back with one small change', () => {
+  const apply = (a, c) => (c ? a.slice(0, c.from) + c.insert + a.slice(c.to) : a);
+  const cases = [
+    ['The quick brown fox.', 'The quick red fox.'], ['abc', 'abc'], ['', 'new text'], ['old text', ''], ['aaa', 'aa'], ['aa', 'aaa'],
+    ['one\ntwo\nthree\n', 'one\nTWO\nthree\nfour\n'], ['x', 'y'], ['same start, différent end', 'same start, different end'],
+    ['emoji 😀 here', 'emoji 😁 here'], ['😀', '😁😀'], ['abab', 'ab'],
+  ];
+  for (const [a, b] of cases) {
+    const c = L.spliceChange(a, b);
+    assert.equal(apply(a, c), b, `${JSON.stringify(a)} -> ${JSON.stringify(b)}`);
+    if (a === b) assert.equal(c, null);
+    else assert.ok(c.from <= c.to && c.to <= a.length);
+  }
+  assert.deepEqual(L.spliceChange('The quick brown fox.', 'The quick red fox.'), { from: 10, to: 15, insert: 'red' });
+  const pair = L.spliceChange('emoji 😀 here', 'emoji 😁 here');
+  assert.ok(!/[\uD800-\uDBFF]$/.test('emoji 😀 here'.slice(0, pair.from)), 'no surrogate pair is cut in two');
+});

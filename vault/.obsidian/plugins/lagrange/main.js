@@ -26,7 +26,9 @@
  *      here and in styles.css.
  *   6. Edit runs: the editor is locked while the pen writes, and all of a request's edits become one undo step
  *   7. The chat view (with the model and effort picker in its footer), the revise modal, the settings tab and the
- *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits).
+ *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits). Each run
+ *      of edits can be undone and redone (recordEdit, undoEdit, redoEdit), and each message is a checkpoint the
+ *      conversation and the note can be rewound to (rewind, restoreNote).
  */
 'use strict';
 
@@ -520,15 +522,105 @@ function locateOps(doc, ops) {
   return { located, skipped };
 }
 
+/* ---- Rewinding a conversation ----
+   Each message the writer sends is a checkpoint: {text, historyLength, path, before, after, expired}. historyLength
+   is how long the model's history was before the message; path is the note it was about; before is that note's text
+   when the message was sent and after its text once the turn was over (null: there was no change to remember, or
+   the checkpoint has expired). Rewinding to a checkpoint drops it and everything after it from the conversation,
+   puts the message back to be edited, and can put the note back to `before`. */
+
+const CHECKPOINTS_KEPT = 20;          // how many checkpoints keep their copy of the note
+const CHECKPOINT_CHARS = 4000000;     // and how many characters those copies may hold in all
+
+/* The conversation as it was before checkpoint k: {history, checkpoints}. */
+function rewindTo(history, checkpoints, k) {
+  const cp = checkpoints[k];
+  if (!cp) return { history: history.slice(), checkpoints: checkpoints.slice() };
+  return { history: history.slice(0, Math.max(0, cp.historyLength)), checkpoints: checkpoints.slice(0, k) };
+}
+
+/* Whether the note of checkpoint k holds changes that are not Lagrange's own since that checkpoint: typing between
+   turns, or after the last one. `current` is the note's text now. Each turn is known to have taken the note from
+   its `before` to its `after`; anything else is the writer's. Where a copy has expired it cannot be told, and the
+   answer is yes, so that the writer is asked. */
+function userChangedSince(checkpoints, k, current) {
+  const cp = checkpoints[k];
+  if (!cp || cp.before == null) return true;
+  let expected = cp.before;
+  for (let j = k; j < checkpoints.length; j++) {
+    const c = checkpoints[j];
+    if (c.path !== cp.path) continue;
+    if (c.before == null) return true;
+    if (c.before !== expected) return true;
+    expected = c.after == null ? c.before : c.after;
+  }
+  return current !== expected;
+}
+
+/* Forgets the copies of the note held by the oldest checkpoints, so that at most `keep` checkpoints hold one and
+   they hold at most `maxChars` characters; the newest always keeps its own. Returns the checkpoints that expired. */
+function pruneCheckpoints(checkpoints, keep, maxChars) {
+  const expired = [];
+  let held = 0, chars = 0;
+  for (let j = checkpoints.length - 1; j >= 0; j--) {
+    const c = checkpoints[j];
+    if (c.before == null) continue;
+    const size = c.before.length + (c.after == null ? 0 : c.after.length);
+    if (held > 0 && (held >= keep || chars + size > maxChars)) {
+      c.before = null;
+      c.after = null;
+      c.expired = true;
+      expired.push(c);
+      continue;
+    }
+    held++;
+    chars += size;
+  }
+  return expired;
+}
+
+/* The one change that turns text a into text b: {from, to, insert} (what is common at both ends stays as it is, so
+   the cursor and the scroll position are kept where they can be); null if they are the same. */
+function spliceChange(a, b) {
+  if (a === b) return null;
+  const max = Math.min(a.length, b.length);
+  let start = 0;
+  while (start < max && a.charCodeAt(start) === b.charCodeAt(start)) start++;
+  let end = 0;
+  while (end < max - start && a.charCodeAt(a.length - 1 - end) === b.charCodeAt(b.length - 1 - end)) end++;
+  // never cut a surrogate pair in two
+  if (start > 0 && /[\uD800-\uDBFF]/.test(a[start - 1])) start--;
+  if (end > 0 && /[\uDC00-\uDFFF]/.test(a[a.length - end])) end--;
+  return { from: start, to: a.length - end, insert: b.slice(start, b.length - end) };
+}
+
+/* Which of Lagrange's runs of edits the Undo and Redo buttons act on. records are oldest first: {undone, redo,
+   undoneAt}. Undo takes back the latest run still in the note; Redo makes again the run most lately taken back,
+   if it still can be (redo is null once the note has moved on). */
+function undoTarget(records) {
+  for (let i = records.length - 1; i >= 0; i--) if (!records[i].undone) return records[i];
+  return null;
+}
+
+function redoTarget(records) {
+  let best = null;
+  for (const r of records) if (r.undone && r.redo && (!best || r.undoneAt > best.undoneAt)) best = r;
+  return best;
+}
+
 /* ---- What the pen writes ----
    The pen writes a short form of each replacement above the line. Mathematics in it ($…$ or $$…$$, as Obsidian reads
-   them) is kept whole, so it can be typeset and drawn symbol by symbol. */
+   them) is kept whole, so it can be typeset and drawn symbol by symbol. Code in it (a fenced block, or a code span of
+   a few characters or more) is kept apart too: it is not written by the pen but typed, on a typewriter. */
 
 /* Splits text into [{type: 'text', text} | {type: 'math', source, display}]. Inline math opens with a $ that is not
    escaped and not followed by white space, and closes with one not preceded by white space and not followed by a
    digit, on the same line (so "$5 and $10" is text); $$…$$ is display math and may span lines. Code spans and fenced
-   code are text. */
-function mathSegments(text) {
+   code are text, unless opts.code is set: then a fenced block, and a code span of at least CODE_SPAN_MIN characters,
+   come out as {type: 'code', text, block, lang} (text is the code itself, without its fence or backticks). */
+const CODE_SPAN_MIN = 4;
+function mathSegments(text, opts) {
+  const wantCode = Boolean(opts && opts.code);
   const src = String(text == null ? '' : text);
   const out = [];
   let buf = '';
@@ -540,6 +632,23 @@ function mathSegments(text) {
       const ticks = src.slice(i).match(/^`+/)[0];
       const end = src.indexOf(ticks, i + ticks.length);
       const stop = end < 0 ? (ticks.length >= 3 ? src.length : i + ticks.length) : end + ticks.length;
+      if (wantCode && (end >= 0 || ticks.length >= 3)) {
+        const inner = src.slice(i + ticks.length, end < 0 ? src.length : end);
+        const fenced = ticks.length >= 3 && (i === 0 || src[i - 1] === '\n') && inner.includes('\n');
+        if (fenced) {
+          const nl = inner.indexOf('\n');
+          flush();
+          out.push({ type: 'code', text: inner.slice(nl + 1).replace(/\n[ \t]*$/, ''), block: true, lang: inner.slice(0, nl).trim() });
+          i = stop;
+          continue;
+        }
+        if (inner.trim().length >= CODE_SPAN_MIN) {
+          flush();
+          out.push({ type: 'code', text: inner.replace(/\s+/g, ' ').trim(), block: false, lang: '' });
+          i = stop;
+          continue;
+        }
+      }
       buf += src.slice(i, stop);
       i = stop;
       continue;
@@ -573,28 +682,69 @@ function hasMath(text) {
   return mathSegments(text).some(g => g.type === 'math');
 }
 
-/* The pen's script for a replacement: its segments, white space collapsed, cut to about `limit` characters of text.
-   An equation is never cut in two and never left out for want of room (it counts for at most 24 characters, and the
-   pen writes smaller if it must); only one whose source is longer than 160 characters ends the script, with an
-   ellipsis, as does the text that runs past the limit. */
+/* Whether the typewriter has something to type: a fenced block, or a code span of a few characters or more. */
+function hasCode(text) {
+  return mathSegments(text, { code: true }).some(g => g.type === 'code');
+}
+
+/* The pauses of a typewriter typing `text`, in milliseconds, one per character: uneven, as a typist's are (a little
+   quicker inside a word, a breath after a space or punctuation), a carriage return at each line end, and never more
+   than `budget` ms in all. `seed` makes the unevenness repeatable. */
+function typeCadence(text, budget, seed) {
+  let x = (seed >>> 0) || 0x9e3779b9;
+  const rand = () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x / 4294967296; };
+  const out = [];
+  for (const c of String(text)) {
+    if (c === '\n') out.push(190);
+    else if (c === ' ') out.push(38 + rand() * 40);
+    else if (/[.,;:(){}\[\]=]/.test(c)) out.push(62 + rand() * 60);
+    else out.push(30 + rand() * 46);
+  }
+  const total = out.reduce((a, b) => a + b, 0);
+  const scale = budget > 0 && total > budget ? budget / total : 1;
+  return out.map(ms => ms * scale);
+}
+
+/* The pen's script for a replacement: its segments, white space collapsed in the prose, cut to about `limit`
+   characters of prose. An equation is never cut in two and never left out for want of room (it counts for at most 24
+   characters, and the pen writes smaller if it must); only one whose source is longer than 160 characters ends the
+   script, with an ellipsis, as does the prose that runs past the limit. Code is never left out either, and keeps its
+   line breaks and its spacing:
+   a block is cut to CODE_LINES lines of CODE_COLS characters, a span to CODE_COLS characters, each with an ellipsis. */
+const CODE_LINES = 6, CODE_COLS = 56;
 function penScript(replacement, limit) {
   const max = limit || 48;
-  const segs = mathSegments(String(replacement == null ? '' : replacement).replace(/\s+/g, ' ').trim());
+  const segs = mathSegments(String(replacement == null ? '' : replacement).trim(), { code: true })
+    .map(g => (g.type === 'text' ? { type: 'text', text: g.text.replace(/\s+/g, ' ') } : g))
+    .filter(g => g.type !== 'text' || g.text);
+  if (segs.length && segs[0].type === 'text') segs[0].text = segs[0].text.trimStart();
+  if (segs.length && segs[segs.length - 1].type === 'text') segs[segs.length - 1].text = segs[segs.length - 1].text.trimEnd();
   const out = [];
-  let used = 0;
+  let used = 0, full = false;                          // full: no more prose (code after it is still typed)
+  const stop = () => { if (!full) { full = true; out.push({ type: 'text', text: ' …' }); } };
   for (const g of segs) {
     const room = max - used;
     if (g.type === 'math') {
-      const cost = Math.min(g.source.length, 24);
-      if (g.source.length > 160 || room <= 0) { out.push({ type: 'text', text: ' …' }); break; }
+      if (full || g.source.length > 160 || room <= 0) { stop(); continue; }
       out.push(g);
-      used += cost;
-    } else {
-      if (g.text.length > room) { out.push({ type: 'text', text: g.text.slice(0, Math.max(0, room - 2)).trimEnd() + ' …' }); break; }
-      out.push(g);
-      used += g.text.length;
+      used += Math.min(g.source.length, 24);
+    } else if (g.type === 'code') {                     // never left out for want of room
+      const clip = l => (l.length > CODE_COLS ? l.slice(0, CODE_COLS - 1) + '…' : l);
+      let lines = g.block ? g.text.replace(/\t/g, '  ').split('\n') : [g.text];
+      if (lines.length > CODE_LINES) lines = lines.slice(0, CODE_LINES - 1).concat('…');
+      out.push({ type: 'code', text: lines.map(clip).join('\n'), block: g.block, lang: g.lang });
+      used += Math.min(g.text.length, 24);
+    } else if (!full) {
+      if (g.text.length > room) {
+        const head = g.text.slice(0, Math.max(0, room - 2)).trimEnd();
+        full = true;
+        out.push({ type: 'text', text: head + ' …' });
+      } else {
+        out.push(g);
+        used += g.text.length;
+        if (used >= max && g !== segs[segs.length - 1]) stop();
+      }
     }
-    if (used >= max && g.type !== 'math') { if (g !== segs[segs.length - 1]) out.push({ type: 'text', text: ' …' }); break; }
   }
   return out;
 }
@@ -850,12 +1000,15 @@ function demoRevise(passage, instruction) {
 }
 
 /* The demo's edits block for a chat message that asks for a change, or '' when it asks for none: "fix", "proofread"
-   or "correct" proofreads; "equation" or "formula" adds one; "add" or "append" adds a line. */
+   or "correct" proofreads; "equation" or "formula" adds one; "code" or "function" adds a code block; "add" or
+   "append" adds a line. */
 function demoChatEdits(question, note) {
   const q = String(question || '').toLowerCase();
   let ops = null;
   if (/\b(equation|formula|math)/.test(q)) {
     ops = [{ append: 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$' }];
+  } else if (/\b(code|function|script|snippet|program)/.test(q)) {
+    ops = [{ append: 'The distance to the first Lagrange point, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```' }];
   } else if (/\b(fix|proofread|correct|tidy|clean)/.test(q)) {
     ops = demoProofreadEdits(note.text);
   } else if (/\b(add|append|write)\b/.test(q)) {
@@ -883,7 +1036,7 @@ function demoChatReply(question, note, agentic) {
   parts.push(`You asked: “${excerpt(String(question || '').replace(/\s+/g, ' '), 160)}” A model would answer here, ` +
     'with the note in mind.');
   parts.push('The edits work offline in demo mode:\n\n' +
-    (agentic ? '- Ask here to *fix the typography*, to *add a line* or to *add an equation*, and the pen does it.\n' : '') +
+    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation* or to *add some code*, and the pen does it.\n' : '') +
     '- **Proofread note** finds typographic slips (straight quotes, spaced hyphens, doubled spaces) and sets the ' +
     'corrections down with the pen.\n' +
     '- **Revise selection** rewrites the selected passage: ask for it *shorter*, *in title case* or *in capitals*.\n\n' +
@@ -1939,6 +2092,9 @@ function rangeRects(view, from, to) {
 // Mathematics in a replacement ($…$, $$…$$) is typeset with Obsidian's MathJax and drawn symbol by symbol, the nib
 // following each one; if it can't be typeset (no MathJax, or an error) the pen writes its source like other text.
 // A short line of ink trails behind the nib as it moves (settings.penTrail) and fades in half a second.
+// Code in a replacement (a fenced block, or a code span of a few characters) is not written but typed: the pen gives
+// way to a small typewriter, and the code appears in the monospace font one character at a time, at a typist's uneven
+// pace, with a carriage return at each line end and no trail of ink; for the prose around it the pen comes back.
 //
 // Contract
 //   createPen(app, settings) -> { edit(view, from, to, replacement): Promise<void>, destroy() }
@@ -2001,7 +2157,21 @@ function createPen(app, settings) {
     mk(doc, 'rect', { x: 92, y: -9, width: 7, height: 18, fill: 'var(--lg-rubric)', opacity: 0.9 }, body);                    // band
     mk(doc, 'path', { d: 'M100 -9 H140 Q144 -9 144 -6', fill: 'none', stroke: 'var(--lg-ink)', 'stroke-width': 1.6 }, body);  // clip
     pen.style.display = 'none';
-    L = { svg, marks, pen, pos: null, lift: 0, idle: 0, win: doc.defaultView || window, trail: { g: trailG, pts: [], paths: [], on: false } };
+    // The typewriter that types code, drawn with the point where a letter lands at (0, 0): the platen across the top,
+    // the body below it, three rows of keys, and the carriage lever on the left.
+    const type = mk(doc, 'g', { class: 'lagrange-typewriter' }, svg);
+    mk(doc, 'path', { d: 'M-3.2 -1 L0 2.6 L3.2 -1', fill: 'none', stroke: 'var(--lg-rubric)', 'stroke-width': 1.3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, type);
+    mk(doc, 'rect', { x: -19, y: 3, width: 38, height: 6, rx: 3, fill: 'var(--lg-ink)', opacity: 0.85 }, type);
+    mk(doc, 'path', { d: 'M-24 6 H-19 M19 6 H23 M-24 6 V1', fill: 'none', stroke: 'var(--lg-ink)', 'stroke-width': 1.4, 'stroke-linecap': 'round' }, type);
+    mk(doc, 'path', { d: 'M-15 9 H15 L21 27 Q22 31 18 31 H-18 Q-22 31 -21 27 Z', fill: 'var(--lg-plate)', ...st }, type);
+    mk(doc, 'path', { d: 'M-15 9 H15 L16.5 13.5 H-16.5 Z', fill: 'url(#lagrange-pen-hatch)', stroke: 'var(--lg-ink)', 'stroke-width': 0.8, 'stroke-linejoin': 'round' }, type);
+    for (let row = 0; row < 3; row++) {
+      for (let i = 0; i < 6 + row; i++) {
+        mk(doc, 'circle', { cx: (i - (5 + row) / 2) * 5, cy: 17.5 + row * 4.3, r: 1.35, fill: row === 2 && i === 3 ? 'var(--lg-rubric)' : 'var(--lg-ink)' }, type);
+      }
+    }
+    type.style.display = 'none';
+    L = { svg, marks, pen, type, pos: null, lift: 0, idle: 0, win: doc.defaultView || window, trail: { g: trailG, pts: [], paths: [], on: false } };
     layers.set(doc, L);
     return L;
   }
@@ -2118,6 +2288,44 @@ function createPen(app, settings) {
     }
   };
 
+  /* Types one piece of code (see penScript): the typewriter takes the pen's place, sits under the letter it is
+     typing and dips at each stroke; a line end is a carriage return. Then the pen comes back, where the typing ended. */
+  const typeCode = async (L, piece, k) => {
+    const win = L.win, [typed, mark, rest] = piece.el.childNodes;
+    const text = piece.text;
+    const pauses = typeCadence(text, 5200, text.length * 2654435761);
+    const at = () => { const r = mark.getBoundingClientRect(); return { x: r.left, y: r.bottom }; };
+    const put = (q, dip) => L.type.setAttribute('transform', `translate(${q.x.toFixed(1)} ${(q.y + 2 + (dip ? 1.4 : 0)).toFixed(1)})`);
+    L.pen.style.display = 'none';
+    L.trail.pts.length = 0;                          // no ink while typing
+    L.type.style.display = '';
+    put(at());
+    let i = 0, n = 0;
+    for (const ch of text) {
+      if (destroyed) break;
+      const before = at();
+      i += ch.length;
+      typed.textContent = text.slice(0, i);
+      rest.textContent = text.slice(i);
+      const ms = pauses[n++] * k;
+      if (ch === '\n') {
+        const after = at();                          // the carriage runs back to the start of the next line
+        await tween(win, ms, t => { const e = ease(t); put({ x: before.x + (after.x - before.x) * e, y: before.y + (after.y - before.y) * e }); });
+      } else {
+        put(at(), true);
+        await sleep(ms * 0.4);
+        put(at(), false);
+        await sleep(ms * 0.6);
+      }
+    }
+    const end = at();
+    L.type.style.display = 'none';
+    L.pen.style.display = '';
+    L.trail.pts.length = 0;
+    L.lift = 0;
+    place(L, end.x, end.y - 4);
+  };
+
   const park = (L, view) => {
     L.win.clearTimeout(L.idle);
     L.idle = L.win.setTimeout(async () => {
@@ -2195,6 +2403,18 @@ function createPen(app, settings) {
           const pieces = [];
           for (const g of script) {
             const span = doc.createElement('span');
+            if (g.type === 'code') {
+              // typed text, a marker where the next letter lands, and the text still to come (it holds the slip's shape)
+              span.className = `lagrange-pen-code${g.block ? ' is-block' : ''}`;
+              span.appendChild(doc.createElement('span'));
+              span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-mark';
+              span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-rest';
+              span.lastChild.textContent = g.text;
+              span.style.visibility = 'hidden';         // the slip is laid down when its turn comes
+              hand.appendChild(span);
+              pieces.push({ el: span, code: true, text: g.text });
+              continue;
+            }
             const m = g.type === 'math' && typeset ? renderPenMath(g.source, g.display, obsidian.renderMath) : null;
             if (m) { span.className = 'lagrange-pen-math'; span.appendChild(m); }
             else span.textContent = g.type === 'math' ? (g.display ? `$$${g.source}$$` : `$${g.source}$`) : g.text;
@@ -2233,11 +2453,19 @@ function createPen(app, settings) {
           hand.style.left = `${cx0}px`;
           hand.style.top = `${cy0}px`;
           // The ink shows up to x (viewport): the hand is uncovered from the left as the nib passes.
-          const reveal = x => { hand.style.clipPath = `inset(-0.6em ${Math.max(0, cx0 + cw - x).toFixed(1)}px -0.6em -0.2em)`; };
+          // (never covered again: a block of code sits on a line of its own, under prose that may be wider.)
+          let shown = cx0;
+          const reveal = x => { shown = Math.max(shown, x); hand.style.clipPath = `inset(-0.6em ${Math.max(0, cx0 + cw - shown).toFixed(1)}px -0.6em -0.2em)`; };
           const by = cy0 + ch * 0.78;
           for (const piece of pieces) {
             if (destroyed) break;
             const pr = piece.el.getBoundingClientRect();
+            if (piece.code) {
+              reveal(pr.right);                         // the slip is laid down empty; its letters are typed
+              piece.el.style.visibility = '';
+              await typeCode(L, piece, k);
+              continue;
+            }
             const glyphs = piece.math ? mathGlyphs(piece.el) : [];
             if (glyphs.length && glyphs.length <= 90) {
               for (const g of glyphs) g.style.opacity = '0';
@@ -2250,11 +2478,12 @@ function createPen(app, settings) {
               }
               reveal(pr.right);
             } else {
-              if (Math.hypot(pr.left - L.pos.x, by - L.pos.y) > 4) await fly(L, pr.left, by, 280 * k, 6);
+              const py = pieces.length > 1 ? pr.top + pr.height * 0.78 : by;   // beside a tall slip of code, each piece has its own line
+              if (Math.hypot(pr.left - L.pos.x, py - L.pos.y) > 4) await fly(L, pr.left, py, 280 * k, 6);
               await tween(win, Math.min(2400, pr.width * 9) * k, t => {
                 const x = pr.left + pr.width * t;
                 reveal(x);
-                place(L, x, by + Math.sin((x - cx0) * 0.55) * 3.2 - 2);
+                place(L, x, py + Math.sin((x - cx0) * 0.55) * 3.2 - 2);
               });
             }
           }
@@ -2264,6 +2493,8 @@ function createPen(app, settings) {
         await fly(L, Math.min(vr.right - 12, handEnd.x + 30), handEnd.y - 18, 280 * k, 10);
         await sleep(380 * k);
       } finally {
+        L.type.style.display = 'none';
+        L.pen.style.display = '';
         view.dispatch({ changes: { from, to, insert: replacement }, effects: setGone.of(null) });
         const fade = Math.round(300 * k);
         for (const n of ink) { n.style.transition = `opacity ${fade}ms ease`; n.style.opacity = '0'; }
@@ -2299,6 +2530,7 @@ function createPen(app, settings) {
  * ------------------------------------------------------------------------------------------------------------- */
 
 const lockCompartment = new Compartment();
+const EDIT_RECORDS = 30;   // how many runs of edits Undo and Redo remember
 
 function lockExtension(run) {
   return [
@@ -2400,6 +2632,7 @@ class LagrangeChatView extends ItemView {
     this.history = [];           // [{role: 'user'|'assistant', content}], what the model sees
     this.pending = null;         // {controller} while a chat reply is streaming
     this.clipNoted = new Set();  // notes whose clipping the writer has been told about
+    this.checkpoints = [];       // one per message sent, for "Rewind to here" (see rewindTo)
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -2423,6 +2656,13 @@ class LagrangeChatView extends ItemView {
       if (v) this.plugin.proofread(v);
       else new Notice('Open a note to proofread first.');
     });
+    // Undo and Redo for Lagrange's own edits (a run of edits at a time; see the plugin's undoEdit and redoEdit).
+    this.undoEl = actions.createEl('button', { cls: 'lagrange-icon clickable-icon', attr: { 'aria-label': 'Undo Lagrange’s last edits' } });
+    setIcon(this.undoEl, 'undo-2');
+    this.undoEl.addEventListener('click', () => { const r = undoTarget(this.plugin.edits); if (r) this.plugin.undoEdit(r); });
+    this.redoEl = actions.createEl('button', { cls: 'lagrange-icon clickable-icon', attr: { 'aria-label': 'Redo Lagrange’s edits' } });
+    setIcon(this.redoEl, 'redo-2');
+    this.redoEl.addEventListener('click', () => { const r = redoTarget(this.plugin.edits); if (r) this.plugin.redoEdit(r); });
     const clear = actions.createEl('button', { cls: 'lagrange-icon clickable-icon', attr: { 'aria-label': 'Clear the conversation' } });
     setIcon(clear, 'eraser');
     clear.addEventListener('click', () => this.clear());
@@ -2461,7 +2701,15 @@ class LagrangeChatView extends ItemView {
     this.registerEvent(this.app.workspace.on('file-open', () => this.refreshSubject()));
     this.refreshSubject();
     this.refreshFoot();
+    this.refreshHistory();
     this.showEmpty();
+  }
+
+  /* The Undo and Redo buttons are live only when there is a run of Lagrange's edits to take back or to make again. */
+  refreshHistory() {
+    if (!this.undoEl) return;
+    this.undoEl.disabled = !undoTarget(this.plugin.edits);
+    this.redoEl.disabled = !redoTarget(this.plugin.edits);
   }
 
   async onClose() {
@@ -2649,6 +2897,7 @@ class LagrangeChatView extends ItemView {
   clear() {
     this.stop();
     this.history = [];
+    this.checkpoints = [];
     this.clipNoted.clear();
     this.logEl.empty();
     this.showEmpty();
@@ -2673,12 +2922,72 @@ class LagrangeChatView extends ItemView {
     if (href) this.app.workspace.openLinkText(href, (v && v.file && v.file.path) || '', ev.ctrlKey || ev.metaKey);
   }
 
-  addUser(text) {
+  /* The writer's message in the log, with its "Rewind to here" button. */
+  addUser(text, checkpoint) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--user' });
     el.createDiv({ cls: 'lagrange-turn-text', text });
+    if (checkpoint) {
+      checkpoint.el = el;
+      const b = el.createEl('button', { cls: 'lagrange-rewind clickable-icon' });
+      setIcon(b, 'history');
+      checkpoint.button = b;
+      this.labelRewind(checkpoint);
+      b.addEventListener('click', () => { this.rewind(checkpoint); });
+    }
     this.scrollDown(true);
     return el;
+  }
+
+  labelRewind(cp) {
+    if (!cp.button) return;
+    const label = cp.expired
+      ? 'Rewind the conversation to here and edit this message. The note as it was then is no longer kept (only ' +
+        `the last ${CHECKPOINTS_KEPT} points are), so it would be left as it is`
+      : 'Rewind to here: the conversation and the note go back to this point, and you can edit this message';
+    cp.button.setAttribute('aria-label', label);
+    cp.button.toggleClass('is-expired', Boolean(cp.expired));
+  }
+
+  /* "Rewind to here": drops this message and everything after it from the conversation (and from what the model is
+     sent), puts the note back as it was when the message was sent, and puts the message back in the box to be
+     edited. If the note holds changes that are not Lagrange's since then, the writer chooses whether to keep them. */
+  async rewind(cp) {
+    const k = this.checkpoints.indexOf(cp);
+    if (k < 0) return;
+    if (this.pending || this.plugin.editing) { new Notice('Lagrange is still at work: stop it, or wait, then rewind.'); return; }
+    let restore = false, kept = false;
+    if (cp.path && cp.before != null) {
+      const current = await this.plugin.noteText(cp.path);
+      if (current !== null && current !== cp.before) {
+        if (userChangedSince(this.checkpoints, k, current)) {
+          const choice = await new RewindModal(this.app).ask();
+          if (!choice) return;
+          restore = choice === 'restore';
+          kept = !restore;
+        } else {
+          restore = true;
+        }
+      }
+    }
+    const back = rewindTo(this.history, this.checkpoints, k);
+    this.history = back.history;
+    this.checkpoints = back.checkpoints;
+    for (let n = cp.el; n;) { const next = n.nextSibling; n.remove(); n = next; }
+    if (restore) {
+      try {
+        await this.plugin.restoreNote(cp.path, cp.before, cp.clock);
+      } catch (e) {
+        new Notice(`The conversation was rewound, but the note could not be put back: ${e.message}`);
+      }
+    }
+    this.showEmpty();
+    this.inputEl.value = cp.text;
+    this.fitInput();
+    this.inputEl.focus();
+    if (cp.expired) new Notice(`Rewound the conversation. The note as it was then is no longer kept (only the last ${CHECKPOINTS_KEPT} points are), so it was left as it is.`, 8000);
+    else if (kept) new Notice('Rewound the conversation; the note was left as it is.');
+    else if (restore) new Notice('Rewound: the conversation and the note are as they were at that message. Undo in the editor brings the note’s later text back.', 8000);
   }
 
   addAside(text, cls) {
@@ -2762,7 +3071,13 @@ class LagrangeChatView extends ItemView {
     const limit = NOTE_LIMIT[this.plugin.settings.provider] || NOTE_LIMIT.anthropic;
     const clip = note ? clipText(note.text, limit, note.cursor) : null;
 
-    this.addUser(text);
+    // The checkpoint for "Rewind to here": where the conversation stands, and the note as it is now.
+    const checkpoint = {
+      text, historyLength: this.history.length, path: note ? note.path : null, before: note ? note.text : null, after: null,
+      expired: false, clock: this.plugin.editClock,
+    };
+    this.checkpoints.push(checkpoint);
+    this.addUser(text, checkpoint);
     if (clip && clip.clipped && !this.clipNoted.has(note.path)) {
       this.clipNoted.add(note.path);
       this.addAside(`“${note.title}” is long (${clip.total.toLocaleString()} characters), so Lagrange reads the ` +
@@ -2829,6 +3144,15 @@ class LagrangeChatView extends ItemView {
       }
     } finally {
       this.setPending(null);
+      // What the turn left in the note, so a later rewind can tell Lagrange's changes from the writer's; then the
+      // oldest checkpoints give up their copies of the note.
+      if (checkpoint.path && this.checkpoints.includes(checkpoint)) {
+        try {
+          const now = await this.plugin.noteText(checkpoint.path);
+          checkpoint.after = now === null || now === checkpoint.before ? null : now;
+        } catch (e) { /* the note is gone: nothing to remember */ }
+      }
+      for (const cp of pruneCheckpoints(this.checkpoints, CHECKPOINTS_KEPT, CHECKPOINT_CHARS)) this.labelRewind(cp);
     }
   }
 
@@ -2890,12 +3214,50 @@ class LagrangeChatView extends ItemView {
       for (const e of skipped) item(list, e, e.why);
     }
     if (n && onUndo) {
-      const b = el.createEl('button', { cls: 'lagrange-undo', text: 'Undo Lagrange’s edits' });
-      b.addEventListener('click', () => {
-        if (onUndo()) { b.setText('Edits undone'); b.disabled = true; }
-      });
+      // onUndo is the run's record (see the plugin's recordEdit): the button undoes it, then offers to redo it.
+      const record = onUndo;
+      const b = el.createEl('button', { cls: 'lagrange-undo' });
+      const show = () => {
+        b.setText(!record.undone ? 'Undo Lagrange’s edits' : record.redo ? 'Redo Lagrange’s edits' : 'Edits undone');
+        b.disabled = Boolean(record.undone && !record.redo);
+      };
+      record.listeners.push(show);
+      show();
+      b.addEventListener('click', () => { if (record.undone) this.plugin.redoEdit(record); else this.plugin.undoEdit(record); });
     }
     this.scrollDown();
+  }
+}
+
+/* Asks, before a rewind, what to do with a note that has changed since: resolves 'restore', 'keep' or null. */
+class RewindModal extends Modal {
+  ask() {
+    return new Promise(resolve => { this.resolve = resolve; this.open(); });
+  }
+
+  onOpen() {
+    this.modalEl.addClass('lagrange-modal');
+    this.titleEl.setText('Rewind to here');
+    this.contentEl.createEl('p', {
+      text: 'The note has changes that are not Lagrange’s since this message. Put the note back as it was then (your ' +
+        'later changes go, though Undo in the editor brings them back), or rewind the conversation only and keep the ' +
+        'note as it is?',
+    });
+    const row = this.contentEl.createDiv({ cls: 'lagrange-modal-buttons' });
+    const pick = (text, value, cls) => {
+      const b = row.createEl('button', { text, cls: cls || '' });
+      b.addEventListener('click', () => { this.choice = value; this.close(); });
+      return b;
+    };
+    pick('Cancel', null);
+    pick('Put the note back', 'restore');
+    const keep = pick('Keep the note as it is', 'keep', 'mod-cta');
+    window.setTimeout(() => keep.focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) { this.resolve(this.choice || null); this.resolve = null; }
   }
 }
 
@@ -3143,12 +3505,13 @@ class LagrangePlugin extends Plugin {
     this.settings = sanitizeSettings(await this.loadData());
     this.session = { noFallback: false, noEffort: {} };
     this.editing = false;
-    this.lastEdit = null;
+    this.edits = [];       // Lagrange's runs of edits, oldest first (see recordEdit); at most EDIT_RECORDS
+    this.editClock = 0;    // counts the runs, so a rewind knows which came after a checkpoint
     this.pen = createPen(this.app, this.settings);
 
     this.registerEditorExtension([
       lockCompartment.of([]),
-      EditorView.updateListener.of(update => this.trackLastEdit(update)),
+      EditorView.updateListener.of(update => this.trackEdits(update)),
     ]);
     this.registerView(VIEW_TYPE, leaf => new LagrangeChatView(leaf, this));
     this.addRibbonIcon(ICON, 'Open Lagrange', () => { this.activateView(); });
@@ -3242,32 +3605,159 @@ class LagrangePlugin extends Plugin {
     return { title: view.file.basename, path: view.file.path, text: view.getViewData(), cursor };
   }
 
-  /* Watches the editor where Lagrange last made edits, so "Undo Lagrange's edits" still works after later typing. */
-  trackLastEdit(update) {
-    const le = this.lastEdit;
-    if (!le || le.undone || update.view !== le.view || !update.docChanged) return;
-    for (const tr of update.transactions) {
-      if (tr.docChanged && (tr.isUserEvent('undo') || tr.isUserEvent('redo'))) le.viaHistory = true;
-    }
-    le.since = le.since.compose(update.changes);
+  /* Lagrange's runs of edits, for Undo and Redo (the two buttons at the head of the chat, and the button under each
+     run in the log). A record holds what is needed to take a run back and to make it again whatever has happened in
+     the note since: {view, editor, path, clock, docBefore, docAfter, inverse, since, viaHistory, undone, redo,
+     sinceUndo, redoStale, byHistory, undoneAt, listeners}. `since` is everything that has changed in the note after
+     the run (kept up by trackEdits), so the run's inverse can be carried through later typing; once undone, `redo`
+     is the change that makes the run again and `sinceUndo` what has changed since the undo. */
+  recordEdit(cm, editor, path, result) {
+    // The note has moved on: runs taken back before this one can no longer be made again.
+    for (const r of this.edits) if (r.view === cm && r.undone && r.redo) { r.redo = null; this.announce(r); }
+    const record = {
+      view: cm, editor, path, clock: ++this.editClock, docBefore: result.docBefore, docAfter: cm.state.doc,
+      inverse: result.changes.invert(result.docBefore), since: ChangeSet.empty(cm.state.doc.length),
+      viaHistory: false, undone: false, redo: null, sinceUndo: null, redoStale: false, byHistory: false, undoneAt: 0,
+      expecting: null, listeners: [],
+    };
+    this.edits.push(record);
+    while (this.edits.length > EDIT_RECORDS) this.edits.shift();
+    this.announce(record);
+    return record;
   }
 
-  /* "Undo Lagrange's edits": the editor's own undo if nothing has happened since; the inverse of the edits if the
-     text is back as Lagrange left it; the inverse carried through later typing otherwise. After the editor's undo or
-     redo has been used, the last of these isn't reliable, so it says to use Undo in the editor instead. */
-  undoLastEdit(record) {
-    const le = this.lastEdit;
+  /* Tells the buttons that a record has changed. */
+  announce(record) {
+    for (const f of record.listeners) { try { f(); } catch (e) { /* a button that is gone */ } }
+    const chat = this.chatView();
+    if (chat) chat.refreshHistory();
+  }
+
+  /* Watches the editors where Lagrange has made edits. A change this plugin has just asked for (an undo or a redo of
+     a run) completes that record; any other change is added to what has happened since. The editor's own undo and
+     redo, used by the writer, make "carried through later typing" unreliable, which is remembered. */
+  trackEdits(update) {
+    if (!update.docChanged || !this.edits.length) return;
+    const history = !this.ownHistory && update.transactions.some(tr => tr.docChanged && (tr.isUserEvent('undo') || tr.isUserEvent('redo')));
+    for (const r of this.edits) {
+      if (update.view !== r.view) continue;
+      if (r.expecting === 'undo') {
+        r.expecting = null;
+        r.undone = true;
+        r.undoneAt = ++this.editClock;
+        r.redo = update.changes.invert(update.startState.doc);
+        r.sinceUndo = ChangeSet.empty(update.state.doc.length);
+        r.redoStale = false;
+      } else if (r.expecting === 'redo') {
+        r.expecting = null;
+        r.undone = false;
+        r.redo = null;
+        r.docAfter = update.state.doc;
+        r.inverse = update.changes.invert(update.startState.doc);
+        r.since = ChangeSet.empty(update.state.doc.length);
+        r.viaHistory = false;
+      } else if (r.undone) {
+        if (r.sinceUndo) r.sinceUndo = r.sinceUndo.compose(update.changes);
+        if (history) r.redoStale = true;
+      } else {
+        r.since = r.since.compose(update.changes);
+        if (history) r.viaHistory = true;
+      }
+    }
+  }
+
+  /* Undo one run of Lagrange's edits: the editor's own undo if nothing has happened since (so the editor's history
+     stays in step); the inverse of the edits if the text is back as Lagrange left it; the inverse carried through
+     later typing otherwise, which keeps what the writer typed and says so. After the writer has used the editor's
+     undo or redo that last way isn't reliable, so it says to use Undo in the editor instead. */
+  undoEdit(record) {
+    const r = record;
     const stale = () => { new Notice('The note has changed since; use Undo in the editor instead.'); return false; };
-    if (!le || le !== record || le.undone) return stale();
-    if (!le.view.dom.isConnected) { new Notice('That note is no longer open.'); return false; }
-    const doc = le.view.state.doc;
-    if (doc.eq(le.docBefore)) { new Notice('Those edits are already undone.'); le.undone = true; return true; }
-    if (le.since.empty && le.editor) le.editor.undo();
-    else if (doc.eq(le.docAfter)) le.view.dispatch({ changes: le.inverse, userEvent: 'lagrange.undo' });
-    else if (!le.viaHistory) le.view.dispatch({ changes: le.inverse.map(le.since), userEvent: 'lagrange.undo' });
-    else return stale();
-    le.undone = true;
+    if (!r || r.undone || !this.edits.includes(r)) return stale();
+    if (!r.view.dom.isConnected) { new Notice('That note is no longer open.'); return false; }
+    const doc = r.view.state.doc;
+    if (doc.eq(r.docBefore)) {
+      new Notice('Those edits are already undone.');
+      r.undone = true;
+      r.undoneAt = ++this.editClock;
+      r.redo = null;
+      this.announce(r);
+      return true;
+    }
+    let kept = false;
+    r.expecting = 'undo';
+    r.byHistory = false;
+    this.ownHistory = true;
+    try {
+      if (r.since.empty && r.editor) { r.byHistory = true; r.editor.undo(); }
+      else if (doc.eq(r.docAfter)) r.view.dispatch({ changes: r.inverse, userEvent: 'lagrange.undo' });
+      else if (!r.viaHistory) { kept = true; r.view.dispatch({ changes: r.inverse.map(r.since), userEvent: 'lagrange.undo' }); }
+    } finally {
+      this.ownHistory = false;
+    }
+    if (r.expecting) { r.expecting = null; return stale(); }   // nothing changed: it could not be undone that way
+    if (kept) new Notice('Lagrange’s edits were taken back; what you have typed since was kept.');
+    this.announce(r);
     return true;
+  }
+
+  /* Redo a run that was undone, by the same three ways. */
+  redoEdit(record) {
+    const r = record;
+    const stale = () => { new Notice('The note has changed since; those edits can’t be made again. Ask Lagrange once more.'); return false; };
+    if (!r || !r.undone || !r.redo || !this.edits.includes(r)) return stale();
+    if (!r.view.dom.isConnected) { new Notice('That note is no longer open.'); return false; }
+    let kept = false;
+    r.expecting = 'redo';
+    this.ownHistory = true;
+    try {
+      if (r.sinceUndo.empty && r.byHistory && r.editor) r.editor.redo();
+      else if (r.sinceUndo.empty) r.view.dispatch({ changes: r.redo, userEvent: 'lagrange.redo' });
+      else if (!r.redoStale) { kept = true; r.view.dispatch({ changes: r.redo.map(r.sinceUndo), userEvent: 'lagrange.redo' }); }
+    } finally {
+      this.ownHistory = false;
+    }
+    if (r.expecting) { r.expecting = null; r.redo = null; this.announce(r); return stale(); }
+    if (kept) new Notice('Lagrange’s edits were made again; what you have typed since was kept.');
+    this.announce(r);
+    return true;
+  }
+
+  /* The Markdown view showing a note, if one is open. */
+  viewOf(path) {
+    for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+      if (leaf.view instanceof MarkdownView && leaf.view.file && leaf.view.file.path === path) return leaf.view;
+    }
+    return null;
+  }
+
+  /* A note's text now: from its open editor (which may be ahead of the file), else from the file; null if it is gone. */
+  async noteText(path) {
+    const view = this.viewOf(path);
+    if (view) return view.getViewData();
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file || typeof file.extension !== 'string') return null;
+    return this.app.vault.cachedRead(file);
+  }
+
+  /* Puts a note back to `text` (a rewind): one change in its editor, which the editor's Undo takes back, or the file
+     itself if the note isn't open for editing. Runs of edits made after `clock` no longer mean anything and go. */
+  async restoreNote(path, text, clock) {
+    const view = this.viewOf(path);
+    const cm = view && view.getMode() === 'source' && view.editor && view.editor.cm;
+    if (cm) {
+      const change = spliceChange(cm.state.doc.toString(), text);
+      if (change) cm.dispatch({ changes: change, userEvent: 'lagrange.rewind' });
+    } else {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!file) throw new Error('the note is no longer in the vault');
+      await this.app.vault.modify(file, text);
+    }
+    const gone = this.edits.filter(r => r.path === path && r.clock > clock);
+    this.edits = this.edits.filter(r => !gone.includes(r));
+    for (const r of gone) { r.undone = true; r.redo = null; this.announce(r); }
+    const chat = this.chatView();
+    if (chat) chat.refreshHistory();
   }
 
   async ensureEditing(view) {
@@ -3303,15 +3793,10 @@ class LagrangePlugin extends Plugin {
     const skipped = skippedBefore.concat(result.skipped);
     let record = null;
     if (cm && result.applied.length && result.changes && !result.changes.empty) {
-      record = {
-        view: cm, editor: view.editor, docBefore: result.docBefore, docAfter: cm.state.doc,
-        inverse: result.changes.invert(result.docBefore), since: ChangeSet.empty(cm.state.doc.length),
-        viaHistory: false, undone: false,
-      };
-      this.lastEdit = record;
+      record = this.recordEdit(cm, view.editor, view.file ? view.file.path : null, result);
     }
-    const onUndo = record ? () => this.undoLastEdit(record) : null;
-    if (task) task.report({ applied: result.applied, skipped }, onUndo);
+    const onUndo = record ? () => this.undoEdit(record) : null;
+    if (task) task.report({ applied: result.applied, skipped }, record);
     const n = result.applied.length;
     if (n) {
       const frag = createFragment(f => {
@@ -3489,7 +3974,8 @@ LagrangePlugin.rangeRects = rangeRects;
 LagrangePlugin.internals = {
   DEFAULT_SETTINGS, ANTHROPIC_MODELS, ANTHROPIC_VERSION, FALLBACK_BETA, sanitizeSettings, anthropicModelId,
   LOADER_THEMES, LOADER_CAPTIONS, EFFORTS, CLAUDE_CODE_MODELS, effortSupported, effortFor, modelChoices, setModel, footLabel, modelLabel,
-  splitAgentReply, parseAgentReply, locateOps, demoChatEdits, mathSegments, hasMath, penScript, renderPenMath, trailBands,
+  rewindTo, userChangedSince, pruneCheckpoints, spliceChange, undoTarget, redoTarget, CHECKPOINTS_KEPT, CHECKPOINT_CHARS,
+  splitAgentReply, parseAgentReply, locateOps, demoChatEdits, mathSegments, hasMath, hasCode, typeCadence, penScript, renderPenMath, trailBands,
   createSSEParser, jsonValuesIn, parseEdits, findAll, looseFindAll, locateEdits, clipText, cleanRevision,
   parseErrorBody, describeError, noteStats, excerpt, demoProofreadEdits, demoRevise, demoChatReply,
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,
