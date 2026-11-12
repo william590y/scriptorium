@@ -312,6 +312,11 @@ def find_package(explicit):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):   # a console that cannot show a character shows "?" instead of failing
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(description="Set up Scriptorium in an Obsidian vault, keeping its notes and settings.")
     parser.add_argument("vault", help="the vault's folder (it must exist)")
     parser.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")

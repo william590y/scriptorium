@@ -63,7 +63,10 @@ class Tool:
         self.name, self._plan, self._setup = name, plan, setup
 
     def _run(self, cmd):
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace")
+        # The children write UTF-8 (the script and Node do when asked; the exe's few non-ASCII characters may not
+        # survive a Windows console code page, which is fine: the checks look at ASCII text and at the files).
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace", env=env)
         for line in (r.stdout + r.stderr).splitlines():
             print("      | " + line)
         return r
@@ -324,6 +327,10 @@ def test_same_result(found, work):
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # a Windows console code page cannot print everything
+    except (AttributeError, ValueError):
+        pass
     if len(sys.argv) > 2:
         sys.exit("usage: test_setup_vault.py [Scriptorium-Setup.exe]")
     exe = Path(sys.argv[1]).resolve() if len(sys.argv) == 2 else None
