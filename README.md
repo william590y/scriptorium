@@ -275,8 +275,8 @@ What setting up does, and does not do:
 
 - It writes only inside the vault's `.obsidian` folder. **No note is touched**, nothing is deleted, and the sample
   note and README of the Scriptorium vault are not brought along.
-- Scriptorium's own files are added: the `manuscript` snippet, the Typewriter theme, and the Scriptorium, Lagrange,
-  Manuscriptum and Typewriter Mode plugins. A file of the same name that differs is replaced.
+- Scriptorium's own files are added: the `manuscript` snippet, the Typewriter theme, and the Scriptorium (with its
+  sets of drop caps), Lagrange, Manuscriptum and Typewriter Mode plugins. A file of the same name that differs is replaced.
 - Your settings are merged, not overwritten. Your community plugins stay on and Scriptorium's are added to the list;
   your snippets stay on and `manuscript` is added; the theme becomes Typewriter; Scriptorium's text size (22) is set
   only if you have not chosen one. A plugin's own settings (`data.json`) are written only if it has none. Your hotkeys,

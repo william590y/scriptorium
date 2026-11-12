@@ -51,7 +51,7 @@ import zipfile
 from pathlib import Path
 
 PACKAGE_URL = "https://williamliaw.com/assets/downloads/Scriptorium.zip"
-PACKAGE_SHA256 = "dbfa94f7ebb5a836c990bd23079ab1d6a724fd8ae0040806329f1631973ea194"   # the same pin as the installers'
+PACKAGE_SHA256 = "855ceb85e9c3760fbaa956d9845f0b370bab5010dc3fb548a6687b26ada66dd3"   # the same pin as the installers'
 
 OBS = ".obsidian"
 BACKUP_PREFIX = "scriptorium-backup-"
@@ -63,7 +63,8 @@ PLUGIN_CODE = ("main.js", "manifest.json", "styles.css", "LICENSE")
 # sample vault's windows).
 REPLACE = {f"{OBS}/snippets/manuscript.css", f"{OBS}/plugins/lagrange/LagrangeHand-OFL.txt"} | {
     f"{OBS}/plugins/{p}/{f}" for p in BUNDLED_PLUGINS for f in PLUGIN_CODE}
-REPLACE_UNDER = f"{OBS}/themes/Typewriter/"
+# the Typewriter theme, and the sets of drop caps that come with the Scriptorium plugin
+REPLACE_UNDER = (f"{OBS}/themes/Typewriter/", f"{OBS}/plugins/scriptorium/dropcaps/")
 ADD_IF_MISSING = {f"{OBS}/core-plugins.json"} | {f"{OBS}/plugins/{p}/data.json" for p in BUNDLED_PLUGINS}
 PLUGINS_JSON = f"{OBS}/community-plugins.json"
 APPEARANCE_JSON = f"{OBS}/appearance.json"

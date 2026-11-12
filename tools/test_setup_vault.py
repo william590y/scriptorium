@@ -40,7 +40,8 @@ BUNDLED = ("scriptorium", "manuscriptum", "typewriter-mode", "lagrange")
 # Scriptorium's own files: setting up must make each of these equal to the package.
 MANAGED = [f"{OBS}/snippets/manuscript.css", f"{OBS}/plugins/lagrange/LagrangeHand-OFL.txt"] + [
     f"{OBS}/plugins/{p}/{f}" for p in BUNDLED for f in ("main.js", "manifest.json", "styles.css", "LICENSE")
-] + sorted(p.relative_to(PACKAGE).as_posix() for p in (PACKAGE / OBS / "themes" / "Typewriter").iterdir())
+] + sorted(p.relative_to(PACKAGE).as_posix() for p in (PACKAGE / OBS / "themes" / "Typewriter").iterdir()) + sorted(
+    p.relative_to(PACKAGE).as_posix() for p in (PACKAGE / OBS / "plugins" / "scriptorium" / "dropcaps").rglob("*") if p.is_file())
 # Written only where the vault has none of its own.
 DEFAULTS = [f"{OBS}/core-plugins.json"] + [f"{OBS}/plugins/{p}/data.json" for p in BUNDLED
                                            if (PACKAGE / OBS / "plugins" / p / "data.json").exists()]

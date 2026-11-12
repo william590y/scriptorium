@@ -1614,7 +1614,7 @@ function setupRule(rel) {
   if (rel === '.obsidian/app.json') return 'app';
   if (rel === '.obsidian/core-plugins.json') return 'missing';
   if (rel === '.obsidian/snippets/manuscript.css' || rel === '.obsidian/plugins/lagrange/LagrangeHand-OFL.txt') return 'replace';
-  if (rel.startsWith('.obsidian/themes/Typewriter/')) return 'replace';
+  if (rel.startsWith('.obsidian/themes/Typewriter/') || rel.startsWith('.obsidian/plugins/scriptorium/dropcaps/')) return 'replace';   // the theme; the plugin's own sets of drop caps
   const m = rel.match(/^\.obsidian\/plugins\/([^/]+)\/([^/]+)$/);
   if (!m) return null;
   if (SETUP_PLUGINS.includes(m[1])) return SETUP_CODE.includes(m[2]) ? 'replace' : (m[2] === 'data.json' ? 'missing' : null);
