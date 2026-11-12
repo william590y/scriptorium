@@ -13,7 +13,8 @@ quiet admonitions and a focused view of images, after [gwern.net](https://gwern.
 - **Lagrange** (`vault/.obsidian/plugins/lagrange`), a writing companion: a chat about the open note, and edits
   (revise a selection, proofread a note) that a pen strikes through and writes in;
 - **Scriptorium Setup** (`installer/`), a small Windows installer that creates a new vault from the template and, if
-  you tick them, installs Obsidian, the fonts and the Longform plugin;
+  you tick them, installs Obsidian, the fonts and the Longform plugin, then opens the vault in Obsidian with its
+  plugins on;
 - **script installers** for Windows, macOS and Linux (`installers/`).
 
 Screenshots of both modes: <https://williamliaw.com/scriptorium>
@@ -88,7 +89,10 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   [latest release](https://github.com/william590y/scriptorium/releases/latest), open it, choose the vault folder and
   click **Install**. It creates a new vault folder (or fills an empty one; any other existing folder is never changed)
   and, if you tick them, installs Obsidian, EB Garamond and Cormorant Garamond for the current user, and downloads the
-  Longform plugin. No administrator rights are needed.
+  Longform plugin. No administrator rights are needed. With **Open the vault in Obsidian and turn on its plugins**
+  ticked (the default), it then opens the new vault in Obsidian with its community plugins on, so Obsidian does not ask
+  whether to trust the vault's author (see [Opening the vault](#opening-the-vault-with-its-plugins-on)). If Obsidian
+  is open at that point, Setup asks you to close it and choose **Retry**, or **Cancel** to skip this.
 - **Updating (Windows):** open a newer `Scriptorium-Setup.exe` and choose your vault folder (by default
   `Documents\Scriptorium`). When the folder is a Scriptorium vault, the button reads **Update** and the window says which
   version is in it. Update replaces Scriptorium's own files with the new ones: the `manuscript` snippet, the code of the
@@ -98,15 +102,44 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   back, and nothing is deleted. It turns the `manuscript` snippet and Scriptorium's community plugins back on if they
   were off, leaving your own snippets and plugins as they are. Every file it replaces is first copied to
   `.obsidian\scriptorium-backup-<date>-<time>\`, and if anything fails half-way the vault is put back as it was.
-  Restart Obsidian (or reload the vault) afterwards.
+  Restart Obsidian (or reload the vault) afterwards. (An updated vault is one Obsidian already knows, so **Open
+  Obsidian when done** only starts Obsidian.)
 - **Script installers:** `installers/Install-Scriptorium-Windows.cmd`, `Install-Scriptorium-macOS.command` and
   `Install-Scriptorium-Linux.sh` do the same from a terminal; they download the configuration from
-  williamliaw.com, pinned by SHA-256.
+  williamliaw.com, pinned by SHA-256. They always open the new vault in Obsidian with its plugins on, as Setup does,
+  and say what they did; if Obsidian is open they say so and leave the vault for **Open folder as vault**. On Linux
+  this works with the AppImage (which the script installs if it finds no Obsidian) and with an Obsidian on `PATH` that
+  has its `obsidian-cli` next to it (the `.deb`); a Snap or Flatpak Obsidian keeps its vault list elsewhere, so the
+  script only opens Obsidian's vault switcher. The Linux script needs `python3` and `pgrep` for this.
 - **Manual:** extract `Scriptorium.zip` from the latest release, open the folder as a vault in Obsidian, install
   [EB Garamond](https://fonts.google.com/specimen/EB+Garamond) and
   [Cormorant Garamond](https://fonts.google.com/specimen/Cormorant+Garamond), then open **Lorem Ipsum** in Reading
   view. Enable community plugins to use the Fancy mode switch. Longform is enabled in the configuration but not
   included; install it from **Settings → Community plugins**.
+
+### Opening the vault with its plugins on
+
+The first time Obsidian opens a vault that comes with community plugins, it asks whether you trust the vault's author,
+and keeps the answer in its own storage, which nothing else should write. Obsidian 1.12 and later has a command line
+interface that can give the same answer: `plugins:restrict off` does what the question's
+**Trust author and enable plugins** does. The interface works only while `"cli": true` is in Obsidian's `obsidian.json`
+(its switch is in **Settings → General → Advanced**), which Obsidian reads when it starts and rewrites while it runs. So
+the installers, with Obsidian closed:
+
+1. add the new vault to the vault list in `obsidian.json` (`%APPDATA%\obsidian`, `~/Library/Application
+   Support/obsidian` or `~/.config/obsidian`), keeping every other vault and setting, and set `"cli": true`;
+2. start Obsidian on the vault;
+3. send `vault=<id> plugins:restrict off` until Obsidian answers (it then reloads the vault with the plugins on), and
+   wait for the reloaded vault to report `plugins:restrict` = `off`;
+4. turn the command line interface off again through Obsidian itself (its own setting switch), unless it was on
+   before.
+
+They talk to Obsidian the way its own client does: Setup and the Windows script through the pipe
+`\\.\pipe\obsidian-cli-<user>`, the macOS and Linux scripts with the `obsidian-cli` that comes with Obsidian. If
+anything fails, the vault is open and Obsidian asks its usual question; the interface is still turned off, through
+Obsidian, or in `obsidian.json` once Obsidian has closed (if Obsidian stops answering, a small background process
+waits for it to close). An Obsidian older than 1.12 has no command line interface: the vault is opened and Obsidian
+asks. To review the plugins later, or to turn them off, use **Settings → Community plugins → Restricted mode**.
 
 ## Building
 
@@ -145,6 +178,14 @@ without Longform and without downloading anything. `python3 tools/test_update.py
 (edited notes, settings and snippets kept, Scriptorium's files replaced and backed up, settings merged, unreadable JSON
 left alone, other folders refused, a failure half-way undone); CI runs it on Windows, and it runs under Mono elsewhere
 (`MONO=<prefix>`).
+
+`Scriptorium-Setup.exe --register-only <obsidian.json> <vault> [--cli]` adds a vault to the vault list in the given
+`obsidian.json`, as opening the vault does. `python3 tools/test_auto_open.py dist/Scriptorium-Setup.exe` runs the same
+cases (no file yet, other vaults and settings kept, a vault already listed, `"cli"` on, off or missing and put back,
+unreadable files left alone) against Setup and against each script's own editor of the file (the Windows script's C#
+class, the Linux script's Python and the macOS script's JavaScript, the last with Node); CI runs it on Windows, and the
+scripts' part (`--scripts-only`) on Linux. `Scriptorium-Setup.exe --auto-open-only <vault> <Obsidian.exe>` opens a
+vault in Obsidian as **Install** does and prints each command and Obsidian's answer.
 
 To look at the window without installing anything, run `Scriptorium-Setup.exe --render screenshots` on Windows: it
 draws the window offscreen in each of its states (ready, downloading, installing, done, failed, updating a vault, and the
@@ -211,7 +252,8 @@ Scriptorium Setup downloads the following, and only when you tick the matching o
 - the Longform plugin's official release, from its GitHub releases (`github.com/kevboh/longform`).
 
 Each download is verified against a SHA-256 hash pinned in the installer. Nothing is uploaded, and there is no
-telemetry, analytics or update check. The Scriptorium plugin makes no network requests.
+telemetry, analytics or update check. Opening the new vault with its plugins on talks only to Obsidian on the same
+computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests.
 
 Lagrange, the writing companion, sends the open note and what you write to it to the provider you choose in its
 settings (Anthropic's API at `api.anthropic.com`, or the OpenAI-compatible server whose address you enter), and only

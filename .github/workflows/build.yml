@@ -78,6 +78,10 @@ jobs:
         shell: pwsh
         run: python tools/test_update.py dist/Scriptorium-Setup.exe
 
+      - name: Test adding a vault to Obsidian's vault list (Setup and the Windows script)
+        shell: pwsh
+        run: python tools/test_auto_open.py dist/Scriptorium-Setup.exe
+
       - name: Render the window (screenshots for review)
         shell: pwsh
         timeout-minutes: 5
@@ -131,6 +135,20 @@ jobs:
           python3 tools/build_zip.py dist/Scriptorium.zip
           echo "$WINDOWS_ZIP_SHA256  dist/Scriptorium.zip" | sha256sum -c -
 
+  script-tests:
+    name: Check the macOS and Linux script installers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntax, and how they add a vault to Obsidian's vault list
+        run: |
+          bash -n installers/Install-Scriptorium-Linux.sh
+          bash -n installers/Install-Scriptorium-macOS.command
+          python3 tools/test_auto_open.py --scripts-only
+
   plugin-tests:
     name: Test the Scriptorium and Lagrange plugins (Node)
     runs-on: ubuntu-latest
@@ -149,7 +167,7 @@ jobs:
   release:
     name: Publish the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, zip-reproducible, plugin-tests]
+    needs: [build, zip-reproducible, script-tests, plugin-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
