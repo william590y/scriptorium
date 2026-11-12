@@ -24,6 +24,93 @@ function normalizeSettings(saved) {
   return settings;
 }
 
+/* ==========================================================
+   A drop cap for one note
+   ==========================================================
+   A note can ask for a drop cap of its own with the property "dropcap" (yinit, goudy, plain or none); without it the
+   note has the vault's (Settings → Scriptorium → Drop cap). "Scriptorium: Choose the drop cap for this note" sets
+   it, showing each choice in the note as you move through the list. In Reading view (and wherever a note is
+   rendered: embeds, hover previews, PDF export) the plugin marks each block of such a note with .scriptorium-dropcap
+   and .scriptorium-dropcap-<which>; the snippet does the rest. */
+
+const DROPCAP_KEYS = ['dropcap', 'drop-cap', 'dropCap', 'drop cap'];
+
+/* The drop cap a note's properties ask for: 'yinit' | 'goudy' | 'plain' | 'none', or null (the vault's). Forgiving
+   about case, about the labels in the settings ("Goudy Initialen") and about no/off/false for none. */
+function noteDropcap(frontmatter) {
+  if (!frontmatter || typeof frontmatter !== 'object') return null;
+  let v;
+  for (const k of DROPCAP_KEYS) if (k in frontmatter) { v = frontmatter[k]; break; }
+  if (v === false) return 'none';
+  if (typeof v !== 'string') return null;
+  const t = v.trim().toLowerCase();
+  if (['none', 'no', 'off', 'false'].includes(t)) return 'none';
+  if (t.startsWith('yinit')) return 'yinit';
+  if (t.startsWith('goudy')) return 'goudy';
+  if (t.startsWith('plain') || t.startsWith('cormorant')) return 'plain';
+  return null;
+}
+
+/* Marks (or unmarks) one rendered block with a note's drop cap. */
+function markDropcap(el, which) {
+  for (const c of Array.from(el.classList)) if (c.startsWith('scriptorium-dropcap')) el.classList.remove(c);
+  if (which) el.classList.add('scriptorium-dropcap', `scriptorium-dropcap-${which}`);
+}
+
+/* The choices of the command: the vault's, then each drop cap. */
+function dropcapChoices(vaultInitials) {
+  const name = (INITIALS.find(([value]) => value === vaultInitials) || INITIALS[0])[1];
+  return [{ value: null, label: `The vault’s drop cap (${name})` }].concat(INITIALS.map(([value, label]) => ({ value, label })));
+}
+
+class DropcapModal extends Modal {
+  constructor(plugin, view) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.view = view;
+    this.chosen = false;
+  }
+
+  onOpen() {
+    const file = this.view.file;
+    this.modalEl.addClass('scriptorium-dropcap-modal');
+    this.titleEl.setText('Drop cap for this note');
+    const cache = this.app.metadataCache.getFileCache(file);
+    const current = noteDropcap(cache && cache.frontmatter);
+    this.contentEl.createEl('p', { cls: 'scriptorium-dropcap-file', text: file.basename });
+    const list = this.contentEl.createDiv({ cls: 'scriptorium-dropcap-list', attr: { role: 'listbox', 'aria-label': 'Drop cap' } });
+    const items = [];
+    for (const choice of dropcapChoices(this.plugin.settings.initials)) {
+      const item = list.createEl('button', {
+        cls: 'scriptorium-dropcap-choice', text: choice.label,
+        attr: { role: 'option', 'aria-selected': String(choice.value === current) },
+      });
+      if (choice.value === current) item.addClass('is-current');
+      // Moving through the list shows each drop cap in the note; nothing is saved until one is chosen.
+      const show = () => this.plugin.previewDropcap(this.view, choice.value);
+      item.addEventListener('focus', show);
+      item.addEventListener('mouseenter', () => item.focus());
+      item.addEventListener('click', () => { this.chosen = true; this.close(); void this.plugin.setNoteDropcap(file, choice.value); });
+      item.addEventListener('keydown', ev => {
+        const i = items.indexOf(item);
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); items[(i + 1) % items.length].focus(); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); items[(i + items.length - 1) % items.length].focus(); }
+      });
+      items.push(item);
+    }
+    this.contentEl.createEl('p', {
+      cls: 'scriptorium-dropcap-hint',
+      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view, where drop caps are drawn.',
+    });
+    window.setTimeout(() => (items.find(i => i.hasClass('is-current')) || items[0]).focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.chosen) this.plugin.previewDropcap(this.view, undefined);   // back to what the note says
+  }
+}
+
 class ScriptoriumSettings extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -108,7 +195,11 @@ function wrapWord(nodes, a, b) {
 
 function keepFirstLineWords(p) {
   unwrapKept(p);
-  if (!p.isConnected || !p.matches(KEEP_SEL) || document.body.classList.contains('scriptorium-initials-none')) return;
+  // No drop cap, no small caps: the note's own choice first, then the vault's.
+  const block = p.parentElement;
+  const none = block && block.classList.contains('scriptorium-dropcap')
+    ? block.classList.contains('scriptorium-dropcap-none') : document.body.classList.contains('scriptorium-initials-none');
+  if (!p.isConnected || !p.matches(KEEP_SEL) || none) return;
   const nodes = [], walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
   let n;
   while ((n = walker.nextNode())) if (!n.parentElement.closest('mjx-container, .math, code')) nodes.push(n);
@@ -1382,8 +1473,30 @@ class Scriptorium extends Plugin {
         try { keepFirstLineWords(p); } catch (e) { /* never break rendering */ }
       }
     });
-    this.registerMarkdownPostProcessor(el => {
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      markDropcap(el, noteDropcap(ctx && ctx.frontmatter));   // a note's own drop cap (see "A drop cap for one note")
       el.querySelectorAll(':scope > p').forEach(p => { this.kept.add(p); this.resizeObserver.observe(p); });
+    });
+    // When a note's "dropcap" property changes, its Reading views are drawn again with the new one.
+    this.dropcaps = new Map();
+    this.registerEvent(this.app.metadataCache.on('changed', (file, data, cache) => {
+      const now = noteDropcap(cache && cache.frontmatter);
+      if (this.dropcaps.has(file.path) ? this.dropcaps.get(file.path) === now : now === null) { this.dropcaps.set(file.path, now); return; }
+      this.dropcaps.set(file.path, now);
+      for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+        const view = leaf.view;
+        if (view instanceof MarkdownView && view.file && view.file.path === file.path) this.previewDropcap(view, now);
+      }
+    }));
+    this.addCommand({
+      id: 'choose-dropcap',
+      name: 'Choose the drop cap for this note',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) new DropcapModal(this, view).open();
+        return true;
+      }
     });
     this.registerEvent(this.app.workspace.on('css-change', () => this.recheck()));
     if (document.fonts) this.registerDomEvent(document.fonts, 'loadingdone', () => this.recheck());
@@ -1394,6 +1507,31 @@ class Scriptorium extends Plugin {
     this.imageFocus.load();
     this.applyMode();
     this.applyFeatures();
+  }
+
+  /* Shows a drop cap in a note's Reading view without saving it: which is 'yinit' | 'goudy' | 'plain' | 'none', null
+     for the vault's, or undefined for what the note's properties say. */
+  previewDropcap(view, which) {
+    if (which === undefined) {
+      const cache = view.file && this.app.metadataCache.getFileCache(view.file);
+      which = noteDropcap(cache && cache.frontmatter);
+    }
+    const root = view.containerEl.querySelector('.markdown-preview-view');
+    if (!root) return;
+    root.querySelectorAll('.markdown-preview-sizer > div').forEach(el => markDropcap(el, which));
+    this.recheck();
+  }
+
+  /* Saves a note's drop cap in its properties (null removes the property: the vault's drop cap). */
+  async setNoteDropcap(file, which) {
+    try {
+      await this.app.fileManager.processFrontMatter(file, fm => {
+        for (const k of DROPCAP_KEYS) if (k !== 'dropcap') delete fm[k];
+        if (which) fm.dropcap = which; else delete fm.dropcap;
+      });
+    } catch (e) {
+      new Notice(`Could not save the drop cap in this note’s properties: ${e.message}`);
+    }
   }
 
   recheck() {
@@ -1455,5 +1593,6 @@ module.exports = Scriptorium;
 Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
-  setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder
+  setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
+  noteDropcap, dropcapChoices, markDropcap
 });

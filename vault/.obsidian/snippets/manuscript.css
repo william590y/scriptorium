@@ -50,20 +50,32 @@
    these classes on body. Each initial is a three-line drop, like Yinit's: its top on the first line's cap height, its
    foot on the third baseline, and the fourth line back at the margin (the rules themselves are in section 5 of each
    mode below). With "None" the opening paragraph starts with an ordinary letter and no small caps, and is justified
-   like any other paragraph. A footnote shown in Obsidian's hover popover is not a chapter opening, so it never has one. */
-body.scriptorium-initials-goudy {
+   like any other paragraph. A footnote shown in Obsidian's hover popover is not a chapter opening, so it never has one.
+   One note can have a drop cap of its own (the command "Scriptorium: Choose the drop cap for this note" writes
+   "dropcap: goudy" and the like in its properties): the plugin then marks each block of that note with
+   .scriptorium-dropcap and .scriptorium-dropcap-<which>, which outrank the classes on body. */
+body.scriptorium-initials-goudy,
+.el-p.scriptorium-dropcap-goudy {
   --scriptorium-initial-font: "Scriptorium Goudy", var(--manuscript-display);
   --scriptorium-initial-size: 4.43em;                     /* Goudy's letters are 0.8 em squares standing on the baseline */
   --scriptorium-initial-margin: 0.088em 0.1em -0.15em 0;
 }
-body.scriptorium-initials-plain {
+body.scriptorium-initials-plain,
+.el-p.scriptorium-dropcap-plain {
   --scriptorium-initial-font: var(--manuscript-display);  /* a plain Cormorant Garamond capital */
   --scriptorium-initial-size: 5.68em;                     /* Cormorant's capitals are 0.625 em tall */
   --scriptorium-initial-weight: 500;
   --scriptorium-initial-margin: -0.118em 0.06em -0.13em 0;
 }
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p::first-letter,
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p::first-letter,
+.el-p.scriptorium-dropcap-yinit {                         /* a note that asks for Yinit where the vault's is another */
+  --scriptorium-initial-font: "Scriptorium Yinit", var(--manuscript-display);
+  --scriptorium-initial-size: 3.667em;
+  --scriptorium-initial-weight: normal;
+  --scriptorium-initial-margin: 0.18em 0.15em -0.1em 0;
+}
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p:not(.scriptorium-dropcap) > p::first-letter,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p::first-letter,
+body .markdown-rendered .el-p.scriptorium-dropcap.scriptorium-dropcap-none > p::first-letter,
 .markdown-embed[data-type="footnote"] .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p::first-letter {
   float: none;
   font: inherit;
@@ -72,14 +84,17 @@ body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h
   margin: 0;
   padding: 0;
 }
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p::first-line,
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p::first-line,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p:not(.scriptorium-dropcap) > p::first-line,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p::first-line,
+body .markdown-rendered .el-p.scriptorium-dropcap.scriptorium-dropcap-none > p::first-line,
 .markdown-embed[data-type="footnote"] .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p::first-line {
   font-variant-caps: normal;
   letter-spacing: normal;
 }
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p,
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p {
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p:not(.scriptorium-dropcap) > p,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p,
+.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-none > p,
+.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-none > p {
   text-align: justify;
 }
 

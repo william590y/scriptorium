@@ -313,3 +313,37 @@ test('set up a vault: the folder typed or chosen', () => {
   assert.equal(S.setupFolder(win, 'C:\\'), 'C:\\');
   assert.equal(S.setupFolder(win, 'Notes\\Mine'), '');
 });
+
+
+// ---------------------------------------------------------------- a drop cap for one note
+test('a note’s drop cap: read from its properties, forgiving about spelling; anything else is the vault’s', () => {
+  for (const [fm, want] of [
+    [{ dropcap: 'goudy' }, 'goudy'], [{ dropcap: 'Goudy Initialen' }, 'goudy'], [{ dropcap: ' YINIT ' }, 'yinit'],
+    [{ dropcap: 'plain' }, 'plain'], [{ dropcap: 'Cormorant' }, 'plain'], [{ dropcap: 'none' }, 'none'],
+    [{ dropcap: 'off' }, 'none'], [{ dropcap: false }, 'none'], [{ 'drop-cap': 'goudy' }, 'goudy'], [{ dropCap: 'none' }, 'none'],
+    [{ dropcap: 'comic-sans' }, null], [{ dropcap: '' }, null], [{ dropcap: true }, null], [{ dropcap: 3 }, null], [{ dropcap: null }, null],
+    [{ title: 'x' }, null], [{}, null], [null, null], [undefined, null], ['goudy', null],
+  ]) assert.equal(S.noteDropcap(fm), want, JSON.stringify(fm));
+});
+
+test('a note’s drop cap: the command offers the vault’s and each drop cap; a block is marked and unmarked', () => {
+  const choices = S.dropcapChoices('goudy');
+  assert.deepEqual(choices.map(c => c.value), [null, 'yinit', 'goudy', 'plain', 'none']);
+  assert.match(choices[0].label, /vault’s drop cap \(Goudy Initialen/);
+  assert.match(S.dropcapChoices('nonsense')[0].label, /Yinit/);
+  const classes = new Set(['el-p', 'scriptorium-dropcap', 'scriptorium-dropcap-none']);
+  const el = { classList: { add: (...c) => c.forEach(x => classes.add(x)), remove: c => classes.delete(c), [Symbol.iterator]: () => classes[Symbol.iterator]() } };
+  S.markDropcap(el, 'goudy');
+  assert.deepEqual([...classes].sort(), ['el-p', 'scriptorium-dropcap', 'scriptorium-dropcap-goudy']);
+  S.markDropcap(el, null);
+  assert.deepEqual([...classes], ['el-p']);
+});
+
+test('a note’s drop cap: the snippet has a rule for each, and the vault’s "None" gives way to a note’s own', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8');
+  for (const which of ['yinit', 'goudy', 'plain']) assert.match(css, new RegExp(`\\.el-p\\.scriptorium-dropcap-${which}[\\s,{]`), which);
+  assert.match(css, /\.scriptorium-dropcap\.scriptorium-dropcap-none > p::first-letter/);
+  const none = css.split('\n').filter(l => l.startsWith('body.scriptorium-initials-none '));
+  assert.ok(none.length >= 6);
+  for (const l of none) assert.match(l, /\.el-p:not\(\.scriptorium-dropcap\) > p/, l);
+});
