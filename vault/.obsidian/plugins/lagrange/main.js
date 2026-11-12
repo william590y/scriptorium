@@ -13,8 +13,9 @@
  *
  * Map of this file:
  *   1. Settings and constants
- *   2. Pure helpers: SSE parsing, edit JSON parsing, locating edits, clipping notes, error messages, demo replies.
- *      They touch neither the DOM nor Obsidian; plugins-tests/lagrange.test.js tests them under Node.
+ *   2. Pure helpers: SSE parsing, edit JSON parsing, locating edits, edits in a chat reply, the pen's script (with
+ *      its mathematics) and trail, clipping notes, error messages, demo replies. They touch neither the DOM nor
+ *      Obsidian; plugins-tests/lagrange.test.js tests them under Node.
  *   3. Providers: Anthropic Messages API, OpenAI API and OpenAI-compatible chat completions, a Claude subscription
  *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline). The only requests the plugin makes
  *      are to the provider chosen in its settings, when the writer asks for something.
@@ -24,7 +25,8 @@
  *      Each replaceable section runs from its "==== LAGRANGE … (replaceable) ====" line to its "==== END …" line,
  *      here and in styles.css.
  *   6. Edit runs: the editor is locked while the pen writes, and all of a request's edits become one undo step
- *   7. The chat view, the revise modal, the settings tab and the plugin
+ *   7. The chat view (with the model and effort picker in its footer), the revise modal, the settings tab and the
+ *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits).
  */
 'use strict';
 
@@ -58,8 +60,13 @@ const MAX_TOKENS_CUSTOM = 8192;    // a custom model ID may be an older model wi
 // says so. Local models often run with small context windows, hence the smaller figure.
 const NOTE_LIMIT = { anthropic: 120000, 'claude-code': 120000, 'openai-api': 120000, codex: 80000, openai: 24000, demo: 120000 };
 
+const LOADER_THEMES = ['random', 'clockwork', 'alchemy', 'orbit'];
+// Reasoning effort, where the provider and model take one; '' leaves it to the provider's own default.
+const EFFORTS = ['low', 'medium', 'high'];
+const CLAUDE_CODE_MODELS = ['sonnet', 'opus', 'haiku'];   // Claude Code's aliases for the latest of each
+
 const DEFAULT_SETTINGS = {
-  provider: 'anthropic',              // 'anthropic' | 'claude-code' | 'openai-api' | 'codex' | 'openai' | 'demo'
+  provider: 'claude-code',            // 'claude-code' | 'anthropic' | 'codex' | 'openai-api' | 'openai' | 'demo'
   anthropicApiKey: '',
   anthropicModel: 'claude-sonnet-5-5', // an ANTHROPIC_MODELS id, or 'custom'
   anthropicCustomModel: '',
@@ -73,9 +80,12 @@ const DEFAULT_SETTINGS = {
   claudeCodeModel: 'sonnet',
   codexPath: '',                       // ChatGPT subscription via Codex; empty = look in the usual places
   codexModel: '',
-  loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'
+  effort: '',                         // '' (the provider's default) | 'low' | 'medium' | 'high'; see effortFor
+  agenticEdits: true,                 // a chat message may edit the open note with the pen; off: the chat only talks
+  loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
+  penTrail: true,                     // a fading line of ink behind the pen's nib as it moves
 };
 
 function sanitizeSettings(saved) {
@@ -86,16 +96,91 @@ function sanitizeSettings(saved) {
     }
   }
   if (!['anthropic', 'claude-code', 'openai-api', 'codex', 'openai', 'demo'].includes(s.provider)) s.provider = DEFAULT_SETTINGS.provider;
-  if (!['random', 'clockwork', 'alchemy', 'trebuchet', 'orbit'].includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
+  // A plate that no longer exists (a saved 'trebuchet', from 0.1) falls back to 'random'.
+  if (!LOADER_THEMES.includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
   if (s.anthropicModel !== 'custom' && !ANTHROPIC_MODELS.some(m => m.id === s.anthropicModel)) {
     s.anthropicModel = DEFAULT_SETTINGS.anthropicModel;
   }
   if (!(s.penSpeed >= 0.5 && s.penSpeed <= 3)) s.penSpeed = DEFAULT_SETTINGS.penSpeed;
+  if (!EFFORTS.includes(s.effort)) s.effort = '';
   return s;
 }
 
 function anthropicModelId(s) {
   return s.anthropicModel === 'custom' ? String(s.anthropicCustomModel || '').trim() : s.anthropicModel;
+}
+
+/* Which models take a reasoning effort. Anthropic: `output_config.effort`, on Claude Opus 4.5 and every later Opus,
+   Sonnet 4.6 and later, Haiku 5.5 and later, Fable and Mythos (older models answer 400). OpenAI: `reasoning_effort`,
+   on the reasoning models only (the o-series and GPT-5 and later, but not their "chat" variants). */
+const ANTHROPIC_EFFORT_RE = /^claude-(?:(?:fable|mythos)-|opus-(?:4-[5-9]|[5-9])|sonnet-(?:4-[6-9]|[5-9])|haiku-[5-9])/;
+const OPENAI_EFFORT_RE = /^(?:o[1-9]|gpt-[5-9])/i;
+
+/* Whether the chosen provider and model take a reasoning effort at all. Claude Code has `--effort`, Codex the
+   `model_reasoning_effort` setting. A local OpenAI-compatible server is sent none (most reject or ignore it), and the
+   demo has no model. */
+function effortSupported(s) {
+  if (s.provider === 'claude-code' || s.provider === 'codex') return true;
+  if (s.provider === 'anthropic') return ANTHROPIC_EFFORT_RE.test(anthropicModelId(s));
+  if (s.provider === 'openai-api') {
+    const m = String(s.openaiPlatformModel || '').trim();
+    return OPENAI_EFFORT_RE.test(m) && !/chat/i.test(m);
+  }
+  return false;
+}
+
+/* The effort to send with a request: the chosen one where it is supported, otherwise '' (send nothing). */
+function effortFor(s) {
+  return EFFORTS.includes(s.effort) && effortSupported(s) ? s.effort : '';
+}
+
+/* What the footer's model picker offers for the current provider:
+   {provider, options: [{value, label}], current, free, placeholder}. `free` says a model can also be typed in. */
+function modelChoices(s) {
+  const out = (provider, options, current, free, placeholder) => {
+    current = String(current || '').trim();
+    if (current && !options.some(o => o.value === current)) options.push({ value: current, label: current });
+    return { provider, options, current, free, placeholder: placeholder || '' };
+  };
+  switch (s.provider) {
+    case 'anthropic':
+      return out('Claude: API key', ANTHROPIC_MODELS.map(m => ({ value: m.id, label: m.name })), anthropicModelId(s), true, 'claude-…');
+    case 'claude-code':
+      return out('Claude: my subscription', CLAUDE_CODE_MODELS.map(m => ({ value: m, label: m[0].toUpperCase() + m.slice(1) })),
+        s.claudeCodeModel, true, 'a full model ID');
+    case 'codex':
+      return out('ChatGPT: my subscription', [{ value: '', label: 'Codex’s default' }], s.codexModel, true, 'a model Codex knows');
+    case 'openai-api':
+      return out('OpenAI: API key', [], s.openaiPlatformModel, true, 'model ID');
+    case 'openai':
+      return out('OpenAI-compatible server', [], s.openaiModel, true, 'llama3.1');
+    default:
+      return out('Demo (offline)', [], '', false, '');
+  }
+}
+
+/* Sets the current provider's model (a modelChoices value, or one typed in). */
+function setModel(s, value) {
+  const v = String(value == null ? '' : value).trim();
+  if (s.provider === 'anthropic') {
+    if (ANTHROPIC_MODELS.some(m => m.id === v)) s.anthropicModel = v;
+    else if (v) { s.anthropicModel = 'custom'; s.anthropicCustomModel = v; }
+  } else if (s.provider === 'claude-code') {
+    if (v) s.claudeCodeModel = v;
+  } else if (s.provider === 'codex') {
+    s.codexModel = v;
+  } else if (s.provider === 'openai-api') {
+    if (v) s.openaiPlatformModel = v;
+  } else if (s.provider === 'openai') {
+    if (v) s.openaiModel = v;
+  }
+  return s;
+}
+
+/* The footer's label: the model, and the effort when one is set and the model takes it. */
+function footLabel(s) {
+  const e = effortFor(s);
+  return modelLabel(s) + (e ? ` · ${e} effort` : '');
 }
 
 function modelLabel(s) {
@@ -335,6 +420,223 @@ function cleanRevision(reply, original) {
   return lead + t + trail;
 }
 
+/* ---- Edits in a chat reply ----
+   With "Edit with the pen" on, a chat reply may carry edits to the open note: after its prose, one block
+       ```lagrange-edits
+       [{"find": "…", "replace": "…", "reason": "…"}, {"insert_after": "…", "text": "…"}, {"append": "…"}]
+       ```
+   (or the same JSON between <lagrange-edits> and </lagrange-edits>). It is plain text, so every provider can write
+   it. The chat shows the prose; the block goes to the pen. A reply without a block is an answer and changes nothing. */
+
+const EDITS_OPEN_RE = /(?:^|\n)[ \t]*(?:(`{3,}|~{3,})[ \t]*lagrange-edits\b[^\n]*(?:\n|$)|<lagrange-edits>)/i;
+
+/* Splits a chat reply into the prose to show and the edit blocks: {text, blocks: [string], open}. `open` is true when
+   the last block has no closing line, as while the reply is still streaming, or when it was cut off; everything from
+   its opening line on is then left out of the text. */
+function splitAgentReply(reply) {
+  let rest = String(reply == null ? '' : reply);
+  let text = '';
+  const blocks = [];
+  let open = false;
+  for (;;) {
+    const m = EDITS_OPEN_RE.exec(rest);
+    if (!m) { text += rest; break; }
+    text += rest.slice(0, m.index) + '\n';
+    const body = rest.slice(m.index + m[0].length);
+    const close = m[1]
+      ? new RegExp(`(?:^|\\n)[ \\t]*${m[1][0]}{${m[1].length},}[ \\t]*(?=\\n|$)`).exec(body)
+      : /<\/lagrange-edits>/i.exec(body);
+    if (!close) { blocks.push(body); open = true; break; }
+    blocks.push(body.slice(0, close.index));
+    rest = body.slice(close.index + close[0].length);
+  }
+  return { text: text.replace(/\n{3,}/g, '\n\n').trim(), blocks, open };
+}
+
+/* One item of an edits block, as an operation: {op: 'replace', find, replace, reason}, {op: 'insert', after | before,
+   text, reason} or {op: 'append', text, reason}. Null if it is none of these. */
+function normalizeOp(item) {
+  if (!item || typeof item !== 'object') return null;
+  const str = keys => { for (const k of keys) if (typeof item[k] === 'string') return item[k]; return null; };
+  const reason = (str(['reason', 'why', 'explanation']) || '').trim();
+  const text = str(['text', 'insert', 'content']);
+  const append = str(['append']);
+  if (append !== null) return append ? { op: 'append', text: append, reason } : null;
+  const after = str(['insert_after', 'after']), before = str(['insert_before', 'before']);
+  if (after !== null || before !== null) {
+    if (!text || !(after || before)) return null;
+    return after ? { op: 'insert', after, text, reason } : { op: 'insert', before, text, reason };
+  }
+  const e = normalizeEdit(item);
+  return e ? { op: 'replace', find: e.find, replace: e.replace, reason: e.reason } : null;
+}
+
+/* The operations in a chat reply: {text, ops, dropped, error, open}. text is the prose to show. error is null when
+   every block held a JSON list (an empty list is fine: no edits); items that are not edits are dropped and counted. */
+function parseAgentReply(reply) {
+  const { text, blocks, open } = splitAgentReply(reply);
+  const ops = [];
+  let dropped = 0, error = null;
+  for (const block of blocks) {
+    let list = null;
+    for (const value of jsonValuesIn(block)) {
+      list = Array.isArray(value) ? value : (value && Array.isArray(value.edits) ? value.edits : (value && typeof value === 'object' ? [value] : null));
+      if (list) break;
+    }
+    if (!list) { error = open ? 'The edits were cut off before they were complete.' : 'The edits were not a JSON list.'; continue; }
+    for (const item of list) {
+      const op = normalizeOp(item);
+      if (op) ops.push(op); else dropped++;
+    }
+  }
+  return { text, ops, dropped, error, open };
+}
+
+/* Finds each operation's place in the document, as locateEdits does for proofreading (and by the same rules: the text
+   named must be there exactly once, by the exact search or the loose one, and edits may not overlap). An insertion is
+   an edit of an empty range, next to its anchor; an append goes at the end of the note, after a blank line. */
+function locateOps(doc, ops) {
+  const { located, skipped } = locateEdits(doc, ops.filter(o => o.op === 'replace').map(o => ({ find: o.find, replace: o.replace, reason: o.reason })));
+  const skip = (o, find, why) => skipped.push({ find, matched: '', replace: o.text, reason: o.reason, why, insert: true });
+  for (const o of ops) {
+    if (o.op === 'replace') continue;
+    let at, anchor = '';
+    if (o.op === 'append') {
+      at = doc.length;
+    } else {
+      anchor = o.after || o.before;
+      let hits = findAll(doc, anchor);
+      if (!hits.length) hits = looseFindAll(doc, anchor);
+      if (!hits.length) { skip(o, anchor, 'the place was not found in the note'); continue; }
+      if (hits.length > 1) { skip(o, anchor, `the place appears ${hits.length} times`); continue; }
+      at = o.after ? hits[0][1] : hits[0][0];
+    }
+    if (located.some(e => (e.from < at && at < e.to) || (e.from === e.to && e.from === at))) { skip(o, anchor, 'overlaps another edit'); continue; }
+    let insert = o.text;
+    if (o.op === 'append' && doc.length) insert = (doc.endsWith('\n\n') ? '' : doc.endsWith('\n') ? '\n' : '\n\n') + insert;
+    located.push({ find: '', matched: '', replace: insert, reason: o.reason, from: at, to: at, insert: true });
+  }
+  located.sort((a, b) => a.from - b.from || a.to - b.to);
+  return { located, skipped };
+}
+
+/* ---- What the pen writes ----
+   The pen writes a short form of each replacement above the line. Mathematics in it ($…$ or $$…$$, as Obsidian reads
+   them) is kept whole, so it can be typeset and drawn symbol by symbol. */
+
+/* Splits text into [{type: 'text', text} | {type: 'math', source, display}]. Inline math opens with a $ that is not
+   escaped and not followed by white space, and closes with one not preceded by white space and not followed by a
+   digit, on the same line (so "$5 and $10" is text); $$…$$ is display math and may span lines. Code spans and fenced
+   code are text. */
+function mathSegments(text) {
+  const src = String(text == null ? '' : text);
+  const out = [];
+  let buf = '';
+  const flush = () => { if (buf) { out.push({ type: 'text', text: buf }); buf = ''; } };
+  for (let i = 0; i < src.length;) {
+    const c = src[i];
+    if (c === '\\' && i + 1 < src.length) { buf += src.slice(i, i + 2); i += 2; continue; }
+    if (c === '`') {
+      const ticks = src.slice(i).match(/^`+/)[0];
+      const end = src.indexOf(ticks, i + ticks.length);
+      const stop = end < 0 ? (ticks.length >= 3 ? src.length : i + ticks.length) : end + ticks.length;
+      buf += src.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === '$') {
+      if (src[i + 1] === '$') {
+        const end = src.indexOf('$$', i + 2);
+        const body = end < 0 ? '' : src.slice(i + 2, end).trim();
+        if (body) { flush(); out.push({ type: 'math', source: body, display: true }); i = end + 2; continue; }
+        const skip = end < 0 ? i + 2 : end + 2;      // "$$" with nothing in it, or never closed: text
+        buf += src.slice(i, skip);
+        i = skip;
+        continue;
+      } else if (i + 1 < src.length && !/\s/.test(src[i + 1])) {
+        let end = -1;
+        for (let j = i + 1; j < src.length && src[j] !== '\n'; j++) {
+          if (src[j] === '\\') { j++; continue; }
+          if (src[j] === '$') { if (!/\s/.test(src[j - 1]) && !/\d/.test(src[j + 1] || '')) end = j; break; }
+        }
+        if (end > i + 1) { flush(); out.push({ type: 'math', source: src.slice(i + 1, end), display: false }); i = end + 1; continue; }
+      }
+    }
+    buf += c;
+    i++;
+  }
+  flush();
+  return out;
+}
+
+function hasMath(text) {
+  return mathSegments(text).some(g => g.type === 'math');
+}
+
+/* The pen's script for a replacement: its segments, white space collapsed, cut to about `limit` characters of text.
+   An equation is never cut in two and never left out for want of room (it counts for at most 24 characters, and the
+   pen writes smaller if it must); only one whose source is longer than 160 characters ends the script, with an
+   ellipsis, as does the text that runs past the limit. */
+function penScript(replacement, limit) {
+  const max = limit || 48;
+  const segs = mathSegments(String(replacement == null ? '' : replacement).replace(/\s+/g, ' ').trim());
+  const out = [];
+  let used = 0;
+  for (const g of segs) {
+    const room = max - used;
+    if (g.type === 'math') {
+      const cost = Math.min(g.source.length, 24);
+      if (g.source.length > 160 || room <= 0) { out.push({ type: 'text', text: ' …' }); break; }
+      out.push(g);
+      used += cost;
+    } else {
+      if (g.text.length > room) { out.push({ type: 'text', text: g.text.slice(0, Math.max(0, room - 2)).trimEnd() + ' …' }); break; }
+      out.push(g);
+      used += g.text.length;
+    }
+    if (used >= max && g.type !== 'math') { if (g !== segs[segs.length - 1]) out.push({ type: 'text', text: ' …' }); break; }
+  }
+  return out;
+}
+
+/* A typeset equation as an element, from `render(source, display)` (Obsidian's renderMath), or null when there is no
+   renderer, it throws, or it returns something that isn't an element: the pen then writes the source as text. */
+function renderPenMath(source, display, render) {
+  if (typeof render !== 'function') return null;
+  try {
+    const el = render(source, Boolean(display));
+    return el && el.nodeType === 1 ? el : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* The pen's trail: points [{x, y, t}] (oldest first) no older than `life` ms at `now`, as `bands` strokes from the
+   newest (the darkest and widest) to the oldest: [{d, opacity, width}], d an SVG path. Neighbouring strokes share a
+   point, so the line has no gaps. Pure, so it can be tested without a window. */
+function trailBands(points, now, life, bands) {
+  const out = [];
+  const live = points.filter(p => now - p.t <= life && now - p.t >= 0);
+  if (live.length < 2) return out;
+  const groups = Array.from({ length: bands }, () => []);
+  for (const p of live) groups[Math.min(bands - 1, Math.floor(((now - p.t) / life) * bands))].push(p);
+  let newer = null;                                   // the oldest point of the band before (nearer the nib)
+  for (let i = 0; i < bands; i++) {
+    const g = groups[i];
+    if (!g.length) continue;
+    const pts = newer ? g.concat([newer]) : g;
+    newer = g[0];
+    if (pts.length < 2) continue;
+    const k = 1 - i / bands;
+    out.push({
+      d: 'M' + pts.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join('L'),
+      opacity: Number((0.5 * k * k).toFixed(3)),
+      width: Number((0.6 + 1.8 * k).toFixed(2)),
+    });
+  }
+  return out;
+}
+
 /* {type, message} from an error response body (Anthropic: {"type":"error","error":{"type","message"}}; OpenAI-style
    servers: {"error":{"message"}} or {"error":"..."}). Falls back to a short plain-text body. */
 function parseErrorBody(text) {
@@ -547,9 +849,28 @@ function demoRevise(passage, instruction) {
   return titleCase(t);
 }
 
-function demoChatReply(question, note) {
-  const parts = ['*Demo mode: a canned reply, written without a model. Choose Anthropic or an OpenAI-compatible ' +
-    'server in Settings → Lagrange for real answers.*'];
+/* The demo's edits block for a chat message that asks for a change, or '' when it asks for none: "fix", "proofread"
+   or "correct" proofreads; "equation" or "formula" adds one; "add" or "append" adds a line. */
+function demoChatEdits(question, note) {
+  const q = String(question || '').toLowerCase();
+  let ops = null;
+  if (/\b(equation|formula|math)/.test(q)) {
+    ops = [{ append: 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$' }];
+  } else if (/\b(fix|proofread|correct|tidy|clean)/.test(q)) {
+    ops = demoProofreadEdits(note.text);
+  } else if (/\b(add|append|write)\b/.test(q)) {
+    ops = [{ append: 'A line added by Lagrange in demo mode.' }];
+  }
+  return ops && ops.length ? '```lagrange-edits\n' + JSON.stringify(ops, null, 2) + '\n```' : '';
+}
+
+function demoChatReply(question, note, agentic) {
+  const parts = ['*Demo mode: a canned reply, written without a model. Choose a Claude or ChatGPT subscription, an ' +
+    'API key or an OpenAI-compatible server in Settings → Lagrange for real answers.*'];
+  if (agentic && note) {
+    const block = demoChatEdits(question, note);
+    if (block) return parts.concat(`Here is what the pen will set down in **${note.title}**.`, block).join('\n\n');
+  }
   if (note) {
     const st = noteStats(note.text);
     const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -562,6 +883,7 @@ function demoChatReply(question, note) {
   parts.push(`You asked: “${excerpt(String(question || '').replace(/\s+/g, ' '), 160)}” A model would answer here, ` +
     'with the note in mind.');
   parts.push('The edits work offline in demo mode:\n\n' +
+    (agentic ? '- Ask here to *fix the typography*, to *add a line* or to *add an equation*, and the pen does it.\n' : '') +
     '- **Proofread note** finds typographic slips (straight quotes, spaced hyphens, doubled spaces) and sets the ' +
     'corrections down with the pen.\n' +
     '- **Revise selection** rewrites the selected passage: ask for it *shorter*, *in title case* or *in capitals*.\n\n' +
@@ -573,13 +895,28 @@ function demoChatReply(question, note) {
 /* ---------------------------------------------------------------------------------------------------------------
  * 3. Providers
  *
- * complete(settings, req, hooks) -> Promise<{text, stopReason, stopDetails, model, fallbackTo}>
- *   req:   {purpose: 'chat'|'proofread'|'revise', system, messages: [{role, content}], cache, demo: () => string}
- *   hooks: {signal, onText(delta, fullText), onRetry(status, ms), fetch, retryDelays}
+ * complete(settings, req, hooks, session) -> Promise<{text, stopReason, stopDetails, model, fallbackTo}>
+ *   req:     {purpose: 'chat'|'proofread'|'revise', system, messages: [{role, content}], cache, demo: () => string}
+ *   hooks:   {signal, onText(delta, fullText), onRetry(status, ms), fetch, retryDelays}
+ *   session: {noFallback, noEffort: {}}, what this run of Obsidian has learnt a provider won't take
+ * The reasoning effort (settings.effort) goes out only where the provider and model take one (effortFor); if a
+ * provider still rejects it, the request is sent again without it and the session remembers.
  * Throws LagrangeError with a sentence for the writer, or an AbortError when stopped.
  * ------------------------------------------------------------------------------------------------------------- */
 
 const RETRY_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+
+/* The effort for this request, unless this session has already seen `key` (a provider and model) refuse one. */
+function sessionEffort(s, session, key) {
+  const e = effortFor(s);
+  return e && !(session && session.noEffort && session.noEffort[key]) ? e : '';
+}
+
+function forgetEffort(session, key) {
+  if (!session) return;
+  if (!session.noEffort) session.noEffort = {};
+  session.noEffort[key] = true;
+}
 
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -710,23 +1047,31 @@ async function streamAnthropic(s, req, hooks, session) {
     'anthropic-version': ANTHROPIC_VERSION,
     'anthropic-dangerous-direct-browser-access': 'true',        // lets the API answer a browser (Obsidian) directly
   };
-  const send = withFallback => {
+  const send = (withFallback, effort) => {
     const h = Object.assign({}, headers);
     const b = Object.assign({}, body);
     if (withFallback) { h['anthropic-beta'] = FALLBACK_BETA; b.fallbacks = 'default'; }
+    if (effort) b.output_config = { effort };                   // thinking stays adaptive (the default); effort sets its depth
     return fetchWithRetry('anthropic', ANTHROPIC_URL,
       { method: 'POST', headers: h, body: JSON.stringify(b), signal: hooks.signal }, hooks);
   };
-  const fallback = Boolean(s.refusalFallback && preset && preset.fallback && !(session && session.noFallback));
-  let res = await send(fallback);
-  if (!res.ok) {
+  let fallback = Boolean(s.refusalFallback && preset && preset.fallback && !(session && session.noFallback));
+  let effort = sessionEffort(s, session, `anthropic:${model}`);
+  let res;
+  for (;;) {
+    res = await send(fallback, effort);
+    if (res.ok) break;
     const text = await safeText(res);
     const info = parseErrorBody(text);
+    const said = info.message || text;
     // An account without the fallback beta gets a 400 naming it: carry on without fallbacks for this session.
-    if (fallback && res.status === 400 && /anthropic-beta|fallback/i.test(info.message || text)) {
+    if (fallback && res.status === 400 && /anthropic-beta|fallback/i.test(said)) {
       if (session) session.noFallback = true;
-      res = await send(false);
-      if (!res.ok) throw httpError('anthropic', res, await safeText(res), model);
+      fallback = false;
+    // A model that takes no effort (a custom ID for an older model) says so: carry on without it.
+    } else if (effort && res.status === 400 && /effort|output_config/i.test(said)) {
+      forgetEffort(session, `anthropic:${model}`);
+      effort = '';
     } else {
       throw httpError('anthropic', res, text, model);
     }
@@ -760,7 +1105,7 @@ function applyOpenAIEvent(st, ev) {
   return piece;
 }
 
-async function streamOpenAI(s, req, hooks) {
+async function streamOpenAI(s, req, hooks, session) {
   const base = String(s.openaiBaseUrl || '').trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(base)) {
     throw new LagrangeError('Enter the server’s base URL in Settings → Lagrange, for example http://localhost:11434/v1.', { kind: 'setup' });
@@ -774,8 +1119,21 @@ async function streamOpenAI(s, req, hooks) {
   if (key) headers.authorization = `Bearer ${key}`;
   const url = `${base}/chat/completions`;
   const body = { model, stream: true, messages: [{ role: 'system', content: req.system }].concat(req.messages) };
-  const res = await fetchWithRetry('openai', url, { method: 'POST', headers, body: JSON.stringify(body), signal: hooks.signal }, hooks);
-  if (!res.ok) throw httpError('openai', res, await safeText(res), model);
+  // Only OpenAI's own reasoning models are sent an effort (effortSupported); a local server never is.
+  let effort = sessionEffort(s, session, `openai:${model}`);
+  let res;
+  for (;;) {
+    const b = effort ? Object.assign({ reasoning_effort: effort }, body) : body;
+    res = await fetchWithRetry('openai', url, { method: 'POST', headers, body: JSON.stringify(b), signal: hooks.signal }, hooks);
+    if (res.ok) break;
+    const text = await safeText(res);
+    if (effort && res.status === 400 && /reasoning|effort/i.test(parseErrorBody(text).message || text)) {
+      forgetEffort(session, `openai:${model}`);
+      effort = '';
+      continue;
+    }
+    throw httpError('openai', res, text, model);
+  }
   const st = { text: '', stopReason: null, done: false };
   const onEvent = ev => {
     const delta = applyOpenAIEvent(st, ev);
@@ -797,7 +1155,7 @@ async function streamOpenAI(s, req, hooks) {
 function nodeModule(name) {
   if (obsidian.Platform && obsidian.Platform.isDesktopApp === false) {
     throw new LagrangeError('Signing in with a subscription works only in Obsidian on a computer: it runs the ' +
-      'provider’s command-line tool. On a phone or tablet, choose an API key provider in Settings → Lagrange.', { kind: 'setup' });
+      'provider’s command-line tool. On a phone or tablet, choose an API key provider (or the Demo) in Settings → Lagrange.', { kind: 'setup' });
   }
   return require(name);   // eslint-disable-line global-require
 }
@@ -953,7 +1311,7 @@ function abortError() {
   return e;
 }
 
-async function streamClaudeCode(s, req, hooks) {
+async function streamClaudeCode(s, req, hooks, session) {
   const exe = findCli('claude', s.claudeCodePath);
   if (!exe) throw new LagrangeError(`Claude Code wasn’t found${s.claudeCodePath ? ` at ${s.claudeCodePath}` : ''}. ${CLI.claude.install}`, { kind: 'setup' });
   const fs = nodeModule('fs'), os = nodeModule('os'), path = nodeModule('path');
@@ -965,37 +1323,60 @@ async function streamClaudeCode(s, req, hooks) {
     '--system-prompt-file', quote(sysFile)];
   const model = String(s.claudeCodeModel || '').trim();
   if (model) args.push('--model', quote(model));
-  const st = { text: '', streamed: false, stopReason: null, model: null, error: null, done: false };
+  let effort = sessionEffort(s, session, 'claude-code');
+  let st;
   try {
-    const { code, stderr } = await runCli('claude', exe, args, transcriptPrompt(req.messages), line => {
-      const delta = applyClaudeCodeLine(st, line);
-      if (delta && hooks.onText) hooks.onText(delta, st.text);
-    }, hooks);
-    if (st.error) throw new LagrangeError(cliErrorMessage('claude', st.error), { kind: 'stream' });
-    if (!st.text) throw new LagrangeError(cliErrorMessage('claude', stderr || `exit code ${code}`), { kind: 'stream' });
+    for (;;) {
+      st = { text: '', streamed: false, stopReason: null, model: null, error: null, done: false };
+      const { code, stderr } = await runCli('claude', exe, effort ? args.concat('--effort', quote(effort)) : args,
+        transcriptPrompt(req.messages), line => {
+          const delta = applyClaudeCodeLine(st, line);
+          if (delta && hooks.onText) hooks.onText(delta, st.text);
+        }, hooks);
+      // A Claude Code from before `--effort` stops at once, naming the option: run it again without.
+      if (effort && !st.text && /effort/i.test(`${st.error || ''} ${stderr}`) && /unknown|unrecogni[sz]ed|invalid|unexpected|not supported/i.test(`${st.error || ''} ${stderr}`)) {
+        forgetEffort(session, 'claude-code');
+        effort = '';
+        continue;
+      }
+      if (st.error) throw new LagrangeError(cliErrorMessage('claude', st.error), { kind: 'stream' });
+      if (!st.text) throw new LagrangeError(cliErrorMessage('claude', stderr || `exit code ${code}`), { kind: 'stream' });
+      break;
+    }
   } finally {
     try { fs.unlinkSync(sysFile); } catch (e) { /* already gone */ }
   }
   return { text: st.text, stopReason: st.stopReason || 'end_turn', stopDetails: null, model: st.model || model || 'Claude Code', fallbackTo: null };
 }
 
-async function streamCodex(s, req, hooks) {
+async function streamCodex(s, req, hooks, session) {
   const exe = findCli('codex', s.codexPath);
   if (!exe) throw new LagrangeError(`Codex wasn’t found${s.codexPath ? ` at ${s.codexPath}` : ''}. ${CLI.codex.install}`, { kind: 'setup' });
   const os = nodeModule('os');
   const args = ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-C', os.tmpdir()];
   const model = String(s.codexModel || '').trim();
   if (model) args.push('-m', model);
-  args.push('-');
-  const input = '<instructions>\n' + (req.system || '') + '\n\nAnswer in text only: do not run commands, read files or ' +
-    'make changes. Everything you need is in this message.\n</instructions>\n\n' + transcriptPrompt(req.messages);
-  const st = { text: '', error: null, done: false };
-  const { code, stderr } = await runCli('codex', exe, args, input, line => {
-    const delta = applyCodexLine(st, line);
-    if (delta && hooks.onText) hooks.onText(delta, st.text);
-  }, hooks);
-  if (st.error) throw new LagrangeError(cliErrorMessage('codex', st.error), { kind: 'stream' });
-  if (!st.text) throw new LagrangeError(cliErrorMessage('codex', stderr || `exit code ${code}`), { kind: 'stream' });
+  const input = '<instructions>\n' + (req.system || '') + '\n\nAnswer in text only: do not run commands, and do not ' +
+    'read or write files. Everything you need is in this message.\n</instructions>\n\n' + transcriptPrompt(req.messages);
+  let effort = sessionEffort(s, session, `codex:${model}`);
+  let st;
+  for (;;) {
+    st = { text: '', error: null, done: false };
+    // `-c key=value` overrides Codex's config for this run; a bare word is taken as a string.
+    const { code, stderr } = await runCli('codex', exe, args.concat(effort ? ['-c', `model_reasoning_effort=${effort}`] : [], '-'), input, line => {
+      const delta = applyCodexLine(st, line);
+      if (delta && hooks.onText) hooks.onText(delta, st.text);
+    }, hooks);
+    // A model or a Codex that won't take this effort says so: run it again without.
+    if (effort && !st.text && /reasoning|effort/i.test(`${st.error || ''} ${stderr}`)) {
+      forgetEffort(session, `codex:${model}`);
+      effort = '';
+      continue;
+    }
+    if (st.error) throw new LagrangeError(cliErrorMessage('codex', st.error), { kind: 'stream' });
+    if (!st.text) throw new LagrangeError(cliErrorMessage('codex', stderr || `exit code ${code}`), { kind: 'stream' });
+    break;
+  }
   return { text: st.text, stopReason: 'end_turn', stopDetails: null, model: model || 'Codex', fallbackTo: null };
 }
 
@@ -1028,7 +1409,7 @@ async function streamDemo(req, hooks) {
 function complete(settings, req, hooks, session) {
   hooks = hooks || {};
   if (settings.provider === 'demo') return streamDemo(req, hooks);
-  if (settings.provider === 'openai') return streamOpenAI(settings, req, hooks);
+  if (settings.provider === 'openai') return streamOpenAI(settings, req, hooks, session);
   if (settings.provider === 'openai-api') {
     if (!String(settings.openaiPlatformKey || '').trim()) {
       return Promise.reject(new LagrangeError('Add your OpenAI API key in Settings → Lagrange, or choose “ChatGPT: my subscription” to use a ChatGPT plan.', { kind: 'setup' }));
@@ -1036,10 +1417,10 @@ function complete(settings, req, hooks, session) {
     if (!String(settings.openaiPlatformModel || '').trim()) {
       return Promise.reject(new LagrangeError('Enter an OpenAI model ID in Settings → Lagrange.', { kind: 'setup' }));
     }
-    return streamOpenAI(Object.assign({}, settings, { openaiBaseUrl: 'https://api.openai.com/v1', openaiApiKey: settings.openaiPlatformKey, openaiModel: settings.openaiPlatformModel }), req, hooks);
+    return streamOpenAI(Object.assign({}, settings, { openaiBaseUrl: 'https://api.openai.com/v1', openaiApiKey: settings.openaiPlatformKey, openaiModel: settings.openaiPlatformModel }), req, hooks, session);
   }
-  if (settings.provider === 'claude-code') return streamClaudeCode(settings, req, hooks);
-  if (settings.provider === 'codex') return streamCodex(settings, req, hooks);
+  if (settings.provider === 'claude-code') return streamClaudeCode(settings, req, hooks, session);
+  if (settings.provider === 'codex') return streamCodex(settings, req, hooks, session);
   return streamAnthropic(settings, req, hooks, session);
 }
 
@@ -1054,13 +1435,47 @@ function noteBlock(note, clip) {
   return `The note is titled “${note.title}”.${where}\n\n<note>\n${clip.text}\n</note>`;
 }
 
-function chatSystemPrompt(note, clip) {
-  return 'You are Lagrange, a writing companion inside Obsidian. The writer uses Scriptorium, a configuration that ' +
-    'sets notes like the pages of a printed book. You talk with the writer about the note they have open: answer ' +
-    'questions about it, suggest improvements, and explain your thinking briefly. Write plain, warm, precise prose, ' +
-    'and use Markdown lightly (a short list or some emphasis when it helps). Quote the note exactly when you quote ' +
-    'it. You cannot change the note yourself; if the writer wants changes made, they can select a passage and run ' +
-    '“Lagrange: Revise selection”, or run “Lagrange: Proofread note”.\n\n' +
+const CHAT_INTRO =
+  'You are Lagrange, a writing companion inside Obsidian. The writer uses Scriptorium, a configuration that ' +
+  'sets notes like the pages of a printed book. You talk with the writer about the note they have open: answer ' +
+  'questions about it, suggest improvements, and explain your thinking briefly. Write plain, warm, precise prose, ' +
+  'and use Markdown lightly (a short list or some emphasis when it helps). Quote the note exactly when you quote ' +
+  'it. ';
+
+const CHAT_TALK_ONLY =
+  'You cannot change the note yourself; if the writer wants changes made, they can select a passage and run ' +
+  '“Lagrange: Revise selection”, or run “Lagrange: Proofread note”.';
+
+// The contract for edits in a chat reply (see splitAgentReply). The model chooses: prose alone answers; a block edits.
+const CHAT_AGENTIC =
+  'You can also change the note yourself: you have a pen. When the writer asks you to change the note (to fix, ' +
+  'rewrite, shorten, expand, add, delete or move something in it), make the change rather than describing it. Say ' +
+  'in a sentence or two what you are changing, without repeating the new text, and then end your reply with one ' +
+  'block in exactly this form:\n\n' +
+  '```lagrange-edits\n' +
+  '[{"find": "exact text from the note", "replace": "the new text", "reason": "a few words"},\n' +
+  ' {"insert_after": "exact text from the note", "text": "text to add straight after it"},\n' +
+  ' {"append": "text to add at the end of the note"}]\n' +
+  '```\n\n' +
+  'The block holds a JSON array of one or more edits, of these three kinds in any mix ("insert_before" also works). ' +
+  'Rules:\n' +
+  '- "find" and "insert_after" are copied from the note exactly, character for character (the same quotation marks, ' +
+  'dashes, spaces and Markdown marks), and must occur exactly once in the note: include a few neighbouring words when ' +
+  'the text is short or repeated.\n' +
+  '- "replace" is the new version of exactly the text in "find"; "replace": "" deletes it.\n' +
+  '- Keep edits small and separate (a sentence or a paragraph each), and never let two edits overlap.\n' +
+  '- Inserted text goes in exactly as written, so begin or end it with the space or the blank line (\\n\\n) it needs; ' +
+  'appended text starts a new paragraph by itself.\n' +
+  '- The block must be valid JSON: escape quotation marks and backslashes inside strings (so LaTeX is written ' +
+  '"\\\\frac{a}{b}"), and write line breaks as \\n.\n' +
+  'Your pen writes the edits into the note as soon as your reply ends, and the writer can take them all back with ' +
+  'one undo, so do not ask for permission when the request is clear, and do not tell the writer to run a command.\n\n' +
+  'When the writer asks a question, wants your opinion or feedback, or it is not clear that they want the note ' +
+  'itself changed, answer in prose with no block; you may offer to make the change. Never write a lagrange-edits ' +
+  'block for any other purpose, and never more than one in a reply. If no note is open there is nothing to edit.';
+
+function chatSystemPrompt(note, clip, agentic) {
+  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) + '\n\n' +
     (note ? noteBlock(note, clip) : 'No note is open at the moment; talk with the writer about their writing in general.');
 }
 
@@ -1103,16 +1518,16 @@ function reviseUserMessage(note, clip, passage, instruction) {
 
 // ==== LAGRANGE LOADER (replaceable) ====
 // The "Lagrange is thinking" plate. The chat shows it from the moment a request is sent until the first words of the
-// reply arrive (or the request fails). Four engravings, drawn in the page's ink: clockwork (gears and a belted
-// flywheel), alchemy (a flask distilling into a receiver), a trebuchet, and the Earth-Moon system with its five
-// Lagrange points. Settings → Lagrange → Loading animation picks one, or "random" (the default) draws a new one each time.
+// reply arrive (or the request fails). Three engravings, drawn in the page's ink: clockwork (gears and a belted
+// flywheel), alchemy (a flask distilling into a receiver), and the Earth-Moon system with its five Lagrange
+// points. Settings → Lagrange → Loading animation picks one, or "random" (the default) draws a new one each time.
 //
 // Contract
 //   mountLoader(containerEl, theme) -> { stop() }
-//     theme  'random' | 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'
+//     theme  'random' | 'clockwork' | 'alchemy' | 'orbit' (anything else counts as 'random')
 //     stop() removes the plate and stops its animation. Called once; calling it again does nothing.
-/* Lagrange's loading plates: four ink engravings drawn into an <svg viewBox="0 0 320 240">.
-   drawPlate(svg, name, opts) -> stop(); name is 'clockwork' | 'alchemy' | 'trebuchet' | 'orbit'.
+/* Lagrange's loading plates: three ink engravings drawn into an <svg viewBox="0 0 320 240">.
+   drawPlate(svg, name, opts) -> stop(); name is 'clockwork' | 'alchemy' | 'orbit'.
    Colours come from CSS variables (--lg-ink, --lg-ink-soft, --lg-rubric, --lg-wash, --lg-plate) so light and dark
    themes both work. opts.still draws one frame and does not animate (prefers-reduced-motion). */
 const LagrangePlates = (() => {
@@ -1311,107 +1726,7 @@ const LagrangePlates = (() => {
     }, still);
   }
 
-  /* ------------------------------------------------------------------ III. Trebuchet */
-  function trebuchet(svg, id, win, still) {
-    defs(svg, id, 13);
-    const P = [150, 106], LONG = 112, SHORT = 30, SLING = 44, GROUND = 222;
-    const rad = a => a * Math.PI / 180;
-    const ink = inkAttrs(id);
-    const back = mk('g', ink, svg);
-    mk('line', { x1: 12, y1: GROUND + 1, x2: 308, y2: GROUND + 1, opacity: .7 }, back);
-    mk('rect', { x: 64, y: GROUND - 9, width: 176, height: 9, fill: `url(#hatch${id})` }, back);           // base beam
-    for (const x of [86, 218]) { mk('circle', { cx: x, cy: GROUND - 1, r: 9, fill: PLATE }, back); mk('circle', { cx: x, cy: GROUND - 1, r: 2, fill: INK }, back); }
-    mk('path', { d: `M100 ${GROUND - 9} L${P[0] - 3} ${P[1]} M200 ${GROUND - 9} L${P[0] + 3} ${P[1]}` }, back);  // A-frame
-    mk('path', { d: `M118 ${GROUND - 54} H182 M128 ${GROUND - 9} L${P[0]} ${GROUND - 54} L172 ${GROUND - 9}`, 'stroke-width': '1.1' }, back);
-    mk('path', { d: `M136 ${GROUND - 12} H226`, 'stroke-width': '2.2', opacity: .5 }, back);            // trough
-    const winch = mk('g', { transform: `translate(80 ${GROUND - 30})` }, svg);
-    const wrot = mk('g', {}, winch);
-    const wi = mk('g', inkAttrs(id, 1.2), wrot);
-    mk('circle', { r: 11, fill: PLATE }, wi);
-    for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; mk('line', { x1: Math.cos(a) * 3, y1: Math.sin(a) * 3, x2: Math.cos(a) * 17, y2: Math.sin(a) * 17 }, wi); }
-    mk('circle', { r: 3, fill: INK }, wi);
-    mk('path', { d: `M80 ${GROUND - 30} L72 ${GROUND - 9} M80 ${GROUND - 30} L88 ${GROUND - 9}`, ...inkAttrs(id, 1.2) }, svg);
-    const rope = mk('path', { fill: 'none', stroke: INK, 'stroke-width': '.8', opacity: 0 }, svg);
-    const trace = mk('path', { fill: 'none', stroke: RUB, 'stroke-width': '1', 'stroke-dasharray': '1.5 4', 'stroke-linecap': 'round', opacity: 0 }, svg);
-    const ticks = mk('g', { stroke: RUB, 'stroke-width': '.9', opacity: 0 }, svg);
-    const arm = mk('g', {}, svg);
-    const ai = mk('g', ink, arm);
-    mk('path', { d: `M${-SHORT} -3.5 H${LONG} L${LONG} 3.5 H${-SHORT} Z`, fill: `url(#hatch${id})` }, ai);
-    mk('circle', { cx: 0, cy: 0, r: 4, fill: PLATE }, ai);
-    const cw = mk('g', {}, svg);
-    const cwi = mk('g', ink, cw);
-    mk('path', { d: 'M0 0 L-9 12 M0 0 L9 12' }, cwi);
-    mk('path', { d: 'M-15 12 H15 L13 34 H-13 Z', fill: `url(#hatch${id})` }, cwi);
-    mk('circle', { cx: 0, cy: 0, r: 2.2, fill: INK }, cwi);
-    const sling = mk('path', { fill: 'none', stroke: INK, 'stroke-width': '.9' }, svg);
-    const stone = mk('g', {}, svg);
-    mk('circle', { r: 5.5, fill: `url(#hatch${id})`, stroke: INK, 'stroke-width': '1.3', filter: `url(#ink${id})` }, stone);
-    mk('circle', { r: 5.5, fill: 'none', stroke: INK, 'stroke-width': '1.3' }, stone);
-    const PERIOD = 5200, COCK = 118, REL = 300;
-    const ease = k => k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
-    let launch = null, flight = [];
-    const place = (alpha, slingDir, stonePos, showStone) => {
-      const a = rad(alpha);
-      arm.setAttribute('transform', `translate(${P[0]} ${P[1]}) rotate(${alpha.toFixed(2)})`);
-      const tip = [P[0] + Math.cos(a) * LONG, P[1] + Math.sin(a) * LONG];
-      const sh = [P[0] - Math.cos(a) * SHORT, P[1] - Math.sin(a) * SHORT];
-      cw.setAttribute('transform', `translate(${sh[0].toFixed(2)} ${sh[1].toFixed(2)})`);
-      const end = stonePos || [tip[0] + Math.cos(rad(slingDir)) * SLING, tip[1] + Math.sin(rad(slingDir)) * SLING];
-      sling.setAttribute('d', `M${tip[0].toFixed(2)} ${tip[1].toFixed(2)} L${end[0].toFixed(2)} ${end[1].toFixed(2)}`);
-      stone.setAttribute('transform', `translate(${end[0].toFixed(2)} ${end[1].toFixed(2)})`);
-      stone.setAttribute('opacity', showStone ? '1' : '0');
-      return { tip, end };
-    };
-    return animate(win, T => {
-      const t = T % PERIOD, cycle = Math.floor(T / PERIOD);
-      wrot.setAttribute('transform', 'rotate(0)');
-      rope.setAttribute('opacity', '0');
-      if (t < 650) {                                   // the drop: the counterweight falls and the arm whips round
-        const k = t / 650, alpha = COCK + (REL - COCK) * k * k;
-        const dir = -55 * Math.pow(k, 1.6) + (k < 0.15 ? 0 : 0);
-        const tip = [P[0] + Math.cos(rad(alpha)) * LONG, P[1] + Math.sin(rad(alpha)) * LONG];
-        let end = [tip[0] + Math.cos(rad(dir)) * SLING, tip[1] + Math.sin(rad(dir)) * SLING];
-        if (end[1] > GROUND - 15) end = [end[0], GROUND - 15];
-        place(alpha, dir, end, true);
-        launch = { at: T - t + 650, from: null }; flight = [];
-        trace.setAttribute('opacity', '0'); ticks.setAttribute('opacity', '0');
-      } else {
-        let alpha;
-        if (t < 2400) alpha = 270 + 30 * Math.cos((t - 650) * 0.0105) * Math.exp(-(t - 650) / 380);
-        else if (t < 4300) { const k = ease((t - 2400) / 1900); alpha = 270 - (270 - COCK) * k; wrot.setAttribute('transform', `rotate(${(-k * 540).toFixed(1)})`); }
-        else alpha = COCK;
-        const reloaded = t >= 4300;
-        const { tip } = place(alpha, reloaded ? 0 : 90, reloaded ? null : null, reloaded);
-        if (reloaded) {
-          const a = rad(alpha), tp = [P[0] + Math.cos(a) * LONG, P[1] + Math.sin(a) * LONG];
-          place(alpha, 0, [Math.min(tp[0] + SLING, 214), GROUND - 15], true);
-        }
-        if (t >= 2400 && t < 4300) {
-          rope.setAttribute('d', `M80 ${GROUND - 30} L${tip[0].toFixed(2)} ${tip[1].toFixed(2)}`);
-          rope.setAttribute('opacity', '.8');
-        }
-        // the stone's flight: a parabola, traced as the dotted line of a mechanics diagram
-        const ft = (t - 650) / 1000;
-        if (ft < 1.9) {
-          const a0 = rad(REL), tip0 = [P[0] + Math.cos(a0) * LONG, P[1] + Math.sin(a0) * LONG];
-          const s0 = [tip0[0] + Math.cos(rad(-55)) * SLING, tip0[1] + Math.sin(rad(-55)) * SLING];
-          const vx = 150, vy = -150, g = 210;
-          const pos = [s0[0] + vx * ft, s0[1] + vy * ft + 0.5 * g * ft * ft];
-          flight.push(pos);
-          if (pos[0] < 330 && pos[1] < 260) {
-            stone.setAttribute('transform', `translate(${pos[0].toFixed(2)} ${pos[1].toFixed(2)})`);
-            stone.setAttribute('opacity', '1');
-          } else stone.setAttribute('opacity', '0');
-          trace.setAttribute('d', 'M' + flight.filter((_, i) => i % 2 === 0).map(p => p.map(v => v.toFixed(1)).join(' ')).join('L'));
-          trace.setAttribute('opacity', '.9');
-        } else {
-          trace.setAttribute('opacity', Math.max(0, 0.9 - (ft - 1.9) * 0.9).toFixed(2));
-        }
-      }
-    }, still);
-  }
-
-  /* ------------------------------------------------------------------ IV. The five points */
+  /* ------------------------------------------------------------------ III. The five points */
   function orbit(svg, id, win, still) {
     defs(svg, id, 21);
     const mu = 0.01215, Dpx = 92, C = [160, 121];
@@ -1507,7 +1822,7 @@ const LagrangePlates = (() => {
     }, still);
   }
 
-  const PLATES = { clockwork, alchemy, trebuchet, orbit };
+  const PLATES = { clockwork, alchemy, orbit };
   const NAMES = Object.keys(PLATES);
   function drawPlate(svg, name, opts = {}) {
     const id = `lgp${++uid}`;
@@ -1520,7 +1835,6 @@ const LagrangePlates = (() => {
 const LOADER_CAPTIONS = {
   clockwork: 'Lagrange is reckoning',
   alchemy: 'Lagrange is distilling',
-  trebuchet: 'Lagrange is taking aim',
   orbit: 'Lagrange is finding the balance',
 };
 function mountLoader(containerEl, theme) {
@@ -1620,16 +1934,20 @@ function rangeRects(view, from, to) {
 
 // ==== LAGRANGE PEN (replaceable) ====
 // The pen that sets Lagrange's edits down in the note: a fountain pen flies to each edit, strikes the old words
-// through in rubric ink, writes the replacement above the line in a copperplate hand, then the change is made and
+// through in rubric ink, writes the replacement above the line in its own handwriting, then the change is made and
 // the ink lifts off the page. Between edits it hovers; a moment after the last one it flies off.
+// Mathematics in a replacement ($…$, $$…$$) is typeset with Obsidian's MathJax and drawn symbol by symbol, the nib
+// following each one; if it can't be typeset (no MathJax, or an error) the pen writes its source like other text.
+// A short line of ink trails behind the nib as it moves (settings.penTrail) and fades in half a second.
 //
 // Contract
 //   createPen(app, settings) -> { edit(view, from, to, replacement): Promise<void>, destroy() }
-//     settings.penSpeed (0.5 slow .. 3 fast) is read on every edit. Lagrange calls edit() one edit at a time, in
-//     document order, with the editor locked and all changes folded into one undo step; see runEdits.
+//     settings.penSpeed (0.5 slow .. 3 fast) and settings.penTrail are read on every edit. Lagrange calls edit() one
+//     edit at a time, in document order, with the editor locked and all changes folded into one undo step; see
+//     runEdits.
 //   pen.edit(view, from, to, replacement): strike [from, to], write `replacement`, then view.dispatch the change and
-//     remove every mark it added. With prefers-reduced-motion the pen does not fly: the old words dim briefly and the
-//     change is made.
+//     remove every mark it added. With prefers-reduced-motion the pen does not fly, leaves no trail and draws no
+//     equation: the old words dim briefly and the change is made.
 //   pen.destroy(): removes the pen, its ink and its decorations from every window, and stops its timers.
 function createPen(app, settings) {
   const setGone = StateEffect.define();   // a DecorationSet, or null to clear
@@ -1645,7 +1963,8 @@ function createPen(app, settings) {
   const goneMark = Decoration.mark({ class: 'lagrange-pen-gone' });
   const SVGNS = 'http://www.w3.org/2000/svg';
   const views = new Set();
-  const layers = new Map();               // document -> { svg, marks, pen, pos, lift, idle, win }
+  const layers = new Map();               // document -> { svg, marks, pen, pos, lift, idle, win, trail }
+  const TRAIL_MS = 520, TRAIL_BANDS = 5;  // how long the ink trail lasts, and how many strokes it is drawn in
   let destroyed = false;
 
   const install = view => {
@@ -1668,6 +1987,7 @@ function createPen(app, settings) {
     const pat = mk(doc, 'pattern', { id: 'lagrange-pen-hatch', width: 3, height: 3, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(80)' }, defs);
     mk(doc, 'rect', { width: 3, height: 3, fill: 'var(--lg-plate)' }, pat);
     mk(doc, 'line', { x1: 0, y1: 0, x2: 0, y2: 3, stroke: 'var(--lg-ink)', 'stroke-width': 0.7, opacity: 0.45 }, pat);
+    const trailG = mk(doc, 'g', { class: 'lagrange-pen-trail' }, svg);
     const marks = mk(doc, 'g', {}, svg);
     const pen = mk(doc, 'g', { class: 'lagrange-pen' }, svg);
     // drawn horizontally with the nib's tip at (0, 0), then turned so the barrel rises to the upper right
@@ -1681,14 +2001,43 @@ function createPen(app, settings) {
     mk(doc, 'rect', { x: 92, y: -9, width: 7, height: 18, fill: 'var(--lg-rubric)', opacity: 0.9 }, body);                    // band
     mk(doc, 'path', { d: 'M100 -9 H140 Q144 -9 144 -6', fill: 'none', stroke: 'var(--lg-ink)', 'stroke-width': 1.6 }, body);  // clip
     pen.style.display = 'none';
-    L = { svg, marks, pen, pos: null, lift: 0, idle: 0, win: doc.defaultView || window };
+    L = { svg, marks, pen, pos: null, lift: 0, idle: 0, win: doc.defaultView || window, trail: { g: trailG, pts: [], paths: [], on: false } };
     layers.set(doc, L);
     return L;
   }
 
+  /* The trail: the nib's recent positions, redrawn each frame as a few strokes that thin and fade with age (see
+     trailBands). The loop runs only while there is ink left to fade. */
+  const drawTrail = L => {
+    const T = L.trail;
+    if (destroyed || !L.svg.isConnected) { T.on = false; return; }
+    const now = L.win.performance.now();
+    while (T.pts.length && now - T.pts[0].t > TRAIL_MS) T.pts.shift();
+    const bands = trailBands(T.pts, now, TRAIL_MS, TRAIL_BANDS);
+    while (T.paths.length < bands.length) {
+      T.paths.push(mk(L.svg.ownerDocument, 'path', { fill: 'none', stroke: 'var(--lg-rubric)', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, T.g));
+    }
+    T.paths.forEach((path, i) => {
+      const b = bands[i];
+      if (!b) { path.setAttribute('d', ''); return; }
+      path.setAttribute('d', b.d);
+      path.setAttribute('opacity', b.opacity);
+      path.setAttribute('stroke-width', b.width);
+    });
+    if (T.pts.length) L.win.requestAnimationFrame(() => drawTrail(L)); else T.on = false;
+  };
+  const inkTrail = (L, x, y) => {
+    const T = L.trail, last = T.pts[T.pts.length - 1];
+    if (last && Math.hypot(x - last.x, y - last.y) < 1.2) return;
+    T.pts.push({ x, y, t: L.win.performance.now() });
+    if (T.pts.length > 240) T.pts.shift();
+    if (!T.on) { T.on = true; L.win.requestAnimationFrame(() => drawTrail(L)); }
+  };
+
   const place = (L, x, y) => {
     L.pos = { x, y };
     L.pen.setAttribute('transform', `translate(${x.toFixed(1)} ${(y - L.lift).toFixed(1)}) scale(${(1 + L.lift * 0.012).toFixed(3)})`);
+    if (settings && settings.penTrail !== false && L.pen.style.display !== 'none') inkTrail(L, x, y - L.lift);
   };
   const tween = (win, ms, fn) => new Promise(resolve => {
     const t0 = win.performance.now(), dur = Math.max(1, ms);
@@ -1712,6 +2061,63 @@ function createPen(app, settings) {
     L.lift = 0;
     place(L, x, y);
   };
+  /* Obsidian's MathJax, loaded on first use. False where there is none, and the pen then writes the source. */
+  const mathReady = async () => {
+    try {
+      if (typeof obsidian.renderMath !== 'function') return false;
+      if (typeof obsidian.loadMathJax === 'function') await Promise.race([obsidian.loadMathJax(), sleep(2500)]);
+      return true;
+    } catch (e) { return false; }
+  };
+  /* The symbols of a typeset equation, in the order TeX reads them: MathJax's CHTML output (Obsidian's) has one
+     <mjx-c> per character; its SVG output has paths. */
+  const mathGlyphs = el => {
+    const svg = el.querySelector('svg');
+    if (svg) return Array.from(svg.querySelectorAll('use, path, rect')).filter(n => !n.closest('defs'));
+    return Array.from(el.querySelectorAll('mjx-c'));
+  };
+  /* Draws one symbol over ms: an SVG outline is traced by the nib and then filled; a CHTML character is uncovered
+     from left to right under it. onX(x) reports how far right (viewport x) the ink has reached. */
+  const drawGlyph = async (L, g, ms, onX) => {
+    const win = L.win, r = g.getBoundingClientRect();
+    if (r.width < 0.5 && r.height < 0.5) { g.style.opacity = ''; g.style.clipPath = ''; return; }
+    let outline = null, len = 0, ctm = null;
+    if (g.ownerSVGElement) {
+      try {
+        const href = g.tagName.toLowerCase() === 'use' ? (g.getAttribute('href') || g.getAttribute('xlink:href') || '') : '';
+        outline = href ? g.ownerDocument.getElementById(href.replace(/^#/, '')) : g;
+        len = outline && outline.getTotalLength ? outline.getTotalLength() : 0;
+        ctm = len ? g.getScreenCTM() : null;
+      } catch (e) { len = 0; }
+    }
+    if (Math.hypot(r.left - L.pos.x, r.bottom - L.pos.y) > 6) await fly(L, r.left, r.top + r.height * 0.6, Math.min(110, ms), 3);
+    if (len && ctm) {
+      g.style.opacity = '';
+      g.style.fillOpacity = '0';
+      g.style.stroke = 'currentColor';
+      g.style.strokeWidth = '34';                     // MathJax draws in thousandths of an em
+      g.style.strokeDasharray = String(len);
+      await tween(win, ms, t => {
+        g.style.strokeDashoffset = (len * (1 - t)).toFixed(1);
+        let q = outline.getPointAtLength(len * t);
+        q = new win.DOMPoint(q.x, q.y).matrixTransform(ctm);
+        place(L, q.x, q.y);
+        onX(r.left + r.width * t);
+      });
+      for (const k of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) g.style[k] = '';
+    } else {
+      g.style.opacity = '';
+      await tween(win, ms, t => {
+        g.style.clipPath = `inset(-60% ${((1 - t) * 100).toFixed(1)}% -60% -20%)`;
+        // down the symbol's left side, then up and across to its right shoulder
+        const y = t < 0.45 ? r.top + r.height * (0.25 + t * 1.6) : r.bottom - r.height * (t - 0.45) * 1.3;
+        place(L, r.left + r.width * t, y);
+        onX(r.left + r.width * t);
+      });
+      g.style.clipPath = '';
+    }
+  };
+
   const park = (L, view) => {
     L.win.clearTimeout(L.idle);
     L.idle = L.win.setTimeout(async () => {
@@ -1781,27 +2187,78 @@ function createPen(app, settings) {
           }
         }
         let hand = null, handEnd = { x: r0.right, y: r0.top };
-        if (replacement && !destroyed) {
+        const script = replacement && !destroyed ? penScript(replacement, 48) : [];
+        if (script.length) {
           hand = doc.createElement('div');
           hand.className = 'lagrange-pen-hand';
-          const shown = replacement.replace(/\s+/g, ' ').trim();
-          hand.textContent = shown.length > 48 ? shown.slice(0, 46).trimEnd() + ' …' : shown;
-          const fs = parseFloat(win.getComputedStyle(view.contentDOM).fontSize) || 16;
-          hand.style.fontSize = `${(fs * 1.3).toFixed(1)}px`;
+          const typeset = script.some(g => g.type === 'math') && await mathReady();
+          const pieces = [];
+          for (const g of script) {
+            const span = doc.createElement('span');
+            const m = g.type === 'math' && typeset ? renderPenMath(g.source, g.display, obsidian.renderMath) : null;
+            if (m) { span.className = 'lagrange-pen-math'; span.appendChild(m); }
+            else span.textContent = g.type === 'math' ? (g.display ? `$$${g.source}$$` : `$${g.source}$`) : g.text;
+            hand.appendChild(span);
+            pieces.push({ el: span, math: Boolean(m) });
+          }
+          let fs = (parseFloat(win.getComputedStyle(view.contentDOM).fontSize) || 16) * 1.3;
+          hand.style.fontSize = `${fs.toFixed(1)}px`;
           doc.body.appendChild(hand);
-          const hb = hand.getBoundingClientRect();
-          const cw = Math.min(hb.width, vr.width - 8), ch = hb.height;
-          const cx0 = Math.max(vr.left + 4, Math.min(r0.left + (r0.width - cw) / 2, vr.right - cw - 4));
-          const cy0 = Math.max(vr.top + 2, r0.top - ch * 0.62);
+          ink.push(hand);
+          if (pieces.some(q => q.math)) {
+            // MathJax adds the styles for the symbols it used; wait for them, and for the fonts, before measuring.
+            try { if (typeof obsidian.finishRenderMath === 'function') await Promise.race([obsidian.finishRenderMath(), sleep(1200)]); } catch (e) { /* drawn as it is */ }
+            await nextFrame(win);
+          }
+          let hb = hand.getBoundingClientRect();
+          const room = vr.width - 8;
+          if (hb.width > room && room > 40) {              // too wide for the page: write it smaller
+            fs = Math.max(fs * 0.55, fs * room / hb.width);
+            hand.style.fontSize = `${fs.toFixed(1)}px`;
+            hb = hand.getBoundingClientRect();
+          }
+          const cw = hb.width, ch = hb.height;
+          // A replacement is written above the words it replaces. An insertion is written below its place: from
+          // the start of the line when it opens a new paragraph (as an append does), else under the caret.
+          let cx0 = r0.left + (r0.width - cw) / 2, cy0 = r0.top - ch * (ch > fs * 1.6 ? 0.85 : 0.62);
+          if (to === from) {
+            cy0 = r0.bottom + 2;
+            if (/^\s*\n/.test(replacement) || from === view.state.doc.length) {
+              const start = view.coordsAtPos(view.state.doc.lineAt(from).from);
+              if (start) cx0 = start.left;
+            }
+          }
+          cx0 = Math.max(vr.left + 4, Math.min(cx0, vr.right - cw - 4));
+          cy0 = Math.max(vr.top + 2, Math.min(cy0, vr.bottom - ch - 2));
           hand.style.left = `${cx0}px`;
           hand.style.top = `${cy0}px`;
-          ink.push(hand);
+          // The ink shows up to x (viewport): the hand is uncovered from the left as the nib passes.
+          const reveal = x => { hand.style.clipPath = `inset(-0.6em ${Math.max(0, cx0 + cw - x).toFixed(1)}px -0.6em -0.2em)`; };
           const by = cy0 + ch * 0.78;
-          await fly(L, cx0, by, 280 * k, 6);
-          await tween(win, Math.min(2400, cw * 9) * k, t => {
-            hand.style.clipPath = `inset(-0.4em ${((1 - t) * 100).toFixed(1)}% -0.4em -0.2em)`;
-            place(L, cx0 + cw * t, by + Math.sin(t * cw * 0.55) * 3.2 - 2);
-          });
+          for (const piece of pieces) {
+            if (destroyed) break;
+            const pr = piece.el.getBoundingClientRect();
+            const glyphs = piece.math ? mathGlyphs(piece.el) : [];
+            if (glyphs.length && glyphs.length <= 90) {
+              for (const g of glyphs) g.style.opacity = '0';
+              let seen = pr.left;
+              reveal(seen);
+              const each = Math.min(170, 3600 / glyphs.length) * k;
+              for (const g of glyphs) {
+                if (destroyed) break;
+                await drawGlyph(L, g, each, x => { if (x > seen) { seen = x; reveal(seen); } });
+              }
+              reveal(pr.right);
+            } else {
+              if (Math.hypot(pr.left - L.pos.x, by - L.pos.y) > 4) await fly(L, pr.left, by, 280 * k, 6);
+              await tween(win, Math.min(2400, pr.width * 9) * k, t => {
+                const x = pr.left + pr.width * t;
+                reveal(x);
+                place(L, x, by + Math.sin((x - cx0) * 0.55) * 3.2 - 2);
+              });
+            }
+          }
+          hand.style.clipPath = 'none';
           handEnd = { x: cx0 + cw, y: cy0 };
         }
         await fly(L, Math.min(vr.right - 12, handEnd.x + 30), handEnd.y - 18, 280 * k, 10);
@@ -1934,6 +2391,8 @@ function renderMarkdown(app, markdown, el, sourcePath, component) {
   return MarkdownRenderer.renderMarkdown(markdown, el, sourcePath, component);
 }
 
+let pickerUid = 0;   // radio groups need a name of their own in each picker drawn
+
 class LagrangeChatView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -1975,7 +2434,7 @@ class LagrangeChatView extends ItemView {
     const compose = root.createDiv({ cls: 'lagrange-compose' });
     this.inputEl = compose.createEl('textarea', {
       cls: 'lagrange-input',
-      attr: { rows: '2', placeholder: 'Ask about this note…', 'aria-label': 'Message to Lagrange' },
+      attr: { rows: '2', placeholder: this.plugin.settings.agenticEdits ? 'Ask about this note, or ask for a change…' : 'Ask about this note…', 'aria-label': 'Message to Lagrange' },
     });
     this.inputEl.addEventListener('keydown', ev => {
       if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
@@ -1985,7 +2444,16 @@ class LagrangeChatView extends ItemView {
     });
     this.inputEl.addEventListener('input', () => this.fitInput());
     const foot = compose.createDiv({ cls: 'lagrange-foot' });
-    this.footEl = foot.createDiv({ cls: 'lagrange-hint' });
+    const left = foot.createDiv({ cls: 'lagrange-foot-left' });
+    // The model and effort in use: a button that opens the picker (openPicker).
+    this.modelEl = left.createEl('button', {
+      cls: 'lagrange-model',
+      attr: { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' },
+    });
+    this.modelEl.addEventListener('click', () => (this.picker ? this.closePicker() : this.openPicker()));
+    left.createSpan({ cls: 'lagrange-hint', text: 'Enter to send, Shift+Enter for a new line' });
+    this.composeEl = compose;
+    this.picker = null;
     this.sendEl = foot.createEl('button', { cls: 'lagrange-send', text: 'Send' });
     this.sendEl.addEventListener('click', () => (this.pending ? this.stop() : this.send()));
 
@@ -1998,6 +2466,7 @@ class LagrangeChatView extends ItemView {
 
   async onClose() {
     this.stop();
+    this.closePicker();
   }
 
   refreshSubject() {
@@ -2013,7 +2482,113 @@ class LagrangeChatView extends ItemView {
   }
 
   refreshFoot() {
-    if (this.footEl) this.footEl.setText(`${modelLabel(this.plugin.settings)} · Enter to send, Shift+Enter for a new line`);
+    if (!this.modelEl) return;
+    const s = this.plugin.settings;
+    this.modelEl.empty();
+    this.modelEl.createSpan({ cls: 'lagrange-model-name', text: footLabel(s) });
+    this.modelEl.createSpan({ cls: 'lagrange-model-caret', text: '▾', attr: { 'aria-hidden': 'true' } });
+    this.modelEl.setAttribute('aria-label', `Model: ${footLabel(s)}. Change the model or the effort`);
+    this.modelEl.setAttribute('title', 'Change the model or the effort');
+  }
+
+  /* The picker: a small sheet over the footer with the current provider's models (and a field to type another), and
+     the reasoning effort. Radio buttons, so the arrow keys move within a group and Tab between groups; Esc, a click
+     elsewhere or the button again closes it. Every choice is saved at once. */
+  openPicker() {
+    if (this.picker || !this.composeEl) return;
+    const doc = this.composeEl.ownerDocument;
+    const el = this.composeEl.createDiv({ cls: 'lagrange-picker', attr: { role: 'dialog', 'aria-label': 'Model and effort' } });
+    const onDown = ev => { if (!el.contains(ev.target) && !this.modelEl.contains(ev.target)) this.closePicker(); };
+    const onKey = ev => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.closePicker(true);
+    };
+    doc.addEventListener('mousedown', onDown, true);
+    el.addEventListener('keydown', onKey);
+    this.picker = { el, close: () => { doc.removeEventListener('mousedown', onDown, true); el.remove(); } };
+    this.modelEl.setAttribute('aria-expanded', 'true');
+    this.modelEl.addClass('is-open');
+    this.drawPicker();
+    const first = el.querySelector('input[type="radio"]:checked:not(:disabled), input:not(:disabled), button');
+    if (first) first.focus();
+  }
+
+  closePicker(refocus) {
+    if (!this.picker) return;
+    this.picker.close();
+    this.picker = null;
+    this.modelEl.setAttribute('aria-expanded', 'false');
+    this.modelEl.removeClass('is-open');
+    if (refocus) this.modelEl.focus();
+  }
+
+  drawPicker(focus) {
+    if (!this.picker) return;
+    const el = this.picker.el, s = this.plugin.settings;
+    const choices = modelChoices(s);
+    const uid = `lagrange-pick-${++pickerUid}`;
+    const save = async keep => { await this.plugin.saveSettings(); this.drawPicker(keep); };
+    el.empty();
+
+    const models = el.createEl('fieldset', { cls: 'lagrange-pick-group' });
+    const legend = models.createEl('legend');
+    legend.createSpan({ text: 'Model' });
+    legend.createSpan({ cls: 'lagrange-pick-provider', text: choices.provider });
+    for (const o of choices.options) {
+      const label = models.createEl('label', { cls: 'lagrange-pick' });
+      const input = label.createEl('input', { attr: { type: 'radio', name: `${uid}-model`, value: o.value } });
+      input.checked = o.value === choices.current;
+      input.addEventListener('change', () => { if (input.checked) { setModel(s, o.value); save(`model:${o.value}`); } });
+      label.createSpan({ text: o.label });
+    }
+    if (choices.free) {
+      const row = models.createDiv({ cls: 'lagrange-pick-other' });
+      const input = row.createEl('input', {
+        cls: 'lagrange-pick-input',
+        attr: { type: 'text', placeholder: choices.options.length ? `Another model: ${choices.placeholder}` : choices.placeholder,
+          'aria-label': 'Another model', spellcheck: 'false', autocomplete: 'off' },
+      });
+      const use = () => {
+        const v = input.value.trim();
+        if (!v || v === choices.current) return;
+        setModel(s, v);
+        save(`model:${v}`);
+      };
+      input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); use(); } });
+      input.addEventListener('change', use);
+    } else if (!choices.options.length) {
+      models.createDiv({ cls: 'lagrange-pick-note', text: 'The demo has no model: its replies are canned.' });
+    }
+
+    const can = effortSupported(s);
+    const efforts = el.createEl('fieldset', { cls: 'lagrange-pick-group lagrange-pick-efforts' });
+    efforts.createEl('legend', { text: 'Effort' });
+    if (!can) efforts.disabled = true;
+    const row = efforts.createDiv({ cls: 'lagrange-pick-row' });
+    for (const [value, name] of [['', 'Default']].concat(EFFORTS.map(e => [e, e[0].toUpperCase() + e.slice(1)]))) {
+      const label = row.createEl('label', { cls: 'lagrange-pick' });
+      const input = label.createEl('input', { attr: { type: 'radio', name: `${uid}-effort`, value } });
+      input.checked = can ? value === s.effort : value === '';
+      input.addEventListener('change', () => { if (input.checked) { s.effort = value; save(`effort:${value}`); } });
+      label.createSpan({ text: name });
+    }
+    efforts.createDiv({
+      cls: 'lagrange-pick-note',
+      text: can ? 'How hard the model thinks before it answers. Default leaves it to the provider.'
+        : (s.provider === 'demo' ? 'The demo does no thinking.' : 'This model takes no effort setting.'),
+    });
+
+    const foot = el.createDiv({ cls: 'lagrange-pick-foot' });
+    const link = foot.createEl('button', { cls: 'lagrange-pick-settings', text: 'Provider and keys…', attr: { type: 'button' } });
+    link.addEventListener('click', () => { this.closePicker(); this.plugin.openSettings(); });
+
+    if (focus) {
+      const [group, value] = [focus.slice(0, focus.indexOf(':')), focus.slice(focus.indexOf(':') + 1)];
+      const again = Array.from(el.querySelectorAll(`input[name="${uid}-${group}"]`)).find(i => i.value === value);
+      if (again) again.focus();
+    }
   }
 
   fitInput() {
@@ -2026,15 +2601,34 @@ class LagrangeChatView extends ItemView {
     if (this.logEl.childElementCount) return;
     const e = this.logEl.createDiv({ cls: 'lagrange-empty' });
     e.createDiv({ cls: 'lagrange-fleuron', text: '❦', attr: { 'aria-hidden': 'true' } });
-    e.createEl('p', { text: 'Ask about the note you are writing. Lagrange reads the open note with each question.' });
+    const s = this.plugin.settings;
+    e.createEl('p', {
+      text: s.agenticEdits
+        ? 'Ask about the note you are writing, or ask for a change: Lagrange reads the open note with each message and edits it with its pen.'
+        : 'Ask about the note you are writing. Lagrange reads the open note with each question.',
+    });
     const p = e.createEl('p', { cls: 'lagrange-quiet' });
-    p.appendText('To have it edit, select a passage and run ');
-    p.createEl('em', { text: 'Revise selection' });
-    p.appendText(', or run ');
-    p.createEl('em', { text: 'Proofread note' });
-    p.appendText(', from the command palette.');
-    if (this.plugin.settings.provider === 'demo') {
+    if (s.agenticEdits) {
+      p.appendText('One undo takes back all the edits of a request. ');
+      p.createEl('em', { text: 'Revise selection' });
+      p.appendText(' and ');
+      p.createEl('em', { text: 'Proofread note' });
+      p.appendText(' are in the command palette too.');
+    } else {
+      p.appendText('To have it edit, select a passage and run ');
+      p.createEl('em', { text: 'Revise selection' });
+      p.appendText(', or run ');
+      p.createEl('em', { text: 'Proofread note' });
+      p.appendText(', from the command palette.');
+    }
+    if (s.provider === 'demo') {
       e.createEl('p', { cls: 'lagrange-quiet', text: 'Demo mode: replies and edits are canned, and nothing leaves Obsidian.' });
+    } else if ((s.provider === 'claude-code' || s.provider === 'codex') && obsidian.Platform && obsidian.Platform.isDesktopApp === false) {
+      const m = e.createEl('p', { cls: 'lagrange-quiet' });
+      m.appendText('A subscription works only in Obsidian on a computer. On this device, choose an API key provider (or the Demo): ');
+      const a = m.createEl('a', { text: 'open settings', attr: { href: '#' } });
+      a.addEventListener('click', ev => { ev.preventDefault(); this.plugin.openSettings(); });
+      m.appendText('.');
     }
   }
 
@@ -2100,7 +2694,7 @@ class LagrangeChatView extends ItemView {
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--reply' });
     const body = el.createDiv({ cls: 'lagrange-turn-body markdown-rendered' });
     let loader = mountLoader(body.createDiv({ cls: 'lagrange-loader-slot' }), this.plugin.settings.loaderTheme);
-    let md = '', shown = null, timer = null, comp = null;
+    let md = '', shown = null, timer = null, comp = null, status = null;
     const render = () => {
       timer = null;
       if (md === shown) return;
@@ -2122,12 +2716,19 @@ class LagrangeChatView extends ItemView {
         md = text;
         if (!timer) timer = window.setTimeout(render, 90);
       },
-      finish: text => {
+      // keep: the turn stays in the log although it has no prose (its edits are about to be listed in it)
+      finish: (text, keep) => {
         if (timer) { window.clearTimeout(timer); timer = null; }
+        if (status) { status.remove(); status = null; }
         md = text;
         if (md) render();
         if (loader) { loader.stop(); loader = null; }
-        if (!md) el.addClass('is-empty');
+        if (!md) { body.empty(); if (!keep) el.addClass('is-empty'); }
+      },
+      // one line under the reply while it streams ("Taking up the pen…"); finish() removes it
+      status: text => {
+        if (!status) status = el.createDiv({ cls: 'lagrange-turn-note is-quiet lagrange-turn-status' });
+        if (status.textContent !== text) { status.setText(text); this.scrollDown(); }
       },
       note: (text, cls) => {
         el.createDiv({ cls: `lagrange-turn-note ${cls || ''}`.trim(), text });
@@ -2172,20 +2773,39 @@ class LagrangeChatView extends ItemView {
     const controller = new AbortController();
     this.setPending({ controller });
     const settings = this.plugin.settings;
-    let partial = '';
+    // With "Edit with the pen" on, the reply may end with edits to the note (parseAgentReply): the chat shows only its
+    // prose, and the edits go to the pen once the reply is complete.
+    const agentic = Boolean(settings.agenticEdits);
+    const prose = full => {
+      if (!agentic) return full;
+      const part = splitAgentReply(full);
+      if (part.blocks.length) reply.status('Taking up the pen…');
+      return part.text;
+    };
+    let partial = '', raw = '';
     try {
       const res = await complete(settings, {
         purpose: 'chat',
-        system: chatSystemPrompt(note, clip),
+        system: chatSystemPrompt(note, clip, agentic),
         messages: this.history.slice(),
         cache: true,
-        demo: () => demoChatReply(text, note),
+        demo: () => demoChatReply(text, note, agentic),
       }, {
         signal: controller.signal,
-        onText: (d, full) => { partial = full; reply.update(full); },
+        onText: (d, full) => { raw = full; partial = prose(full); reply.update(partial); },
         onRetry: (status, ms) => reply.note(`Busy (${status}); trying again in ${Math.round(ms / 1000)} s…`, 'is-quiet'),
       }, this.plugin.session);
-      reply.finish(res.text);
+      const parsed = agentic ? parseAgentReply(res.text) : { text: res.text, ops: [], dropped: 0, error: null, open: false };
+      const editing = parsed.ops.length > 0 && res.stopReason !== 'refusal';
+      reply.finish(parsed.text, editing || Boolean(parsed.error));
+      if (res.text && res.stopReason !== 'refusal') this.history.push({ role: 'assistant', content: res.text });
+      else this.history.pop();
+      if (editing) {
+        await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
+      } else if (parsed.error) {
+        reply.note(`Lagrange meant to edit the note, but its edits could not be read. ${parsed.error}` +
+          `${res.stopReason === 'max_tokens' ? ' (The reply reached its length limit.)' : ''} Nothing was changed; ask again.`, 'is-warn');
+      }
       if (res.stopReason === 'refusal') {
         const cat = res.stopDetails && res.stopDetails.category;
         reply.note(`Claude declined to continue${cat ? ` (${cat})` : ''}. Try rephrasing the question.`, 'is-warn');
@@ -2193,12 +2813,11 @@ class LagrangeChatView extends ItemView {
         reply.note('The reply reached its length limit.', 'is-quiet');
       }
       if (res.fallbackTo) reply.note(`Answered by ${res.fallbackTo} after a refusal.`, 'is-quiet');
-      if (res.text && res.stopReason !== 'refusal') this.history.push({ role: 'assistant', content: res.text });
-      else this.history.pop();
     } catch (err) {
       if (isAbort(err)) {
+        // Stopped mid-reply: what was said stays; edits that had not finished arriving are not made.
         reply.finish(partial);
-        reply.note('Stopped.', 'is-quiet');
+        reply.note(raw !== partial && splitAgentReply(raw).blocks.length ? 'Stopped before any edit was made.' : 'Stopped.', 'is-quiet');
         if (partial) this.history.push({ role: 'assistant', content: partial });
         else this.history.pop();
       } else {
@@ -2251,11 +2870,14 @@ class LagrangeChatView extends ItemView {
     const item = (list, e, why) => {
       const li = list.createEl('li');
       const line = li.createDiv({ cls: 'lagrange-edit-line' });
-      line.createEl('del', { cls: 'lagrange-del', text: excerpt(e.matched || e.find, 160) });
-      line.createSpan({ cls: 'lagrange-arrow', text: ' → ' });
-      if (e.replace) line.createEl('ins', { cls: 'lagrange-ins', text: excerpt(e.replace, 160) });
+      if (e.insert) line.createSpan({ cls: 'lagrange-arrow', text: '+ ' });       // an insertion: nothing is struck
+      else {
+        line.createEl('del', { cls: 'lagrange-del', text: excerpt(e.matched || e.find, 160) });
+        line.createSpan({ cls: 'lagrange-arrow', text: ' → ' });
+      }
+      if (e.replace) line.createEl('ins', { cls: 'lagrange-ins', text: excerpt(e.insert ? e.replace.trim() : e.replace, 160) });
       else line.createEl('span', { cls: 'lagrange-ins is-deletion', text: 'deleted' });
-      const reason = why ? `${e.reason ? e.reason + '; ' : ''}skipped: ${why}` : e.reason;
+      const reason = why ? `${e.reason ? e.reason + '; ' : ''}skipped: ${why}${e.insert && e.find ? ` (“${excerpt(e.find, 60)}”)` : ''}` : e.reason;
       if (reason) li.createDiv({ cls: 'lagrange-reason', text: reason });
     };
     if (n) {
@@ -2416,6 +3038,12 @@ class LagrangeSettingTab extends PluginSettingTab {
           : 'A model your plan includes, as Codex names it. Empty: Codex’s default.')
         .addText(t => t.setPlaceholder(claude ? 'sonnet' : 'default').setValue(s[modelKey])
           .onChange(async v => { s[modelKey] = v.trim(); await save(); }));
+      if (obsidian.Platform && obsidian.Platform.isDesktopApp === false) {
+        containerEl.createEl('p', {
+          cls: 'setting-item-description mod-warning',
+          text: 'This device can’t run it: a subscription works only in Obsidian on a computer. Choose an API key provider (or the Demo) here.',
+        });
+      }
     } else if (s.provider === 'openai-api') {
       new Setting(containerEl).setName('OpenAI').setHeading();
       new Setting(containerEl)
@@ -2463,11 +3091,32 @@ class LagrangeSettingTab extends PluginSettingTab {
       });
     }
 
+    if (s.provider !== 'demo') {
+      const can = effortSupported(s);
+      new Setting(containerEl)
+        .setName('Effort')
+        .setDesc(can ? 'How hard the model thinks before it answers. Also at the foot of the chat, with the model.'
+          : 'This model takes no effort setting.')
+        .addDropdown(d => {
+          d.addOption('', 'The provider’s default');
+          for (const e of EFFORTS) d.addOption(e, e[0].toUpperCase() + e.slice(1));
+          d.setValue(can ? s.effort : '').onChange(async v => { s.effort = v; await save(); });
+        })
+        .setDisabled(!can);
+    }
+
+    new Setting(containerEl).setName('Editing').setHeading();
+    new Setting(containerEl)
+      .setName('Edit with the pen from the chat')
+      .setDesc('When you ask in the chat for a change to the open note, Lagrange makes it with its pen (one undo takes ' +
+        'it back). Off: the chat only talks, and edits come from the Revise selection and Proofread note commands.')
+      .addToggle(t => t.setValue(s.agenticEdits).onChange(async v => { s.agenticEdits = v; await save(); }));
+
     new Setting(containerEl).setName('Appearance').setHeading();
     new Setting(containerEl)
       .setName('Loading animation')
       .setDesc('What the chat shows while Lagrange thinks.')
-      .addDropdown(d => d.addOption('random', 'A different plate each time').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('trebuchet', 'Trebuchet').addOption('orbit', 'The five Lagrange points')
+      .addDropdown(d => d.addOption('random', 'A different plate each time').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('orbit', 'The five Lagrange points')
         .setValue(s.loaderTheme).onChange(async v => { s.loaderTheme = v; await save(); }));
     new Setting(containerEl)
       .setName('Show the pen')
@@ -2480,6 +3129,11 @@ class LagrangeSettingTab extends PluginSettingTab {
       .addSlider(sl => sl.setLimits(0.5, 3, 0.25).setValue(s.penSpeed).setDynamicTooltip()
         .onChange(async v => { s.penSpeed = v; await save(); }))
       .setDisabled(!s.showPen);
+    new Setting(containerEl)
+      .setName('Ink trail')
+      .setDesc('A thin line of ink follows the pen as it moves and fades at once. Never shown when your system asks for reduced motion.')
+      .addToggle(t => t.setValue(s.penTrail).onChange(async v => { s.penTrail = v; await save(); }))
+      .setDisabled(!s.showPen);
   }
 }
 
@@ -2487,7 +3141,7 @@ class LagrangePlugin extends Plugin {
   async onload() {
     // One settings object for the plugin's lifetime: the pen keeps a reference to it.
     this.settings = sanitizeSettings(await this.loadData());
-    this.session = { noFallback: false };
+    this.session = { noFallback: false, noEffort: {} };
     this.editing = false;
     this.lastEdit = null;
     this.pen = createPen(this.app, this.settings);
@@ -2674,6 +3328,44 @@ class LagrangePlugin extends Plugin {
     return result;
   }
 
+  /* Makes the edits a chat reply asked for (parsed: parseAgentReply's result) in the note the message was about, by
+     the same road as the commands: located in the editor's current text, written by the pen, one undo step, listed
+     under the reply. */
+  async applyChatEdits(view, note, parsed, reply, signal) {
+    const task = {
+      el: reply.el,
+      stopLoader: () => {},
+      status: text => reply.status(text),
+      report: (result, onUndo) => { if (this.chatView()) this.chatView().renderReport(reply.el, result, onUndo); },
+      done: text => reply.note(text, 'is-quiet'),
+      fail: err => { const v = this.chatView(); if (v) v.addError(err, reply.el); },
+    };
+    if (!view || !view.file || !note || view.file.path !== note.path || !view.containerEl.isConnected) {
+      reply.note('The note is no longer open, so Lagrange’s edits were not made.', 'is-warn');
+      return;
+    }
+    if (this.editing) { reply.note('Lagrange is already editing, so these edits were not made.', 'is-warn'); return; }
+    this.editing = true;
+    try {
+      await this.ensureEditing(view);
+      const cm = view.editor && view.editor.cm;
+      const docText = cm ? cm.state.doc.toString() : view.editor.getValue();
+      const { located, skipped } = locateOps(docText, parsed.ops);
+      if (parsed.error) reply.note(`Some of the edits could not be read. ${parsed.error}`, 'is-warn');
+      if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
+      await this.applyEdits(view, located, skipped, task, signal);
+    } catch (err) {
+      this.reportFailure(err, task);
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  chatView() {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    return leaf && leaf.view instanceof LagrangeChatView ? leaf.view : null;
+  }
+
   async proofread(view) {
     if (this.editing) { new Notice('Lagrange is already editing.'); return; }
     const note = this.noteFrom(view);
@@ -2796,6 +3488,8 @@ LagrangePlugin.createPen = createPen;
 LagrangePlugin.rangeRects = rangeRects;
 LagrangePlugin.internals = {
   DEFAULT_SETTINGS, ANTHROPIC_MODELS, ANTHROPIC_VERSION, FALLBACK_BETA, sanitizeSettings, anthropicModelId,
+  LOADER_THEMES, LOADER_CAPTIONS, EFFORTS, CLAUDE_CODE_MODELS, effortSupported, effortFor, modelChoices, setModel, footLabel, modelLabel,
+  splitAgentReply, parseAgentReply, locateOps, demoChatEdits, mathSegments, hasMath, penScript, renderPenMath, trailBands,
   createSSEParser, jsonValuesIn, parseEdits, findAll, looseFindAll, locateEdits, clipText, cleanRevision,
   parseErrorBody, describeError, noteStats, excerpt, demoProofreadEdits, demoRevise, demoChatReply,
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,

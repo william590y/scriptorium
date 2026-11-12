@@ -1,5 +1,5 @@
 {
-  "provider": "anthropic",
+  "provider": "claude-code",
   "anthropicApiKey": "",
   "anthropicModel": "claude-sonnet-5-5",
   "anthropicCustomModel": "",
@@ -13,7 +13,10 @@
   "claudeCodeModel": "sonnet",
   "codexPath": "",
   "codexModel": "",
+  "effort": "",
+  "agenticEdits": true,
   "loaderTheme": "random",
   "showPen": true,
-  "penSpeed": 1
+  "penSpeed": 1,
+  "penTrail": true
 }

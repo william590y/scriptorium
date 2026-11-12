@@ -10,8 +10,9 @@ quiet admonitions and a focused view of images, after [gwern.net](https://gwern.
   Lorem Ipsum sample note;
 - **the Scriptorium plugin** (`vault/.obsidian/plugins/scriptorium`), which switches between the regular and the
   Fancy typography, chooses the drop cap, and sets footnotes in the margin and images in focus;
-- **Lagrange** (`vault/.obsidian/plugins/lagrange`), a writing companion: a chat about the open note, and edits
-  (revise a selection, proofread a note) that a pen strikes through and writes in;
+- **Lagrange** (`vault/.obsidian/plugins/lagrange`), a writing companion: a chat about the open note that also edits
+  it when you ask (and commands to revise a selection or proofread a note), each edit struck through and written in by
+  a pen;
 - **Scriptorium Setup** (`installer/`), a small Windows installer that creates a new vault from the template and, if
   you tick them, installs Obsidian, the fonts and the Longform plugin, then opens the vault in Obsidian with its
   plugins on;
@@ -72,14 +73,29 @@ urgent kinds, in Reading view and Live Preview, light and dark.
 ## Lagrange
 
 Lagrange talks with you about the note you have open and edits it when you ask. Click the **pen-nib icon** (or run
-**Lagrange: Open**) for the chat in the right sidebar; select a passage and run **Lagrange: Revise selection**, or run
-**Lagrange: Proofread note**. Each edit is struck through and written in by a pen, then listed in the chat with its
-reason; one **Undo** (or the **Undo Lagrange's edits** button) takes back all the edits of a request.
+**Lagrange: Open**) for the chat in the right sidebar and type: a question gets an answer, and a request for a change
+("fix the grammar", "tighten the second paragraph", "add the equation for kinetic energy") is carried out in the note.
+Each edit is struck through and written in by a pen, in handwriting, with a thin trail of ink behind the nib; an
+equation is typeset and drawn symbol by symbol. The edits are then listed in the chat with their reasons, and one
+**Undo** (or the **Undo Lagrange's edits** button) takes back all the edits of a request. The commands **Lagrange:
+Revise selection** and **Lagrange: Proofread note** do the same for a selected passage or for the whole note. To keep
+the chat to talk only, turn off **Settings → Lagrange → Edit with the pen from the chat**; the ink trail has a switch
+there too, and neither the trail nor the flying pen is shown when your system asks for reduced motion.
 
-Choose who writes the replies in **Settings → Lagrange**: Anthropic's Claude (with your API key), an OpenAI-compatible
-server such as a local Ollama, or **Demo (offline)**, which gives canned replies and edits so you can try it without a
-key. The API key is kept, as other Obsidian AI plugins keep theirs, in plain text in the vault's
+Choose who writes the replies in **Settings → Lagrange**. The default is **your Claude subscription**, through Claude
+Code (install it, run `claude` once in a terminal and sign in; no API key). The others are Anthropic's Claude with an
+API key, your ChatGPT subscription through Codex, OpenAI with an API key, an OpenAI-compatible server such as a local
+Ollama, and **Demo (offline)**, which gives canned replies and edits so you can try it without an account. The two
+subscriptions work in Obsidian on a computer only; on a phone or tablet Lagrange says so and asks you to choose an API
+key provider or the Demo. API keys are kept, as other Obsidian AI plugins keep theirs, in plain text in the vault's
 `.obsidian/plugins/lagrange/data.json`.
+
+The **model and the reasoning effort** are at the foot of the chat: click the model's name to choose another model of
+the same provider (or type one) and an effort of low, medium or high. Effort is sent only to models that take one
+(current Claude models, Claude Code, Codex and OpenAI's reasoning models); for the others the choice is greyed out.
+
+In Obsidian's light theme the panel uses the paper, ink and oxblood of [williamliaw.com](https://williamliaw.com); in
+the dark theme it follows the vault's theme.
 
 ## Install
 
@@ -256,8 +272,10 @@ telemetry, analytics or update check. Opening the new vault with its plugins on 
 computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests.
 
 Lagrange, the writing companion, sends the open note and what you write to it to the provider you choose in its
-settings (Anthropic's API at `api.anthropic.com`, or the OpenAI-compatible server whose address you enter), and only
-when you send it a message or run one of its commands. It makes no other requests, and none in Demo mode.
+settings, and only when you send it a message or run one of its commands: your Claude subscription through the Claude
+Code program on your computer (the default), Anthropic's API at `api.anthropic.com`, your ChatGPT subscription through
+the Codex program, OpenAI's API at `api.openai.com`, or the OpenAI-compatible server whose address you enter. It makes
+no other requests, and none in Demo mode. Its handwriting font is inside the plugin; nothing is downloaded.
 
 ## Uninstalling
 
