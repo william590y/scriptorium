@@ -1,0 +1,53 @@
+Kanzlei Initialen and Deutsche Zierschrift: the terms found, quoted as they stand
+================================================================================
+
+Both fonts were digitised by Dieter Steffmann (Typographer Mediengestaltung, Kreuztal, Germany). Scriptorium includes
+them as gwern.net publishes them (one small TrueType font for each letter, A to Z), unchanged:
+  https://gwern.net/static/font/dropcap/kanzlei/Kanzlei-Initialen-A.ttf  (… -Z.ttf)
+  https://gwern.net/static/font/dropcap/de-zs/DeutscheZierschrift-A.ttf  (… -Z.ttf)
+  https://github.com/gwern/gwern.net/tree/master/font/dropcap
+
+No licence text is distributed with either font. These are the statements found on 2026-11-12, verbatim.
+
+1. In the font files themselves (the OpenType "name" table)
+
+   Kanzlei Initialen
+     Copyright (name ID 0): "Copyright (c) Typographrer Mediengestaltung, 2002. All rights reserved. Digitized by
+                             Dieter Steffmann, Kreuztal."
+     License (name ID 13):  "have fun and enjoy"
+     Embedding (OS/2 fsType): 0 (installable embedding: no restriction)
+
+   Deutsche Zierschrift
+     Copyright (name ID 0): "Copyright (c) Typographer Mediengestaltung, 2002. All rights reserved. Deutsche
+                             Zierschrift geschaffen von Prof. Rudolf Koch, 1919-1921. Digitized and hinted by Dieter
+                             Steffmann, Kreuztal."
+     License (name ID 13):  "Have fun and enjoy"
+     License URL (name ID 14): "http://www.steffmann.de"
+     Embedding (OS/2 fsType): 0 (installable embedding: no restriction)
+
+2. Dieter Steffmann, answering readers on his own site, http://www.steffmann.de/wordpress/ (the comments under
+   "Startseite"). His answers have changed over the years; all of those found are given.
+
+   16 December 2012:  "The fonts are free for private use only."
+   19 May 2013:       "generally, all of the fonts are free for non commercial uses only to protect commercial font
+                       shops (Linotype, Fontshop etc.). But many of the fonts are not present by the commercials, in
+                       these cases i give the permission after single request."
+   28 May 2014:       "download fonts at http://steffmann.1001fonts.com/ please. all of the fonts there can be
+                       embedded!"
+   12 February 2015:  "You may use all fonts for free, including commercial use."
+   10 July 2015:      "Hi, You may use all fonts for free."
+   28 August 2024:    "You may use all fonts for free."
+
+3. Where the fonts are offered for download
+
+   Deutsche Zierschrift, at https://www.dafont.com/deutsche-zierschrif.font (by Dieter Steffmann): "100% Free".
+   Neither font was found in Dieter Steffmann's public listing at https://www.1001fonts.com/users/steffmann/ on that
+   day. His fonts that are listed there (Goudy Initialen and Kanzlei among them) are offered under the "1001Fonts Free
+   For Commercial Use License (FFC)", https://www.1001fonts.com/licenses/ffc.html, whose section 5 reads: "While the
+   given typeface may freely be copied and passed along to other individuals for private use as its original
+   downloadable zip-file, it may not be sold or published without written permission by its respective author."
+
+None of these statements uses the word "redistribution". The two fonts are bundled at the repository owner's direction
+(2026-11-12), on his reading that their terms permit it, as gwern.net publishes them. Anyone who passes Scriptorium on
+should read the statements above for themselves. To leave the fonts out, delete
+vault/.obsidian/plugins/scriptorium/dropcaps/kanzlei and .../de-zs: nothing else depends on them.

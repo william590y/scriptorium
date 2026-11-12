@@ -37,6 +37,8 @@ test('settings: defaults, checked values, unknown keys kept', () => {
   assert.equal(s.imageFocus, true);   // not a boolean: the default
   assert.equal(s.future, 3);
   assert.equal(S.normalizeSettings({ initials: 'comic-sans' }).initials, 'yinit');
+  assert.equal(S.normalizeSettings({ initials: 'set:Dropcat' }).initials, 'set:Dropcat', 'a set of drop caps, by name');
+  assert.equal(S.normalizeSettings({ initials: 'set:' }).initials, 'yinit');
   for (const v of ['yinit', 'goudy', 'plain', 'none']) assert.equal(S.normalizeSettings({ initials: v }).initials, v);
 });
 
@@ -321,7 +323,7 @@ test('a note’s drop cap: read from its properties, forgiving about spelling; a
     [{ dropcap: 'goudy' }, 'goudy'], [{ dropcap: 'Goudy Initialen' }, 'goudy'], [{ dropcap: ' YINIT ' }, 'yinit'],
     [{ dropcap: 'plain' }, 'plain'], [{ dropcap: 'Cormorant' }, 'plain'], [{ dropcap: 'none' }, 'none'],
     [{ dropcap: 'off' }, 'none'], [{ dropcap: false }, 'none'], [{ 'drop-cap': 'goudy' }, 'goudy'], [{ dropCap: 'none' }, 'none'],
-    [{ dropcap: 'comic-sans' }, null], [{ dropcap: '' }, null], [{ dropcap: true }, null], [{ dropcap: 3 }, null], [{ dropcap: null }, null],
+    [{ dropcap: 'comic-sans' }, 'set:comic-sans'], [{ dropcap: ' My Initials ' }, 'set:My Initials'], [{ dropcap: 'Dropcat' }, 'set:Dropcat'], [{ dropcap: '' }, null], [{ dropcap: '  ' }, null], [{ dropcap: true }, null], [{ dropcap: 3 }, null], [{ dropcap: null }, null],
     [{ title: 'x' }, null], [{}, null], [null, null], [undefined, null], ['goudy', null],
   ]) assert.equal(S.noteDropcap(fm), want, JSON.stringify(fm));
 });
@@ -409,4 +411,274 @@ test('Export to PDF: the printed page gets Reading view’s marks, the title its
   assert.deepEqual(page2.children.map(c => c.className), ['el-h1', 'el-p'], 'the note’s own first heading stays a heading');
   S.dressPrint(page2, null);
   assert.deepEqual(page2.children.map(c => c.className), ['el-h1', 'el-p'], 'doing it twice changes nothing');
+});
+
+
+// ---------------------------------------------------------------- sets of drop caps
+test('sets of drop caps: the five that come with Scriptorium are there, whole, and say where they are from', () => {
+  const dir = path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'dropcaps');
+  assert.deepEqual(S.BUNDLED_SETS.map(b => b.dir), ['kanzlei', 'de-zs', 'dropcat', 'gene-wolfe', 'ninit']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['de-zs', 'dropcat', 'gene-wolfe', 'gwern.json', 'kanzlei', 'ninit']);
+  const letters = { dropcat: 'BCGIQT', 'gene-wolfe': 'FTV', ninit: 'ABC' };
+  const ALL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let bytes = 0;
+  for (const b of S.BUNDLED_SETS) {
+    const files = fs.readdirSync(path.join(dir, b.dir));
+    const set = S.describeSet(b.name, files, b.meta);
+    for (const f of files) {
+      const data = fs.readFileSync(path.join(dir, b.dir, f));
+      assert.equal(S.checkDropcapFile(f, new Uint8Array(data)).ok, true, f);
+      bytes += data.length;
+    }
+    if (letters[b.dir]) {
+      assert.equal(set.kind, 'images');
+      assert.equal(Object.keys(set.letters).sort().join(''), letters[b.dir], b.dir);
+      for (const slot of Object.values(set.letters)) assert.ok(slot.light.length === 1 && slot.dark.length === 1, 'a light and a dark image for each letter');
+      assert.equal(b.more, true, 'gwern.net has more of it');
+      assert.match(S.setLabel(set, b.about), new RegExp(`^${b.name} \\(.*gwern\\.net; ${letters[b.dir].split('').join(' ')}\\)$`));
+    } else {
+      // gwern.net's fonts: one small font for each letter, as gwern.net serves them
+      assert.equal(set.kind, 'font');
+      assert.equal(Object.keys(set.fonts).sort().join(''), ALL, b.dir);
+      assert.equal(files.length, 26);
+      assert.ok(set.size > 3 && set.margin, 'set to stand three lines deep');
+      const css = S.fontFaces(set, f => `app://x/${f}`);
+      assert.equal(css.split('\n').length, 26);
+      assert.match(css, new RegExp(`@font-face \\{ font-family: "${set.family}"; src: url\\("app://x/[A-Za-z-]+-Q\\.ttf"\\); font-display: block; unicode-range: U\\+51, U\\+71; \\}`));
+    }
+  }
+  assert.ok(bytes < 1500 * 1024, `the bundled drop caps stay small (${bytes} bytes)`);
+  // what is not Scriptorium's to pass on is named, with where to get it
+  assert.deepEqual(S.YOUR_OWN_SETS.map(y => y.name), ['Cheshire Initials']);
+  assert.match(S.YOUR_OWN_SETS[0].where, /^https:\/\/www\.1001fonts\.com\//);
+  assert.equal(fs.existsSync(path.join(dir, 'cheshire')), false);
+  const third = fs.readFileSync(path.join(__dirname, '..', 'THIRD_PARTY.md'), 'utf8');
+  for (const name of ['Dropcat', 'Gene Wolfe', 'Ninit', 'Kanzlei Initialen', 'Deutsche Zierschrift', 'Cheshire Initials', 'Dieter Steffmann', 'House of Lime']) assert.match(third, new RegExp(name), name);
+  assert.match(third, /CC0|CC-0/);
+  assert.match(third, /licenses\/CC0-1\.0\.txt/);
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'licenses', 'CC0-1.0.txt')));
+  assert.match(third, /at the repository owner’s direction/);
+});
+
+test('sets of drop caps: what gwern.net has more of, and fetching it only when asked', async () => {
+  const list = JSON.parse(fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'dropcaps', 'gwern.json'), 'utf8'));
+  assert.equal(list.from, 'https://gwern.net/static/font/dropcap/');
+  const cat = S.downloadPlan(list, 'dropcat', false);
+  assert.equal(cat.files.length, 74);
+  assert.ok(cat.bytes > 2e6 && cat.bytes < 4e6);
+  assert.deepEqual(S.downloadPlan(list, 'dropcat', true), cat, 'gwern.net shows every Dropcat image');
+  assert.equal(cat.files[0].url, 'https://gwern.net/static/font/dropcap/dropcat/dark/B-dark-1-small-2x.png');
+  assert.equal(cat.files[0].file, 'B-dark-1-small-2x.png');
+  for (const f of cat.files) assert.ok(S.dropcapFile(f.file).letter, f.file);
+  const wolfe = S.downloadPlan(list, 'gene-wolfe', false), wolfeAll = S.downloadPlan(list, 'gene-wolfe', true);
+  assert.equal(wolfe.files.length, 30);
+  assert.equal(wolfeAll.files.length, 165);
+  assert.ok(wolfeAll.bytes > 30e6, 'and the size is said before anything is fetched');
+  assert.equal(S.downloadPlan(list, 'ninit', false).files.length, 0);
+  assert.equal(S.downloadPlan(list, 'ninit', true).files.length, 58);
+  assert.equal(new Set(S.downloadPlan(list, 'ninit', true).files.map(f => f.file)).size, 58, 'no two files share a name');
+  assert.deepEqual(S.downloadPlan(list, 'yinit', true), { files: [], bytes: 0 });
+  assert.deepEqual(S.downloadPlan({ from: 'https://evil.example/', sets: list.sets }, 'dropcat', true).files, [], 'only from gwern.net');
+  assert.deepEqual(S.downloadPlan({ from: list.from, sets: { x: { web: [['light/../../a.png', 1], ['light/a.svg', 1], ['other/A-1.png', 1]] } } }, 'x', true).files, []);
+  assert.equal(S.sizeText(2747735), '2.6 MB');
+  assert.equal(S.sizeText(36397640), '35 MB');
+  assert.equal(S.sizeText(910925), '890 kB');
+
+  const png = n => { const b = new Uint8Array(n); b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); return b; };
+  const plan = { files: ['A-light-1.png', 'B-light-1.png', 'C-dark-1.png', 'Q-light-2.png'].map(file => ({ url: `https://gwern.net/x/${file}`, file, bytes: 100 })), bytes: 400 };
+  const vault = { 'B-light-1.png': png(9) }, asked = [], seen = [];
+  const io = {
+    get: async url => {
+      asked.push(url);
+      if (url.endsWith('C-dark-1.png')) return new TextEncoder().encode('<html>not found</html>');
+      if (url.endsWith('Q-light-2.png')) throw new Error('gwern.net answered 503');
+      return png(64).buffer;
+    },
+    has: async file => file in vault,
+    put: async (file, bytes) => { vault[file] = bytes; },
+    progress: (done, total, file) => seen.push([done, total, file]),
+  };
+  const r = await S.fetchDropcapSet(plan, io);
+  assert.deepEqual([r.saved, r.kept, r.bytes, r.offline, r.stopped], [1, 1, 64, false, false]);
+  assert.deepEqual(r.failed, [{ file: 'C-dark-1.png', problem: 'it is not a PNG image' }, { file: 'Q-light-2.png', problem: 'gwern.net answered 503' }]);
+  assert.deepEqual(Object.keys(vault).sort(), ['A-light-1.png', 'B-light-1.png']);
+  assert.equal(asked.length, 3, 'an image already in the vault is not fetched again');
+  assert.deepEqual(seen[0], [0, 4, 'A-light-1.png']);
+  assert.deepEqual(seen[seen.length - 1], [4, 4, '']);
+  assert.match(S.describeDownload('Dropcat', r), /^Dropcat: 1 image added \(1 kB\), 1 already there, 2 could not be fetched \(it is not a PNG image\); ask again to try those\.$/);
+
+  // no connection: three failures in a row and nothing more is asked for; nothing is written
+  let tries = 0, wrote = 0;
+  const off = await S.fetchDropcapSet(S.downloadPlan(list, 'dropcat', false), {
+    get: async () => { tries++; throw new Error('net::ERR_INTERNET_DISCONNECTED'); }, has: async () => false, put: async () => { wrote++; },
+  });
+  assert.deepEqual([tries, wrote, off.offline, off.saved], [3, 0, true, 0]);
+  assert.match(S.describeDownload('Dropcat', off), /gwern\.net could not be reached \(net::ERR_INTERNET_DISCONNECTED\)\. Nothing was changed/);
+  // the writer closes the dialogue: it stops after the image it is on
+  let n = 0;
+  const halted = await S.fetchDropcapSet(plan, { get: async () => png(20), has: async () => false, put: async () => { n++; }, stopped: () => n >= 2 });
+  assert.deepEqual([halted.saved, halted.stopped], [2, true]);
+  // too large an answer is refused
+  const big = await S.fetchDropcapSet({ files: [plan.files[0]] }, { get: async () => png(3 * 1024 * 1024), has: async () => false, put: async () => { throw new Error('written'); } });
+  assert.match(big.failed[0].problem, /larger than 2 MB/);
+});
+
+test('sets of drop caps: an image of one colour becomes ink on a clear ground', () => {
+  const image = (w, h, paint) => {
+    const px = new Uint8ClampedArray(4 * w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) px.set(paint(x, y), 4 * (y * w + x));
+    return px;
+  };
+  const alpha = (m, w, x, y) => m[4 * (y * w + x) + 3];
+  // black ink on white paper, with a ruled frame at the very edge and a grey wash
+  const w = 20, h = 20;
+  const ink = (x, y) => x === 0 || y === 0 || x === 19 || y === 19 || (x >= 8 && x < 12);
+  const paper = image(w, h, (x, y) => (ink(x, y) ? [8, 8, 8, 255] : (x === 4 ? [128, 128, 128, 255] : [250, 248, 240, 255])));
+  const m = S.monoMask(paper, w, h);
+  assert.equal(m.length, paper.length);
+  assert.equal(alpha(m, w, 0, 0), 255, 'the frame is ink');
+  assert.equal(alpha(m, w, 10, 10), 255, 'the letter is ink');
+  assert.equal(alpha(m, w, 2, 2), 0, 'the paper is clear');
+  assert.ok(alpha(m, w, 4, 10) > 100 && alpha(m, w, 4, 10) < 255, 'a grey wash is thin ink');
+  assert.deepEqual([m[0], m[1], m[2]], [0, 0, 0], 'black: the snippet gives it the page’s colour');
+  // a white letter on a black plate
+  const plate = image(w, h, (x, y) => (x >= 8 && x < 12 && y > 3 && y < 16 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+  const p = S.monoMask(plate, w, h);
+  assert.deepEqual([alpha(p, w, 10, 10), alpha(p, w, 1, 1)], [255, 0]);
+  // an image that has a clear ground already is left as it is
+  assert.equal(S.monoMask(image(w, h, (x, y) => (ink(x, y) ? [0, 0, 0, 255] : [0, 0, 0, 0])), w, h), null);
+  assert.equal(S.monoMask(new Uint8ClampedArray(8), 20, 20), null);
+  assert.equal(S.monoMask(null, 0, 0), null);
+});
+
+test('sets of drop caps: a file’s letter and theme come from its name', () => {
+  for (const [name, want] of [
+    ['A.svg', { letter: 'A', theme: 'light' }], ['b.png', { letter: 'B', theme: 'light' }], ['initial-C.svg', { letter: 'C', theme: 'light' }],
+    ['Goudy_D-dark.png', { letter: 'D', theme: 'dark' }], ['Q-light-1-small-2x.png', { letter: 'Q', theme: 'light' }], ['dropcap e.SVG', { letter: 'E', theme: 'light' }],
+    ['T-dark.png', { letter: 'T', theme: 'dark' }], ['Kanzlei-Initialen.ttf', { font: true }], ['initials.WOFF2', { font: true }],
+    ['Kanzlei-Initialen-A.ttf', { font: true, letter: 'A' }], ['DeutscheZierschrift-q.ttf', { font: true, letter: 'Q' }], ['C-artdeco-dark-2.png', { letter: 'C', theme: 'dark' }],
+    ['cover.png', null], ['notes.md', null], ['AB.svg', null], ['set.json', null], ['noextension', null],
+  ]) assert.deepEqual(S.dropcapFile(name), want, name);
+  for (const [text, want] of [['Before the cat', 'B'], ['“Quietly,” she said', 'Q'], ['  (An aside)', 'A'], ['Élan vital', 'E'], ['1687 was the year', ''], ['', ''], ['¿Qué?', 'Q'], ['数学', '']]) {
+    assert.equal(S.openingLetter(text), want, text);
+  }
+  assert.equal(S.setName('  My  Initials!! '), 'My Initials');
+  assert.equal(S.setName('../../etc'), 'etc');
+  assert.equal(S.setName('***'), '');
+  assert.equal(S.setName('x'.repeat(60)).length, 40);
+});
+
+test('sets of drop caps: a folder of images, a font of initials, and what a set.json adds', () => {
+  const images = S.describeSet('Roundels', ['T.svg', 'M.svg', 'M-dark.svg', 'M-light-10.png', 'M-light-2.png', 'set.json', 'README.txt'], { mono: true });
+  assert.deepEqual(images, { name: 'Roundels', label: 'Roundels', kind: 'images', mono: true, letters: { M: { dark: ['M-dark.svg'], light: ['M-light-2.png', 'M-light-10.png', 'M.svg'] }, T: { light: ['T.svg'] } } });
+  assert.equal(S.setLabel(images, ''), 'Roundels (M T)');
+  const font = S.describeSet('Kanzlei', ['initials.ttf', 'set.json'], { size: 4.6, margin: '0.1em 0.1em 0 0', mono: true });
+  assert.equal(font.kind, 'font');
+  assert.equal(font.font, 'initials.ttf');
+  assert.equal(font.family, 'Scriptorium Set Kanzlei');
+  assert.equal(S.setLabel(font, 'blackletter'), 'Kanzlei (blackletter)');
+  assert.equal(S.fontFaces(font, f => `app://x/${f}`), '@font-face { font-family: "Scriptorium Set Kanzlei"; src: url("app://x/initials.ttf"); font-display: block; }');
+  assert.equal(font.size, 4.6);
+  assert.equal(font.margin, '0.1em 0.1em 0 0');
+  assert.equal(S.describeSet('Bad', ['initials.ttf'], { size: 99, margin: 'url(x)' }).size, undefined, 'a wild size is not taken');
+  assert.equal(S.describeSet('Bad', ['initials.ttf'], { margin: 'expression(1);' }).margin, undefined);
+  assert.equal(S.describeSet('Empty', ['set.json', 'readme.md'], null), null);
+  assert.equal(S.describeSet('Both', ['A.png', 'initials.otf'], null).kind, 'images', 'images come first');
+  // the choices of the command, and marking a block for a set
+  const choices = S.dropcapChoices('set:Roundels', [images, font]);
+  assert.deepEqual(choices.map(c => c.value), [null, 'yinit', 'goudy', 'plain', 'none', 'set:Roundels', 'set:Kanzlei']);
+  const withMissing = S.dropcapChoices('yinit', [images], S.YOUR_OWN_SETS);
+  assert.deepEqual(withMissing[withMissing.length - 1], { value: 'add:Cheshire Initials', label: 'Cheshire Initials (not included: add the font yourself)' });
+  assert.match(choices[0].label, /vault’s drop cap \(Roundels\)/);
+  const block = text => {
+    const classes = new Set(['el-p']), vars = {};
+    return {
+      classes, vars,
+      classList: { add: (...c) => c.forEach(x => classes.add(x)), remove: c => classes.delete(c), [Symbol.iterator]: () => classes[Symbol.iterator]() },
+      style: { setProperty: (k, v) => { vars[k] = v; }, removeProperty: k => { delete vars[k]; } },
+      querySelector: () => (text === null ? null : { textContent: text }),
+    };
+  };
+  const withUrls = { name: 'Roundels', kind: 'images', mono: true, letters: { M: { light: ['app://x/M.svg?1'], dark: ['app://x/M-dark.svg?1'] } } };
+  const m = block('Men fear death');
+  assert.deepEqual(S.markDropcap(m, 'set:Roundels', withUrls, 'Of Death.md'), { light: 'app://x/M.svg?1', dark: 'app://x/M-dark.svg?1' });
+  assert.deepEqual([...m.classes].sort(), ['el-p', 'scriptorium-dropcap', 'scriptorium-dropcap-image', 'scriptorium-dropcap-mono']);
+  assert.equal(m.vars['--scriptorium-dropcap-light'], 'url("app://x/M.svg?1")');
+  assert.equal(m.vars['--scriptorium-dropcap-dark'], 'url("app://x/M-dark.svg?1")');
+  // several images of a letter: a paragraph has one of them, the same one each time, and not every paragraph the same
+  const many = { name: 'Cats', kind: 'images', mono: false, letters: { M: { light: ['a', 'b', 'c', 'd', 'e'] } } };
+  const pick = (text, key) => S.markDropcap(block(text), 'set:Cats', many, key);
+  assert.deepEqual(pick('Men fear death', 'Of Death.md'), pick('Men fear death', 'Of Death.md'));
+  assert.equal(pick('Men fear death', 'Of Death.md').dark, pick('Men fear death', 'Of Death.md').light, 'no dark image: the light one');
+  const picked = new Set(['Men fear death', 'Many a clerk', 'More than once', 'Midway', 'My lord', 'Mark this', 'Music', 'Morning came'].map(t => pick(t, 'x.md').light));
+  assert.ok(picked.size >= 3, 'the images are spread among the paragraphs');
+  assert.equal(S.seedOf('abc'), S.seedOf('abc'));
+  assert.notEqual(S.seedOf('abc'), S.seedOf('abd'));
+  const inked = block('Men fear death');
+  inked.classes.add('scriptorium-dropcap-inked');
+  S.markDropcap(inked, 'goudy', null);
+  assert.ok(inked.classes.has('scriptorium-dropcap-inked') && inked.classes.has('scriptorium-dropcap-goudy'), 'marking again leaves the inking to finish');
+  const w = block('What is truth?');
+  S.markDropcap(w, 'set:Roundels', withUrls);
+  assert.deepEqual([...w.classes], ['el-p'], 'no image for W: the block keeps the vault’s drop cap');
+  S.markDropcap(m, null, null);
+  assert.deepEqual([[...m.classes], m.vars], [['el-p'], {}], 'unmarked again');
+  const f = block('Anything');
+  S.markDropcap(f, 'set:Kanzlei', font);
+  assert.ok(f.classes.has('scriptorium-dropcap-font'));
+  assert.equal(f.vars['--scriptorium-initial-font'], '"Scriptorium Set Kanzlei", var(--manuscript-display)');
+  assert.equal(f.vars['--scriptorium-initial-size'], '4.6em');
+});
+
+test('sets of drop caps: an SVG is made safe, and a file that is not what its name says is refused', () => {
+  const bad = '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">' +
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10" onload="steal()">' +
+    '<script>alert(1)</script><script src="https://evil.example/x.js"/><style>@import url("https://evil.example/a.css"); path{fill:url(#g)}</style>' +
+    '<foreignObject><iframe src="https://evil.example"></iframe></foreignObject>' +
+    '<a href="javascript:alert(1)"><path d="M0 0h10v10z" onclick="x()" fill="url(https://evil.example/p.svg#a)"/></a>' +
+    '<image href="https://evil.example/track.png"/><use xlink:href="#shape"/><image href="data:image/png;base64,AAAA"/>' +
+    '<linearGradient id="g"/></svg>';
+  const clean = S.sanitizeSvg(bad);
+  assert.ok(clean.svg && clean.removed >= 8);
+  assert.doesNotMatch(clean.svg, /script|onload|onclick|foreignObject|iframe|evil\.example|@import|javascript|DOCTYPE/i);
+  assert.match(clean.svg, /<path d="M0 0h10v10z"/);
+  assert.match(clean.svg, /xlink:href="#shape"/, 'a reference inside the file stays');
+  assert.match(clean.svg, /href="data:image\/png;base64,AAAA"/, 'an embedded picture stays');
+  assert.match(clean.svg, /fill:url\(#g\)/);
+  const plain = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><path d="M1 1h6v6z"/></svg>';
+  assert.deepEqual(S.sanitizeSvg(plain), { svg: plain, removed: 0 });
+  assert.match(S.sanitizeSvg('<!DOCTYPE svg [<!ENTITY x "y">]><svg/>').problem, /entities/);
+  assert.match(S.sanitizeSvg('<html><body>hello</body></html>').problem, /not an SVG/);
+
+  const enc = t => new TextEncoder().encode(t);
+  const ok = S.checkDropcapFile('initial-T.svg', enc(bad));
+  assert.deepEqual([ok.ok, ok.kind, ok.letter, ok.theme], [true, 'svg', 'T', 'light']);
+  assert.doesNotMatch(new TextDecoder().decode(ok.bytes), /script/);
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+  assert.deepEqual([S.checkDropcapFile('B-dark.png', png).ok, S.checkDropcapFile('B-dark.png', png).theme], [true, 'dark']);
+  assert.match(S.checkDropcapFile('B.png', enc('<svg/>')).problem, /not a PNG/);
+  assert.match(S.checkDropcapFile('B.svg', png).problem, /not text|not an SVG/);
+  assert.match(S.checkDropcapFile('cover.png', png).problem, /no single letter/);
+  assert.match(S.checkDropcapFile('B.png', new Uint8Array(700 * 1024)).problem, /600 kB/);
+  assert.equal(S.checkDropcapFile('Kanzlei.ttf', new Uint8Array([0, 1, 0, 0, 9, 9])).kind, 'font');
+  assert.equal(S.checkDropcapFile('Kanzlei-Initialen-K.ttf', new Uint8Array([0, 1, 0, 0, 9, 9])).letter, 'K');
+  assert.match(S.checkDropcapFile('B.svg', enc('<!DOCTYPE svg [<!ENTITY x "y">]><svg>&x;</svg>')).problem, /entities/);
+  assert.equal(S.checkDropcapFile('B.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47, ...new Array(700 * 1024).fill(0)]), 2 * 1024 * 1024).ok, true, 'a larger limit for what is fetched or drawn');
+  assert.equal(S.checkDropcapFile('x.woff2', enc('wOF2....')).ok, true);
+  assert.equal(S.checkDropcapFile('x.otf', enc('OTTO....')).ok, true);
+  assert.match(S.checkDropcapFile('x.ttf', enc('MZ this is not a font')).problem, /not a TrueType/);
+  assert.match(S.checkDropcapFile('x.ttf', new Uint8Array(4 * 1024 * 1024)).problem, /3 MB/);
+});
+
+test('sets of drop caps: the snippet draws an image where the initial would be, in one colour through a mask, and inks a new one in', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8');
+  assert.match(css, /\.el-p\.scriptorium-dropcap-image > p::before/);
+  assert.match(css, /background: var\(--scriptorium-dropcap-light\)/);
+  assert.match(css, /background-image: var\(--scriptorium-dropcap-dark\)/);
+  assert.match(css, /\.scriptorium-dropcap-mono > p::before[\s\S]{0,400}mask: var\(--scriptorium-dropcap-light\)/);
+  assert.match(css, /\.scriptorium-dropcap-image > p::first-letter[\s\S]{0,200}font-size: 0/);
+  assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{[\s\S]*scriptorium-dropcap-inked/);
+  assert.match(css, /--scriptorium-dropcap-ratio-dark/);
+  assert.match(css, /scriptorium-dropcap-inked\.scriptorium-dropcap-image\.scriptorium-dropcap-mono > p::before \{[\s\S]{0,900}mask-composite: intersect/, 'the pen’s edge and the image’s own mask both hold');
+  assert.doesNotMatch(css.replace(/@media \(prefers-reduced-motion: no-preference\) \{[\s\S]*?\n\}\n/g, ''), /animation: scriptorium-(ink|uncover)/, 'no animation outside that media query');
 });

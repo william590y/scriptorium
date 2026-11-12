@@ -73,6 +73,43 @@ build tools and the tests) are licensed under the GNU General Public License, ve
   modified under the terms of the LaTeX Project Public License", the package's README, which names no version; the
   current version, 1.3c, is included): [`licenses/GoudyInitialen-LPPL.txt`](licenses/GoudyInitialen-LPPL.txt)
 
+### Kanzlei Initialen and Deutsche Zierschrift (sets of drop caps)
+
+- Path: `vault/.obsidian/plugins/scriptorium/dropcaps/kanzlei/` and `dropcaps/de-zs/`: one TrueType font for each
+  letter, A to Z (26 files, 0.2 MB each set), unchanged
+- Source: gwern.net's published files, <https://gwern.net/static/font/dropcap/kanzlei/> and
+  <https://gwern.net/static/font/dropcap/de-zs/> (the same files as
+  <https://github.com/gwern/gwern.net/tree/master/font/dropcap>; see <https://gwern.net/dropcap#kanzlei> and
+  <https://gwern.net/dropcap#de-zs>)
+- Designer and foundry: digitised by Dieter Steffmann (Typographer Mediengestaltung, Kreuztal), 2002; Deutsche
+  Zierschrift after Rudolf Koch's type of 1919-1921
+- Terms: no licence text comes with either font. The fonts' own license field says "have fun and enjoy" (Kanzlei
+  Initialen) and "Have fun and enjoy" (Deutsche Zierschrift); Dieter Steffmann, on his site
+  (<http://www.steffmann.de/wordpress/>): "You may use all fonts for free, including commercial use." (12 February
+  2015) and "You may use all fonts for free." (28 August 2024), after "The fonts are free for private use only." (16
+  December 2012); DaFont lists Deutsche Zierschrift as "100% Free" (<https://www.dafont.com/deutsche-zierschrif.font>).
+  None of these uses the word "redistribution". Every statement found, with its date and address, is in
+  [`licenses/SteffmannInitials-terms.txt`](licenses/SteffmannInitials-terms.txt).
+- Bundled at the repository owner’s direction (2026-11-12).
+
+### Dropcat, Gene Wolfe and Ninit (sets of drop caps, a selection)
+
+- Path: `vault/.obsidian/plugins/scriptorium/dropcaps/dropcat/` (B C G I Q T), `dropcaps/gene-wolfe/` (F T V) and
+  `dropcaps/ninit/` (A B C): one light-theme and one dark-theme PNG for each letter. `dropcaps/gwern.json` is
+  Scriptorium's own list of the images gwern.net has (names and sizes), for the download below.
+- Source: <https://gwern.net/static/font/dropcap/dropcat/>, `…/gene-wolfe/` and `…/ninit/`
+  (<https://github.com/gwern/gwern.net/tree/master/font/dropcap>), made by Gwern Branwen with Midjourney and DALL·E 3
+  in 2023 and edited by hand. Dropcat and Gene Wolfe: variant 1 of each letter at gwern.net's `small-2x` size,
+  unchanged. Ninit: `A-floral-light-1`, `B-mechanical-light-1`, `C-floral-light-1`, `A-circuit-dark-1`,
+  `B-mechanical-dark-1` and `C-machine-dark-1`, scaled down to 376 pixels high and reduced to 96 colours with Pillow.
+- License: CC0 1.0 (public domain dedication): [`licenses/CC0-1.0.txt`](licenses/CC0-1.0.txt). gwern.net says so at
+  <https://gwern.net/dropcap>: "The **dropcat** dropcap font set is a set of light (42) & dark (32) raster image (PNG)
+  dropcaps (CC-0 licensed)"; "The Gene Wolfe dropcap font set is a set of light (93) & dark (72) SVG dropcaps […]
+  (CC-0 licensed)"; and, of all of them, "We release all our dropcap images, code/scripts, & editor under FLOSS
+  licenses". Ninit, which is unfinished, has no statement of its own: it is covered by that sentence and by the site's
+  licence, <https://gwern.net/about#license>: "This site is licensed under the Creative Commons public domain (CC-0)
+  license."
+
 ## Included in `installer/fonts/` (and so in `Scriptorium-Setup.exe`)
 
 ### EB Garamond and Cormorant Garamond (subsets for the installer's window)
@@ -91,10 +128,33 @@ build tools and the tests) are licensed under the GNU General Public License, ve
   Cormorant Project Authors (github.com/CatharsisFonts/Cormorant)
 - License: SIL Open Font License 1.1: `installer/fonts/OFL-EBGaramond.txt`, `installer/fonts/OFL-CormorantGaramond.txt`
 
-## Not included: downloaded at install time
+## Not included: downloaded at install time, or when the writer asks
 
 Scriptorium Setup downloads these from their official sources, each pinned by SHA-256, only when the matching option
 is ticked. They are not part of this repository, the zip or the installer (apart from the window's font subsets above).
+
+### More drop caps from gwern.net (only when the writer asks, in Obsidian)
+
+- The command **Scriptorium: Download more drop caps from gwern.net** fetches the other images of Dropcat (74 images,
+  2.6 MB), Gene Wolfe (30 images, 0.9 MB, or all 165, 35 MB) or Ninit (58 images, 25 MB) from
+  <https://gwern.net/static/font/dropcap/> into the writer's vault (`Scriptorium/Drop caps/`). They are not part of this
+  repository, the zip or the installer.
+- License: CC0 1.0, as above.
+
+### Cheshire Initials (named, never included or downloaded)
+
+- gwern.net's eighth kind of initial. By House of Lime, 2001 ("©House of Lime 2001, scanned graphics" in the font;
+  "©House of Lime 2001 - 2009, all rights reserved" on the foundry's archived page,
+  <https://web.archive.org/web/20130122020421fw_/http://www.houseoflime.com/fonts.html>).
+- Terms: offered at <https://www.1001fonts.com/cheshire-initials-font.html> under the 1001Fonts Free For Commercial Use
+  License (<https://www.1001fonts.com/licenses/ffc.html>), which says: "5. Distribution: While the given typeface may
+  freely be copied and passed along to other individuals for private use as its original downloadable zip-file, it may
+  not be sold or published without written permission by its respective author." and "6. Embedding: the given typeface
+  may be embedded into an application such as a web- or mobile app, independant of the number of the application
+  users, as long as the application does not distribute the given typeface, such as offering it as a download."
+  DaFont lists it as "Free for personal use" (<https://www.dafont.com/cheshire-initials.font>). These terms forbid
+  publishing the font, so Scriptorium does not include it: the list of drop caps names it, says where to download it,
+  and takes the writer's own copy as a set (**Scriptorium: Add a set of drop caps**).
 
 ### Longform 2.1.0
 

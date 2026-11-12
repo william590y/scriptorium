@@ -44,7 +44,9 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   ordinary letter, without small capitals, justified like the rest.
   **One note can have its own:** run **Scriptorium: Choose the drop cap for this note** and move through the list (the
   note shows each as you go); the choice is kept in the note's properties as `dropcap: goudy` (or `yinit`, `plain`,
-  `none`), which you can also type yourself. Choosing **The vault's drop cap** removes the property.
+  `none`, or the name of a set, below), which you can also type yourself. Choosing **The vault's drop cap** removes
+  the property. A drop cap that is chosen or changed is inked in: laid down from its top left corner as a pen would lay
+  it, pale and wet at first (not when your system asks for reduced motion).
 - **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
   margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
   rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
@@ -57,6 +59,54 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   dimmed page, fitted to the window, with its caption below. **←** and **→** step through the note's images ("2 of 5"),
   the mouse wheel zooms and dragging pans, double-click zooms in and out, and **Esc**, a click outside the image or the
   × button returns to the note.
+
+### Sets of drop caps: gwern.net's, your own, and drawn ones
+
+![Two chapters opening with Dropcat initials, one with a Kanzlei initial, and a drawn initial being inked in, frame by frame](docs/dropcaps.png)
+
+Beside the four above, a drop cap can come from a **set**: images, one or several for a letter, or a font of initials.
+Sets appear in the settings' **Drop cap** list and in **Choose the drop cap for this note**, and a note names one in its
+properties (`dropcap: Dropcat`). A set of images shows where it has the paragraph's first letter; other paragraphs keep
+the vault's drop cap. All of this works in Reading view, light and dark, and in **Export to PDF**.
+
+Every kind of initial [gwern.net uses](https://gwern.net/dropcap) is here:
+
+| Drop cap | In Scriptorium | `dropcap:` |
+| --- | --- | --- |
+| Yinit | built in (a font, A to Z) | `yinit` |
+| Goudy Initialen | built in (a font, A to Z) | `goudy` |
+| Kanzlei Initialen | included as a set (a font, A to Z) | `kanzlei` |
+| Deutsche Zierschrift | included as a set (a font, A to Z) | `de-zs` |
+| Dropcat (cats) | a selection included (B C G I Q T); the other 62 images on request | `Dropcat` |
+| Gene Wolfe (wolves, suns, swords) | a selection included (F T V); the other 24, or 159, on request | `Gene Wolfe` |
+| Ninit (machines and flowers; unfinished at gwern.net) | a selection included (A B C); the other 52 on request | `Ninit` |
+| Cheshire Initials | not included: its licence forbids publishing it. Named in the list, with where to download it; add your copy as a set | `Cheshire Initials` |
+
+- **More from gwern.net:** **Scriptorium: Download more drop caps from gwern.net** (also a button in the list) shows
+  each image set with its size (Dropcat 2.6 MB; Gene Wolfe 0.9 MB, or 35 MB with the images gwern.net keeps only at
+  full size; Ninit 25 MB) and fetches the one you choose from gwern.net into the vault's `Scriptorium/Drop caps`
+  folder. Nothing is fetched until you press a button; images already there are skipped, so you can stop and go on
+  later; without a connection it says so and changes nothing. A paragraph then has one of its letter's images, the same
+  one every time the note is drawn (and in the PDF).
+- **Your own:** **Scriptorium: Add a set of drop caps** takes a name and your files: one image for each letter you have
+  (SVG or PNG, named for its letter: `A.svg`, `b.png`, `initial-C.svg`; `D-dark.png` for a dark-theme version), or a
+  font of initials (`.ttf`, `.otf`, `.woff`, `.woff2`: one file, or one for each letter). Each file is checked (an SVG's
+  scripts, links and outside references are taken out; a file that is not what its name says is left out) and the set
+  is kept in the vault, in `Scriptorium/Drop caps/<name>/`, where you can also put files yourself. Tick **The images
+  are of one colour** and they are drawn in the page's accent colour, in the light and the dark theme: ink on white
+  paper is made into ink alone (a `set.json` with `{"mono": true}` says the same for a folder you make by hand; for a
+  font, `{"size": 4.2, "margin": "0.1em 0.1em -0.12em 0"}` sets its size and place).
+- **Drawn by Lagrange:** **Lagrange: Draw a drop cap (or change one)** asks for a letter, a description ("a woodcut
+  initial with oak leaves") and a set, has your provider draw it, keeps it in that set, makes it the note's drop cap and
+  inks it in. With **your ChatGPT subscription** it is painted by Codex's image tool (about a minute); with an **OpenAI
+  API key** by OpenAI's image model (`gpt-image-2.5-sunburst` unless you name another; OpenAI charges for each image;
+  this route is experimental: its requests follow OpenAI's published API and are tested against a stand-in, but have
+  not been tried against the live service). Claude has no image model, so with **your Claude subscription**, an
+  Anthropic API key or a local server the model writes the initial as a line drawing (SVG), which is plainer; the Demo
+  has one drawing of its own. Tick **Change the one this set has** to alter an existing initial ("add a small owl"): a
+  painted one goes back to the image model, a line drawing back to the language model, and the earlier one is kept in
+  the set's `earlier` folder. Image connectors (Canva's, for one) are not used: through Claude Code, Canva's connector
+  hands back only a 200-pixel thumbnail of what it generates.
 
 **Export to PDF** sets the page as Reading view does: the note's title at the top (Scriptorium ticks Obsidian's
 **Include file name as title** once; untick it in the export dialogue if you do not want it), the drop caps, a note's
@@ -90,7 +140,8 @@ the image returns to the note.
 - `## Chapter heading` creates a centered small-cap chapter heading; `### Section heading` a smaller one.
 - `> Quotation` creates an italic quotation.
 - `---` creates an ornamental scene break.
-- `dropcap: goudy` (or `yinit`, `plain`, `none`) in a note's properties gives that note its own drop cap.
+- `dropcap: goudy` (or `yinit`, `plain`, `none`, or a set: `kanzlei`, `de-zs`, `Dropcat`, `Gene Wolfe`, `Ninit`, or one
+  of your own) in a note's properties gives that note its own drop cap.
 - `[^1]` with `[^1]: The note.` creates a footnote, set in the margin in Reading view when there is room.
 - `> [!margin]` followed by `> Text` creates an unnumbered marginal note beside the paragraph that follows it.
 - `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` and the other callouts create admonitions.
@@ -353,13 +404,18 @@ Scriptorium Setup downloads the following, and only when you tick the matching o
 
 Each download is verified against a SHA-256 hash pinned in the installer. Nothing is uploaded, and there is no
 telemetry, analytics or update check. Opening the new vault with its plugins on talks only to Obsidian on the same
-computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests.
+computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests, with one
+exception that you start yourself: **Download more drop caps from gwern.net** fetches the images of the set you choose
+from `gwern.net`, when you press its button, and sends nothing but the request for each image.
 
 Lagrange, the writing companion, sends the open note and what you write to it to the provider you choose in its
 settings, and only when you send it a message or run one of its commands: your Claude subscription through the Claude
 Code program on your computer (the default), Anthropic's API at `api.anthropic.com`, your ChatGPT subscription through
 the Codex program, OpenAI's API at `api.openai.com`, or the OpenAI-compatible server whose address you enter. It makes
 no other requests, and none in Demo mode. Its handwriting font is inside the plugin; nothing is downloaded.
+**Draw a drop cap** sends the letter and your description (and, to change one, the present image) to the same
+provider: with the OpenAI API, to its Images API at `api.openai.com`; with a ChatGPT subscription, Codex runs in an
+empty temporary folder, the only place it may write.
 
 ## Uninstalling
 
