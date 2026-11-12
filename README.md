@@ -2,6 +2,10 @@
 
 A fancy and sophisticated Obsidian configuration for the typographically inclined.
 
+![Lagrange at work in Obsidian: a typed request, the loading plate, the pen striking out and writing in handwriting with a trail of ink, an equation drawn symbol by symbol, code typed by a typewriter, then Undo, Redo and a rewind to an earlier message](docs/lagrange.gif)
+
+*Lagrange, Scriptorium's writing companion, recorded in Obsidian (Demo provider, so no account is needed to try it).*
+
 Scriptorium gives [Obsidian](https://obsidian.md) book-page typography: bookish serif type, warm paper, centered
 small-cap headings, italic subtitles, ornamental drop caps and floral scene breaks, with footnotes set in the margin,
 quiet admonitions and a focused view of images, after [gwern.net](https://gwern.net). It is made of:
@@ -61,6 +65,23 @@ own drop cap included, and the small-capped opening lines.
 Callouts (`> [!note]`, `> [!tip]`, `> [!warning]`, `> [!error]` and the others) are set as gwern.net's admonitions, in
 the snippet: a tinted slip with a broad band and a printer's mark (☞ for a note, † for danger), darker for the more
 urgent kinds, in Reading view and Live Preview, light and dark.
+
+### Marginalia
+
+![Footnotes set in the right margin beside their references, each under a small numbered box, with an unnumbered marginal note below them](docs/marginalia.png)
+
+Write footnotes as usual (`[^1]` in the text and `[^1]: The note.` anywhere below, or an inline `^[note]`), and open
+the note in Reading view in a pane wide enough for a margin: each footnote sits beside the line that cites it. Point
+at a reference to light up its note; the boxed ↙ in a note goes back to its reference. A callout of type margin
+(`> [!margin]`) is a marginal note without a number. **Scriptorium: Toggle marginalia** turns them off and on.
+
+### Image focus
+
+![An image opened on its own over the dimmed page, with its caption below and a close button at the top right](docs/image-focus.png)
+
+Click any image in a note to see it on its own, fitted to the window, with its caption (`![[image.png|A caption]]`).
+The mouse wheel zooms and dragging pans, **←** and **→** go to the note's other images, and **Esc** or a click outside
+the image returns to the note.
 
 ## Writing conventions
 
@@ -279,6 +300,7 @@ installers/   the script installers, and Setup-Scriptorium-Vault.py (sets up a v
 tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py, test_auto_open.py, test_setup_vault.py
 plugins-tests/ tests for the Scriptorium plugin's layout and parsing (node --test plugins-tests/scriptorium.test.js)
 licenses/     licenses of embedded fonts
+docs/         the pictures in this README (recorded and captured in Obsidian)
 ```
 
 ## Third-party components
