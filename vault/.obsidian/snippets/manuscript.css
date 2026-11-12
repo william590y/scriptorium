@@ -30,8 +30,9 @@
    Opening paragraphs hyphenate like any other, but a word split at the end of
    the small-capped first line ("QUES- / tions") would change case halfway.
    The Scriptorium plugin wraps that one word in .sc-keep so it moves to the
-   next line whole. PDF export is laid out without the plugin, so in print the
-   opening paragraph simply isn't hyphenated. */
+   next line whole. In PDF export the plugin marks the page's blocks as Reading
+   view does (so the rules for chapter openings apply) but does not measure
+   lines, so in print the opening paragraph simply isn't hyphenated. */
 .markdown-rendered .sc-keep {
   white-space: nowrap;
   -webkit-hyphens: manual;

@@ -54,6 +54,10 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   the mouse wheel zooms and dragging pans, double-click zooms in and out, and **Esc**, a click outside the image or the
   × button returns to the note.
 
+**Export to PDF** sets the page as Reading view does: the note's title at the top (Scriptorium ticks Obsidian's
+**Include file name as title** once; untick it in the export dialogue if you do not want it), the drop caps, a note's
+own drop cap included, and the small-capped opening lines.
+
 Callouts (`> [!note]`, `> [!tip]`, `> [!warning]`, `> [!error]` and the others) are set as gwern.net's admonitions, in
 the snippet: a tinted slip with a broad band and a printer's mark (☞ for a note, † for danger), darker for the more
 urgent kinds, in Reading view and Live Preview, light and dark.
