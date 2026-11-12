@@ -1,4 +1,4 @@
-const { Plugin, PluginSettingTab, Setting, MarkdownView, MarkdownRenderer, Component, Scope } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, MarkdownView, MarkdownRenderer, Component, Scope, Modal, Notice, Platform } = require('obsidian');
 
 /* ==========================================================
    Settings
@@ -946,6 +946,379 @@ class ImageFocus {
 }
 
 /* ==========================================================
+   Setting up a vault
+   ==========================================================
+   "Scriptorium: Set up another vault" makes any folder a Scriptorium vault from this one: a vault you already write in,
+   a new vault, or a folder of notes. "Scriptorium: Set up this vault" does the same to this vault, which turns
+   Scriptorium's theme, snippet and plugins back on if they were turned off. The rules are those of Scriptorium Setup
+   (Vaults.SetUp in installer/ScriptoriumSetup.cs) and of installers/Setup-Scriptorium-Vault.py:
+     - only the vault's .obsidian folder is written to; no note is touched and nothing is deleted;
+     - Scriptorium's own files (the manuscript snippet, the Typewriter theme, the code of the Scriptorium, Lagrange,
+       Manuscriptum and Typewriter Mode plugins, and Longform's if this vault has it) are added, or replaced if a file
+       of that name differs;
+     - the community plugin list, appearance.json (the manuscript snippet on, the Typewriter theme) and app.json (the
+       text size, unless the vault has one of its own) are merged; a plugin's data.json and core-plugins.json are
+       written only where the vault has none; hotkeys, the workspace and everything else are left alone;
+     - Lagrange's API keys are never copied: its settings go across with every key emptied;
+     - the whole .obsidian folder as it was is first copied to .obsidian/scriptorium-backup-<time>/.obsidian, and a
+       failure half-way puts every file back; run again, it changes nothing.
+   It reads and writes files with Node's fs, so it works in Obsidian on a computer only. The functions below take fs
+   and path as arguments and are tested under Node (plugins-tests/, tools/test_setup_vault.py). */
+
+const SETUP_BACKUP = 'scriptorium-backup-';
+const SETUP_PLUGINS = ['scriptorium', 'manuscriptum', 'typewriter-mode', 'lagrange'];
+const SETUP_CODE = ['main.js', 'manifest.json', 'styles.css', 'LICENSE'];
+
+/* How a file of the package is treated: 'replace', 'missing' (written only if the vault has none), 'plugins',
+   'appearance' or 'app' (merged), or null (not part of setting up a vault). rel uses forward slashes. */
+function setupRule(rel) {
+  if (rel === '.obsidian/community-plugins.json') return 'plugins';
+  if (rel === '.obsidian/appearance.json') return 'appearance';
+  if (rel === '.obsidian/app.json') return 'app';
+  if (rel === '.obsidian/core-plugins.json') return 'missing';
+  if (rel === '.obsidian/snippets/manuscript.css' || rel === '.obsidian/plugins/lagrange/LagrangeHand-OFL.txt') return 'replace';
+  if (rel.startsWith('.obsidian/themes/Typewriter/')) return 'replace';
+  const m = rel.match(/^\.obsidian\/plugins\/([^/]+)\/([^/]+)$/);
+  if (!m) return null;
+  if (SETUP_PLUGINS.includes(m[1])) return SETUP_CODE.includes(m[2]) ? 'replace' : (m[2] === 'data.json' ? 'missing' : null);
+  if (m[1] === 'longform') return ['main.js', 'manifest.json', 'styles.css'].includes(m[2]) ? 'replace' : null;
+  return null;
+}
+
+function setupJson(value) {
+  return Buffer.from(JSON.stringify(value, null, 2) + '\n', 'utf8');
+}
+
+/* The parsed JSON of a file if it is an object (kind 'object') or a list (kind 'array'), else null. */
+function setupParse(data, kind) {
+  try {
+    const v = JSON.parse(data.toString('utf8').replace(/^﻿/, ''));
+    if (kind === 'array') return Array.isArray(v) ? v : null;
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* The Scriptorium files of the vault in dir, as a package: {rel: Buffer}. What is personal stays behind: Lagrange's
+   API keys are emptied, app.json is cut down to the text size, and appearance.json to the theme and the snippet. */
+function setupPackage(fs, path, dir) {
+  const files = {};
+  const walk = rel => {
+    for (const entry of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) { if (!entry.name.startsWith(SETUP_BACKUP)) walk(child); }
+      else if (entry.isFile() && setupRule(child)) files[child] = fs.readFileSync(path.join(dir, child));
+    }
+  };
+  if (fs.existsSync(path.join(dir, '.obsidian'))) walk('.obsidian');
+  const reshape = (rel, kind, change) => {
+    const before = files[rel] && setupParse(files[rel], kind);
+    const after = change(before);
+    if (!before || JSON.stringify(before) !== JSON.stringify(after)) files[rel] = setupJson(after);   // else the file's own bytes
+  };
+  // The text size: Obsidian keeps it in appearance.json once it has opened the vault; a new vault has it in app.json.
+  const size = [files['.obsidian/appearance.json'], files['.obsidian/app.json']].map(f => f && setupParse(f, 'object'))
+    .map(o => o && o.baseFontSize).find(v => typeof v === 'number');
+  reshape('.obsidian/app.json', 'object', () => ({ baseFontSize: size || 22 }));
+  reshape('.obsidian/appearance.json', 'object', a => ({ theme: (a && a.theme) || 'obsidian', cssTheme: 'Typewriter', enabledCssSnippets: ['manuscript'] }));
+  reshape('.obsidian/community-plugins.json', 'array', a => {
+    const mine = ['longform'].concat(SETUP_PLUGINS);
+    const kept = (a || []).filter(id => mine.includes(id));
+    return kept.concat(SETUP_PLUGINS.filter(id => !kept.includes(id)));
+  });
+  const lagrange = '.obsidian/plugins/lagrange/data.json';
+  if (files[lagrange]) {
+    reshape(lagrange, 'object', a => {
+      const out = Object.assign({}, a);
+      for (const k of Object.keys(out)) if (/key|token|secret|password/i.test(k) && typeof out[k] === 'string') out[k] = '';
+      return out;
+    });
+  }
+  return files;
+}
+
+/* What setting up the vault in dir from the package would change: {changes: [{rel, content, replaces, note}], notes}.
+   notes are lines about files left as they were. Nothing is written. */
+function planVaultSetup(fs, path, pkg, dir) {
+  const changes = [], notes = [];
+  const existing = rel => {
+    try { return fs.statSync(path.join(dir, rel)).isFile() ? fs.readFileSync(path.join(dir, rel)) : null; } catch (e) { return null; }
+  };
+  // The plugins that will be in the vault afterwards: those in the package, and whatever is installed already.
+  const present = new Set(SETUP_PLUGINS);
+  for (const rel of Object.keys(pkg)) { const m = rel.match(/^\.obsidian\/plugins\/([^/]+)\/main\.js$/); if (m) present.add(m[1]); }
+  try {
+    for (const e of fs.readdirSync(path.join(dir, '.obsidian', 'plugins'), { withFileTypes: true })) if (e.isDirectory()) present.add(e.name);
+  } catch (e) { /* no plugins folder yet */ }
+  const mergeFile = (rel, now, ours) => {
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    if (rel.endsWith('community-plugins.json')) {
+      const current = setupParse(now, 'array');
+      if (!current) return [null, `Left ${name} as it was: it is not a valid JSON list.`];
+      const added = (setupParse(ours, 'array') || []).filter(id => typeof id === 'string' && present.has(id) && !current.includes(id));
+      if (!added.length) return [null, null];
+      return [setupJson(current.concat(added)), `turn on the community plugin${added.length > 1 ? 's' : ''} ${added.join(', ')}`];
+    }
+    const a = setupParse(now, 'object');
+    if (!a) return [null, `Left ${name} as it was: it is not a valid JSON object.`];
+    if (rel.endsWith('appearance.json')) {
+      const snippets = 'enabledCssSnippets' in a ? a.enabledCssSnippets : [];
+      if (!Array.isArray(snippets)) return [null, `Left ${name} as it was: its enabledCssSnippets is not a list.`];
+      const said = [];
+      if (!snippets.includes('manuscript')) { a.enabledCssSnippets = snippets.concat('manuscript'); said.push('turn on the manuscript snippet'); }
+      if (a.cssTheme !== 'Typewriter') {
+        said.push(`change the theme from ${a.cssTheme || 'the default'} to Typewriter`);
+        a.cssTheme = 'Typewriter';
+      }
+      return said.length ? [setupJson(a), said.join(' and ')] : [null, null];
+    }
+    const o = setupParse(ours, 'object') || {};
+    const added = Object.keys(o).filter(k => !(k in a));
+    const kept = Object.keys(o).filter(k => k in a && JSON.stringify(a[k]) !== JSON.stringify(o[k]))
+      .map(k => `kept your ${k} (${JSON.stringify(a[k])}; Scriptorium's is ${JSON.stringify(o[k])})`).join('; ') || null;
+    if (!added.length) return [null, kept];
+    for (const k of added) a[k] = o[k];
+    return [setupJson(a), `set ${added.map(k => `${k} to ${JSON.stringify(o[k])}`).join(', ')}${kept ? `; ${kept}` : ''}`];
+  };
+  for (const rel of Object.keys(pkg).sort()) {
+    const rule = setupRule(rel);
+    if (!rule) continue;
+    let content = pkg[rel];
+    const now = existing(rel);
+    if (rule === 'app') {
+      // Obsidian keeps some of app.json's settings (the text size) in appearance.json once it has opened the vault: a
+      // setting the vault has there is the vault's own, and is not set again here.
+      const appearance = setupParse(existing('.obsidian/appearance.json') || Buffer.alloc(0), 'object') || {};
+      const ours = setupParse(content, 'object') || {};
+      const theirs = Object.keys(ours).filter(k => k in appearance);
+      if (theirs.length) {
+        const own = (now && setupParse(now, 'object')) || {};
+        for (const k of theirs) {
+          if (JSON.stringify(appearance[k]) !== JSON.stringify(ours[k]) && !(k in own)) {
+            notes.push(`kept your ${k} (${JSON.stringify(appearance[k])}; Scriptorium's is ${JSON.stringify(ours[k])})`);
+          }
+          delete ours[k];
+        }
+        if (!Object.keys(ours).length) continue;
+        content = setupJson(ours);
+      }
+    }
+    if (now === null) {
+      if (rule === 'plugins') content = setupJson((setupParse(content, 'array') || []).filter(id => present.has(id)));
+      changes.push({ rel, content, replaces: false, note: null });
+    } else if (rule === 'missing') {
+      continue;
+    } else if (rule === 'replace') {
+      if (!now.equals(content)) changes.push({ rel, content, replaces: true, note: null });
+    } else {
+      const [merged, note] = mergeFile(rel, now, content);
+      if (merged) changes.push({ rel, content: merged, replaces: true, note });
+      else if (note) notes.push(note);
+    }
+  }
+  return { changes, notes };
+}
+
+/* The plan in words, one line each. */
+function describeVaultSetup(plan) {
+  return plan.changes.map(c => (c.note ? `  merge    ${c.rel}: ${c.note}` : `  ${c.replaces ? 'replace ' : 'add     '} ${c.rel}`))
+    .concat(plan.notes.map(n => `  note     ${n}`));
+}
+
+/* Makes the plan's changes in the vault in dir: backs up .obsidian as it is, then writes; on a failure every file is
+   put back and the error is thrown. Returns the backup folder, or null if there was nothing to back up or to change. */
+function applyVaultSetup(fs, path, dir, plan, now) {
+  const changes = plan.changes;
+  if (!changes.length) return null;
+  const config = path.join(dir, '.obsidian');
+  let backup = null;
+  if (fs.existsSync(config) && fs.readdirSync(config).length) {
+    const d = now || new Date(), two = n => String(n).padStart(2, '0');
+    const stamp = `${SETUP_BACKUP}${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+    backup = path.join(config, stamp);
+    for (let n = 2; fs.existsSync(backup); n++) backup = path.join(config, `${stamp}-${n}`);
+    const copy = (from, to) => {
+      fs.mkdirSync(to, { recursive: true });
+      for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+        if (entry.isDirectory()) { if (!entry.name.startsWith(SETUP_BACKUP)) copy(path.join(from, entry.name), path.join(to, entry.name)); }
+        else if (entry.isFile()) fs.copyFileSync(path.join(from, entry.name), path.join(to, entry.name));
+      }
+    };
+    try {
+      copy(config, path.join(backup, '.obsidian'));
+    } catch (e) {
+      try { fs.rmSync(backup, { recursive: true, force: true }); } catch (err) { /* leave it */ }
+      throw new Error(`The vault's .obsidian folder could not be backed up, so nothing was changed: ${e.message}`);
+    }
+  }
+  const written = [], made = [];
+  try {
+    for (const c of changes) {
+      const target = path.join(dir, c.rel);
+      const missing = [];
+      for (let d = path.dirname(target); !fs.existsSync(d); d = path.dirname(d)) missing.unshift(d);
+      for (const d of missing) { fs.mkdirSync(d); made.push(d); }
+      written.push(c);
+      fs.writeFileSync(`${target}.scriptorium-tmp`, c.content);
+      fs.renameSync(`${target}.scriptorium-tmp`, target);
+    }
+  } catch (e) {
+    let restored = true;
+    for (const c of written.reverse()) {
+      const target = path.join(dir, c.rel);
+      try {
+        if (fs.existsSync(`${target}.scriptorium-tmp`)) fs.unlinkSync(`${target}.scriptorium-tmp`);
+        if (c.replaces) fs.copyFileSync(path.join(backup, c.rel), target);
+        else if (fs.existsSync(target) && fs.statSync(target).isFile()) fs.unlinkSync(target);
+      } catch (err) { restored = false; }
+    }
+    for (const d of made.reverse()) { try { fs.rmdirSync(d); } catch (err) { /* not empty: it was not ours alone */ } }
+    if (restored && backup) { try { fs.rmSync(backup, { recursive: true, force: true }); } catch (err) { /* leave it */ } }
+    throw new Error(restored ? `The setup failed and was undone: ${e.message}`
+      : `The setup failed, and some files could not be put back; the originals are in ${backup}: ${e.message}`);
+  }
+  return backup;
+}
+
+/* The folder of a vault from what was typed or chosen: trimmed, quotes and a trailing separator removed; '' if it is
+   not an absolute path. */
+function setupFolder(path, text) {
+  let t = String(text || '').trim().replace(/^["']|["']$/g, '').trim();
+  if (!t || !path.isAbsolute(t)) return '';
+  t = path.normalize(t);
+  return t.length > path.parse(t).root.length ? t.replace(/[\\/]+$/, '') : t;
+}
+
+class SetupVaultModal extends Modal {
+  /* target: null to ask for a folder ("another vault"), or this vault's folder. */
+  constructor(plugin, target) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.target = target;
+    this.own = Boolean(target);
+  }
+
+  onOpen() {
+    this.modalEl.addClass('scriptorium-setup');
+    this.titleEl.setText(this.own ? 'Set up this vault' : 'Set up another vault');
+    this.fs = require('fs');
+    this.path = require('path');
+    this.source = this.plugin.app.vault.adapter.basePath;
+    if (this.own) this.showPlan(); else this.askFolder();
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+
+  askFolder(problem) {
+    const el = this.contentEl;
+    el.empty();
+    el.createEl('p', {
+      text: 'Choose a vault, or any folder of notes. Scriptorium’s theme, snippet and plugins are added to its .obsidian ' +
+        'folder from this vault, and its own settings are merged. Its notes are not touched. You are shown what will ' +
+        'change before anything does.',
+    });
+    const row = el.createDiv({ cls: 'scriptorium-setup-row' });
+    const input = row.createEl('input', { type: 'text', cls: 'scriptorium-setup-path', attr: { placeholder: 'The vault’s folder', 'aria-label': 'The vault’s folder', spellcheck: 'false' } });
+    if (this.typed) input.value = this.typed;
+    const dialog = setupDialog();
+    if (dialog) {
+      const browse = row.createEl('button', { text: 'Browse…' });
+      browse.addEventListener('click', async () => {
+        try {
+          const r = await dialog.showOpenDialog({ title: 'Choose a vault to set up', properties: ['openDirectory', 'createDirectory'] });
+          if (r && !r.canceled && r.filePaths && r.filePaths[0]) { input.value = r.filePaths[0]; input.focus(); }
+        } catch (e) { new Notice('Could not open the folder chooser: type the folder’s path instead.'); }
+      });
+    }
+    const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: problem || '' });
+    const buttons = el.createDiv({ cls: 'modal-button-container' });
+    const next = buttons.createEl('button', { cls: 'mod-cta', text: 'Show what will change' });
+    buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    const go = () => {
+      this.typed = input.value;
+      const dir = setupFolder(this.path, input.value);
+      let why = '';
+      if (!dir) why = 'Give the folder’s full path.';
+      else if (!this.fs.existsSync(dir) || !this.fs.statSync(dir).isDirectory()) why = 'There is no such folder. Make the vault in Obsidian first, or make the folder.';
+      else if (this.path.basename(dir) === '.obsidian' || dir.split(/[\\/]/).includes('.obsidian')) why = 'That is a folder inside a vault’s settings, not a vault.';
+      else if (this.path.resolve(dir) === this.path.resolve(this.source)) why = 'That is this vault. Use “Scriptorium: Set up this vault” for it.';
+      if (why) { said.setText(why); input.focus(); return; }
+      this.target = dir;
+      this.showPlan();
+    };
+    next.addEventListener('click', go);
+    input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); go(); } });
+    window.setTimeout(() => input.focus(), 0);
+  }
+
+  showPlan() {
+    const el = this.contentEl;
+    el.empty();
+    let plan;
+    try {
+      plan = planVaultSetup(this.fs, this.path, setupPackage(this.fs, this.path, this.source), this.target);
+    } catch (e) {
+      if (this.own) { el.createEl('p', { text: `Could not read the vault: ${e.message}` }); return; }
+      this.askFolder(`Could not read that folder: ${e.message}`);
+      return;
+    }
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: this.target });
+    const buttons = () => el.createDiv({ cls: 'modal-button-container' });
+    if (!plan.changes.length) {
+      el.createEl('p', { text: 'Scriptorium is already set up here: nothing to change.' });
+      for (const n of plan.notes) el.createEl('p', { cls: 'scriptorium-setup-note', text: n });
+      buttons().createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
+      return;
+    }
+    const replaced = plan.changes.filter(c => c.replaces).length, added = plan.changes.length - replaced;
+    el.createEl('p', {
+      text: `${added} file${added === 1 ? '' : 's'} to add and ${replaced} to replace or merge, all in the .obsidian folder. ` +
+        'No note is touched and nothing is deleted. The .obsidian folder as it is now is first copied to ' +
+        '.obsidian/scriptorium-backup-….',
+    });
+    el.createEl('pre', { cls: 'scriptorium-setup-plan', text: describeVaultSetup(plan).map(l => l.trimStart()).join('\n'), attr: { tabindex: '0' } });
+    const row = buttons();
+    const yes = row.createEl('button', { cls: 'mod-cta', text: 'Set up' });
+    if (!this.own) row.createEl('button', { text: 'Back' }).addEventListener('click', () => this.askFolder());
+    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    yes.addEventListener('click', () => {
+      yes.disabled = true;
+      let backup;
+      try {
+        backup = applyVaultSetup(this.fs, this.path, this.target, plan);
+      } catch (e) {
+        el.empty();
+        el.createEl('p', { cls: 'scriptorium-setup-problem', text: e.message });
+        buttons().createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
+        return;
+      }
+      el.empty();
+      el.createEl('p', { text: `Done: ${added} file${added === 1 ? '' : 's'} added, ${replaced} replaced or merged.` });
+      if (backup) el.createEl('p', { cls: 'scriptorium-setup-note', text: `The .obsidian folder as it was is in ${backup}` });
+      el.createEl('p', {
+        text: this.own ? 'Reload Obsidian to see it (Ctrl/Cmd+P, “Reload app without saving”).'
+          : 'Open that vault from the vault switcher (“Open folder as vault” if it is new to Obsidian) and, when Obsidian asks, choose “Trust author and enable plugins”. If it was open, reload it.',
+      });
+      buttons().createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
+    });
+  }
+}
+
+/* Electron's folder chooser, or null where there is none. */
+function setupDialog() {
+  try {
+    const electron = require('electron');
+    const remote = electron.remote || require('@electron/remote');
+    return remote && remote.dialog && typeof remote.dialog.showOpenDialog === 'function' ? remote.dialog : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ==========================================================
    The plugin
    ========================================================== */
 
@@ -977,6 +1350,26 @@ class Scriptorium extends Plugin {
       id: 'toggle-marginalia',
       name: 'Toggle marginalia (footnotes in the margin)',
       callback: () => this.updateSettings({ marginalia: !this.settings.marginalia })
+    });
+    // Setting up a vault reads and writes files outside this vault, which only Obsidian on a computer can do.
+    const desktop = () => !(Platform && Platform.isDesktopApp === false) && Boolean(this.app.vault.adapter && this.app.vault.adapter.basePath);
+    this.addCommand({
+      id: 'set-up-another-vault',
+      name: 'Set up another vault (make any vault a Scriptorium vault)',
+      checkCallback: checking => {
+        if (!desktop()) return false;
+        if (!checking) new SetupVaultModal(this, null).open();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: 'set-up-this-vault',
+      name: 'Set up this vault (turn Scriptorium’s theme, snippet and plugins back on)',
+      checkCallback: checking => {
+        if (!desktop()) return false;
+        if (!checking) new SetupVaultModal(this, this.app.vault.adapter.basePath).open();
+        return true;
+      }
     });
     this.addSettingTab(new ScriptoriumSettings(this.app, this));
 
@@ -1061,5 +1454,6 @@ module.exports = Scriptorium;
 // Pure helpers, exported for plugins-tests/ (Obsidian uses only the class).
 Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
-  refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey
+  refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
+  setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder
 });

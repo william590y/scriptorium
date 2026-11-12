@@ -5,7 +5,10 @@
 // Garamond for the current user if they are missing. The Longform plugin is not bundled: if the user ticks it, it is
 // downloaded from its author's official release into the new vault. Every download is pinned by SHA-256. An existing
 // folder is never changed, except a Scriptorium vault, which it can update in place: Scriptorium's own files are replaced
-// (the old ones backed up in .obsidian/scriptorium-backup-<time>), the user's notes and settings are kept. If the user
+// (the old ones backed up in .obsidian/scriptorium-backup-<time>), the user's notes and settings are kept. Any other
+// folder with files in it (a vault the user already writes in, or a folder of notes) can be set up as a Scriptorium
+// vault: Scriptorium's files are added to its .obsidian folder, the user's settings are merged, and no note is touched
+// (see Vaults.SetUp). If the user
 // ticks it, a new vault is then opened in Obsidian with its community plugins turned on (see AutoOpen).
 // Targets .NET Framework 4.8, which ships with Windows 10 and 11, so nothing else needs installing.
 //
@@ -81,6 +84,28 @@ namespace ScriptoriumSetup
                     if (Vaults.Classify(vault) != Vaults.Target.Vault) throw new InvalidOperationException("This folder is not a Scriptorium vault: " + vault);
                     Vaults.Report report = Vaults.Update(vault, null, Console.WriteLine);
                     Console.WriteLine(Vaults.UpdatedMessage(vault, report));
+                    return 0;
+                }
+                catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
+            }
+            // Headless: set up Scriptorium in any existing folder (a vault with notes in it, or a folder of notes), as "Set up"
+            // does in the window; --setup-plan only prints what it would change.
+            if (args.Length == 2 && (args[0] == "--setup-only" || args[0] == "--setup-plan"))
+            {
+                try
+                {
+                    string vault = Path.GetFullPath(args[1]);
+                    if (!Directory.Exists(vault)) throw new InvalidOperationException("No such folder: " + vault);
+                    if (args[0] == "--setup-plan")
+                    {
+                        Vaults.SetupPlan plan = Vaults.PlanSetUp(vault);
+                        Console.WriteLine("Scriptorium " + (plan.Version ?? "?") + " in " + vault);
+                        Console.WriteLine(plan.Summary(true));
+                        foreach (string line in plan.Lines) Console.WriteLine(line);
+                        return 0;
+                    }
+                    Vaults.Report report = Vaults.SetUp(vault, null, Console.WriteLine);
+                    Console.WriteLine(Vaults.SetUpMessage(vault, report));
                     return 0;
                 }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
@@ -379,11 +404,35 @@ namespace ScriptoriumSetup
     // other file of the package is written only if it is missing (settings, data.json, the sample note); the community
     // plugin list and appearance.json are merged; nothing is ever deleted. Every file that is replaced is first copied to
     // .obsidian/scriptorium-backup-<time>/, and if anything fails half-way, the vault is put back from that copy.
+    //
+    // Setting up (SetUp) does the same for a folder that is not a Scriptorium vault yet: a vault the user already writes
+    // in, or a folder of notes. Only .obsidian is written to: no note is touched, and the package's sample note, README,
+    // workspace and graph settings are left out. Scriptorium's own files are added (or replaced, if a file of that name
+    // differs); the community plugin list, appearance.json (the manuscript snippet on, the Typewriter theme) and app.json
+    // (Scriptorium's text size, unless the user has chosen one) are merged; a plugin's data.json and core-plugins.json are
+    // written only if missing; hotkeys and everything else are left alone. The whole .obsidian folder as it was is first
+    // copied to .obsidian/scriptorium-backup-<time>/.obsidian. Run again, it changes nothing.
+    // installers/Setup-Scriptorium-Vault.py follows the same rules on any system; tools/test_setup_vault.py tests both.
     static class Vaults
     {
-        public enum Target { New, Empty, Vault, Other }
+        // Folder: an existing folder with files in it that is not a Scriptorium vault (it can be set up as one).
+        // Other: not a folder at all.
+        public enum Target { New, Empty, Vault, Folder, Other }
 
         public sealed class Report { public string From, To, Backup; public int Replaced, Added; }
+
+        // What SetUp would do to a folder: one line per file, and the counts.
+        public sealed class SetupPlan
+        {
+            public string Version;
+            public int Adds, Replaces;
+            public List<string> Lines = new List<string>();
+            public string Summary(bool would)
+            {
+                if (Adds + Replaces == 0) return "Scriptorium is already set up here: nothing to change.";
+                return (would ? "Would change: " : "Changes: ") + Count(Adds, "file") + " to add, " + Replaces + " to replace or merge.";
+            }
+        }
 
         sealed class Change
         {
@@ -392,7 +441,7 @@ namespace ScriptoriumSetup
             public bool Replaces;
         }
 
-        enum Rule { Replace, Keep, Plugins, Appearance }
+        enum Rule { Replace, Keep, Plugins, Appearance, App, Skip }
 
         static readonly string[] BundledPlugins = { "scriptorium", "manuscriptum", "typewriter-mode", "lagrange" };
         static readonly string[] PluginCode = { "main.js", "manifest.json", "styles.css", "LICENSE" };
@@ -402,7 +451,7 @@ namespace ScriptoriumSetup
             if (File.Exists(path)) return Target.Other;
             if (!Directory.Exists(path)) return Target.New;
             if (IsScriptoriumVault(path)) return Target.Vault;
-            return IsEmptyFolder(path) ? Target.Empty : Target.Other;
+            return IsEmptyFolder(path) ? Target.Empty : Target.Folder;
         }
 
         public static bool IsScriptoriumVault(string dir)
@@ -457,18 +506,39 @@ namespace ScriptoriumSetup
 
         static string FromTo(Report r) { return "from " + (r.From ?? "an unknown version") + " to " + (r.To ?? "an unknown version"); }
 
-        static Rule RuleFor(string rel)
+        public static string SetUpMessage(string vault, Report r)
+        {
+            if (r.Replaced + r.Added == 0) return "Scriptorium is already set up in " + vault + ": nothing was changed.";
+            return "Set up Scriptorium " + (r.To ?? "") + " in " + vault + ". Open the vault in Obsidian and, when it asks, choose " +
+                   "\"Trust author and enable plugins\"; if the vault was open, reload it.";
+        }
+
+        public static string SetUpStatus(Report r)
+        {
+            return r.Replaced + r.Added == 0 ? "Done. Scriptorium was already set up here; nothing was changed."
+                                             : "Done. Scriptorium is set up in this vault; your notes were not touched.";
+        }
+
+        // setup: the rules for setting up a folder that is not a Scriptorium vault yet (see the top of this class).
+        static Rule RuleFor(string rel, bool setup)
         {
             string k = rel.Replace('\\', '/');
             if (k == ".obsidian/community-plugins.json") return Rule.Plugins;
             if (k == ".obsidian/appearance.json") return Rule.Appearance;
-            if (k == ".obsidian/snippets/manuscript.css" || k == "README.md" || k.StartsWith(".obsidian/themes/Typewriter/", StringComparison.Ordinal)) return Rule.Replace;
+            if (setup && k == ".obsidian/app.json") return Rule.App;
+            if (k == ".obsidian/snippets/manuscript.css" || k == ".obsidian/plugins/lagrange/LagrangeHand-OFL.txt" ||
+                k.StartsWith(".obsidian/themes/Typewriter/", StringComparison.Ordinal)) return Rule.Replace;
+            if (!setup && k == "README.md") return Rule.Replace;
             foreach (string plugin in BundledPlugins)
                 foreach (string file in PluginCode)
                     if (k == ".obsidian/plugins/" + plugin + "/" + file) return Rule.Replace;
             foreach (Pinned p in Installer.Longform)
                 if (k == ".obsidian/plugins/longform/" + p.File) return Rule.Replace;
-            return Rule.Keep;
+            if (!setup) return Rule.Keep;
+            if (k == ".obsidian/core-plugins.json") return Rule.Keep;
+            foreach (string plugin in BundledPlugins)
+                if (k == ".obsidian/plugins/" + plugin + "/data.json") return Rule.Keep;
+            return Rule.Skip;
         }
 
         // Updates the vault from the package (and Longform's files in longform, if not null); returns what was done.
@@ -485,21 +555,124 @@ namespace ScriptoriumSetup
                 report.To = VaultVersion(staging);
                 var changes = new List<Change>();
                 foreach (string file in Directory.GetFiles(staging, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
-                    Plan(vault, file.Substring(staging.Length + 1), File.ReadAllBytes(file), changes, log);
+                    Plan(vault, file.Substring(staging.Length + 1), File.ReadAllBytes(file), changes, log, null);
                 if (longform != null)
                     foreach (Pinned p in Installer.Longform)
-                        Plan(vault, Path.Combine(".obsidian", "plugins", "longform", p.File), File.ReadAllBytes(Path.Combine(longform, p.File)), changes, log);
-                Apply(vault, changes, report, log);
+                        Plan(vault, Path.Combine(".obsidian", "plugins", "longform", p.File), File.ReadAllBytes(Path.Combine(longform, p.File)), changes, log, null);
+                Apply(vault, changes, report, log, false);
                 return report;
             }
             finally { try { Directory.Delete(temp, true); } catch { } }
         }
 
-        static void Plan(string vault, string rel, byte[] content, List<Change> changes, Action<string> log)
+        // What SetUp would change in the folder; nothing is written.
+        public static SetupPlan PlanSetUp(string vault)
         {
+            var plan = new SetupPlan();
+            string temp = Path.Combine(Path.GetTempPath(), "scriptorium-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                var notes = new List<string>();
+                List<Change> changes = PlanSetUp(vault, Installer.Stage(temp), null, notes, out plan.Version);
+                Describe(changes, notes, plan);
+                return plan;
+            }
+            finally { try { Directory.Delete(temp, true); } catch { } }
+        }
+
+        static List<Change> PlanSetUp(string vault, string staging, string longform, List<string> notes, out string version)
+        {
+            version = VaultVersion(staging);
+            // The plugins that will be in the vault afterwards: Scriptorium's, Longform if it comes too, and whatever is
+            // installed already. Only those are turned on.
+            var present = new HashSet<string>(BundledPlugins, StringComparer.Ordinal);
+            if (longform != null) present.Add("longform");
+            string plugins = Path.Combine(vault, ".obsidian", "plugins");
+            if (Directory.Exists(plugins)) foreach (string d in Directory.GetDirectories(plugins)) present.Add(Path.GetFileName(d));
+            var changes = new List<Change>();
+            foreach (string file in Directory.GetFiles(staging, "*", SearchOption.AllDirectories)
+                                             .OrderBy(f => f.Substring(staging.Length + 1).Replace('\\', '/'), StringComparer.Ordinal))
+                Plan(vault, file.Substring(staging.Length + 1), File.ReadAllBytes(file), changes, notes.Add, present);
+            if (longform != null)
+                foreach (Pinned p in Installer.Longform)
+                    Plan(vault, Path.Combine(".obsidian", "plugins", "longform", p.File), File.ReadAllBytes(Path.Combine(longform, p.File)), changes, notes.Add, present);
+            return changes;
+        }
+
+        static void Describe(List<Change> changes, List<string> notes, SetupPlan plan)
+        {
+            foreach (Change c in changes)
+            {
+                string name = c.Rel.Replace('\\', '/');
+                if (c.Replaces) plan.Replaces++; else plan.Adds++;
+                plan.Lines.Add(c.Note != null ? "  merge    " + name + ": " + c.Note : (c.Replaces ? "  replace  " : "  add      ") + name);
+            }
+            foreach (string n in notes) plan.Lines.Add("  note     " + n);
+        }
+
+        // Sets up Scriptorium in a folder that exists (see the top of this class); returns what was done. The lines of the
+        // plan go to log before anything is changed.
+        public static Report SetUp(string vault, string longform, Action<string> log)
+        {
+            if (log == null) log = line => { };
+            if (!Directory.Exists(vault)) throw new InvalidOperationException("No such folder: " + vault);
+            string leaf = Path.GetFileName(vault.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (leaf == ".obsidian" || vault.Replace('\\', '/').Contains("/.obsidian/"))
+                throw new InvalidOperationException("That is a folder inside a vault's settings, not a vault: " + vault);
+            var report = new Report { From = VaultVersion(vault) };
+            string temp = Path.Combine(Path.GetTempPath(), "scriptorium-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                var notes = new List<string>();
+                var plan = new SetupPlan();
+                List<Change> changes = PlanSetUp(vault, Installer.Stage(temp), longform, notes, out report.To);
+                Describe(changes, notes, plan);
+                log(plan.Summary(false));
+                foreach (string line in plan.Lines) log(line);
+                Apply(vault, changes, report, log, true);
+                return report;
+            }
+            finally { try { Directory.Delete(temp, true); } catch { } }
+        }
+
+        // present: null when updating a Scriptorium vault; when setting up, the plugins the vault will hold.
+        static void Plan(string vault, string rel, byte[] content, List<Change> changes, Action<string> log, HashSet<string> present)
+        {
+            bool setup = present != null;
+            Rule rule = RuleFor(rel, setup);
+            if (rule == Rule.Skip) return;
             string target = Path.Combine(vault, rel);
-            if (!File.Exists(target)) { changes.Add(new Change { Rel = rel, Content = content }); return; }
-            Rule rule = RuleFor(rel);
+            if (rule == Rule.App)
+            {
+                // Obsidian keeps some of app.json's settings (the text size) in appearance.json once it has opened the
+                // vault: a setting the vault has there is the vault's own, and is not set again here.
+                MiniJson.Obj appearance = null, own = null;
+                try { appearance = MiniJson.Parse(File.ReadAllText(Path.Combine(vault, ".obsidian", "appearance.json"))) as MiniJson.Obj; } catch { }
+                try { if (File.Exists(target)) own = MiniJson.Parse(File.ReadAllText(target)) as MiniJson.Obj; } catch { }
+                var ours = (MiniJson.Obj)MiniJson.Parse(Encoding.UTF8.GetString(content));
+                if (appearance != null && ours.Any(kv => appearance.Has(kv.Key)))
+                {
+                    var rest = new MiniJson.Obj();
+                    foreach (KeyValuePair<string, object> kv in ours)
+                    {
+                        if (!appearance.Has(kv.Key)) { rest.Add(kv); continue; }
+                        string theirs = MiniJson.WriteCompact(appearance.Get(kv.Key)), mine = MiniJson.WriteCompact(kv.Value);
+                        if (theirs != mine && !(own != null && own.Has(kv.Key)))
+                            log("kept your " + kv.Key + " (" + theirs + "; Scriptorium's is " + mine + ")");
+                    }
+                    if (rest.Count == 0) return;
+                    content = Utf8(MiniJson.Write(rest));
+                }
+            }
+            if (!File.Exists(target))
+            {
+                if (setup && rule == Rule.Plugins)   // only the plugins that will be there (Longform is not bundled)
+                    content = Utf8(MiniJson.Write(((List<object>)MiniJson.Parse(Encoding.UTF8.GetString(content))).Where(x => present.Contains(x as string ?? "")).ToList()));
+                changes.Add(new Change { Rel = rel, Content = content });
+                return;
+            }
             if (rule == Rule.Keep) return;
             if (rule == Rule.Replace)
             {
@@ -507,15 +680,16 @@ namespace ScriptoriumSetup
                 return;
             }
             string note, name = Path.GetFileName(rel);
-            byte[] merged = rule == Rule.Plugins ? MergePlugins(File.ReadAllText(target), content, name, out note)
-                                                 : MergeAppearance(File.ReadAllText(target), name, out note);
+            byte[] merged = rule == Rule.Plugins ? MergePlugins(File.ReadAllText(target), content, name, out note, present)
+                          : rule == Rule.Appearance ? MergeAppearance(File.ReadAllText(target), name, out note, setup)
+                          : MergeApp(File.ReadAllText(target), content, name, out note);
             if (merged != null) changes.Add(new Change { Rel = rel, Content = merged, Replaces = true, Note = note });
             else if (note != null) log(note);
         }
 
         // The vault's list of community plugins, plus any of ours that are missing (its order kept). Null if nothing needs
         // adding, or if the file is not a JSON list (then note says it was left as it was).
-        static byte[] MergePlugins(string text, byte[] ours, string name, out string note)
+        static byte[] MergePlugins(string text, byte[] ours, string name, out string note, HashSet<string> present)
         {
             note = null;
             List<object> list;
@@ -526,32 +700,75 @@ namespace ScriptoriumSetup
             foreach (object o in (List<object>)MiniJson.Parse(Encoding.UTF8.GetString(ours)))
             {
                 var id = o as string;
-                if (id != null && !list.Any(x => x as string == id)) { list.Add(id); added.Add(id); }
+                if (id != null && (present == null || present.Contains(id)) && !list.Any(x => x as string == id)) { list.Add(id); added.Add(id); }
             }
             if (added.Count == 0) return null;
-            note = "Turned on the community plugin" + (added.Count > 1 ? "s " : " ") + string.Join(", ", added);
+            note = (present == null ? "Turned on" : "turn on") + " the community plugin" + (added.Count > 1 ? "s " : " ") + string.Join(", ", added);
             return Utf8(MiniJson.Write(list));
         }
 
         // appearance.json as it is, with the manuscript snippet enabled. Null if it already is, or if the file is not a
         // JSON object with a list of snippets (then note says it was left as it was).
-        static byte[] MergeAppearance(string text, string name, out string note)
+        // When setting up, the theme is set to Typewriter as well.
+        static byte[] MergeAppearance(string text, string name, out string note, bool setup)
         {
             note = null;
             MiniJson.Obj appearance;
             try { appearance = MiniJson.Parse(text) as MiniJson.Obj; }
             catch (FormatException) { appearance = null; }
             if (appearance == null) { note = "Left " + name + " as it was: it is not a valid JSON object."; return null; }
+            bool snippet = true;
             if (!appearance.Has("enabledCssSnippets")) appearance.Add(new KeyValuePair<string, object>("enabledCssSnippets", new List<object> { "manuscript" }));
             else
             {
                 var snippets = appearance.Get("enabledCssSnippets") as List<object>;
                 if (snippets == null) { note = "Left " + name + " as it was: its enabledCssSnippets is not a list."; return null; }
-                if (snippets.Any(x => x as string == "manuscript")) return null;
-                snippets.Add("manuscript");
+                if (snippets.Any(x => x as string == "manuscript")) snippet = false;
+                else snippets.Add("manuscript");
             }
-            note = "Turned the manuscript snippet back on";
+            if (!setup)
+            {
+                if (!snippet) return null;
+                note = "Turned the manuscript snippet back on";
+                return Utf8(MiniJson.Write(appearance));
+            }
+            var notes = new List<string>();
+            if (snippet) notes.Add("turn on the manuscript snippet");
+            string theme = appearance.Get("cssTheme") as string;
+            if (theme != "Typewriter")
+            {
+                int at = appearance.FindIndex(kv => kv.Key == "cssTheme");
+                var pair = new KeyValuePair<string, object>("cssTheme", "Typewriter");
+                if (at >= 0) appearance[at] = pair; else appearance.Add(pair);
+                notes.Add("change the theme from " + (string.IsNullOrEmpty(theme) ? "the default" : theme) + " to Typewriter");
+            }
+            if (notes.Count == 0) return null;
+            note = string.Join(" and ", notes);
             return Utf8(MiniJson.Write(appearance));
+        }
+
+        // app.json with Scriptorium's settings added where the vault has none of its own. Null if nothing is added; note
+        // then names any setting of the user's that differs from Scriptorium's and was kept.
+        static byte[] MergeApp(string text, byte[] ours, string name, out string note)
+        {
+            note = null;
+            MiniJson.Obj app;
+            try { app = MiniJson.Parse(text) as MiniJson.Obj; }
+            catch (FormatException) { app = null; }
+            if (app == null) { note = "Left " + name + " as it was: it is not a valid JSON object."; return null; }
+            var added = new List<string>();
+            var kept = new List<string>();
+            foreach (KeyValuePair<string, object> kv in (MiniJson.Obj)MiniJson.Parse(Encoding.UTF8.GetString(ours)))
+            {
+                string theirs = MiniJson.WriteCompact(kv.Value);
+                if (!app.Has(kv.Key)) { app.Add(kv); added.Add(kv.Key + " to " + theirs); }
+                else if (MiniJson.WriteCompact(app.Get(kv.Key)) != theirs)
+                    kept.Add("kept your " + kv.Key + " (" + MiniJson.WriteCompact(app.Get(kv.Key)) + "; Scriptorium's is " + theirs + ")");
+            }
+            string keptNote = kept.Count > 0 ? string.Join("; ", kept) : null;
+            if (added.Count == 0) { note = keptNote; return null; }
+            note = "set " + string.Join(", ", added) + (keptNote != null ? "; " + keptNote : "");
+            return Utf8(MiniJson.Write(app));
         }
 
         static byte[] Utf8(string s) { return new UTF8Encoding(false).GetBytes(s); }
@@ -562,11 +779,36 @@ namespace ScriptoriumSetup
             return info.Length == content.Length && File.ReadAllBytes(file).SequenceEqual(content);
         }
 
-        static void Apply(string vault, List<Change> changes, Report report, Action<string> log)
+        // Copies a folder tree, leaving out earlier backups.
+        static void CopyConfig(string from, string to)
+        {
+            Directory.CreateDirectory(to);
+            foreach (string f in Directory.GetFiles(from)) File.Copy(f, Path.Combine(to, Path.GetFileName(f)));
+            foreach (string d in Directory.GetDirectories(from))
+                if (!Path.GetFileName(d).StartsWith("scriptorium-backup-", StringComparison.Ordinal)) CopyConfig(d, Path.Combine(to, Path.GetFileName(d)));
+        }
+
+        // setup: the whole .obsidian folder is backed up (not only the files replaced), and the plan has been logged.
+        static void Apply(string vault, List<Change> changes, Report report, Action<string> log, bool setup)
         {
             List<Change> replacing = changes.Where(c => c.Replaces).ToList();
             string backup = null;
-            if (replacing.Count > 0)
+            string config = Path.Combine(vault, ".obsidian");
+            if (setup && changes.Count > 0 && Directory.Exists(config) && Directory.EnumerateFileSystemEntries(config).Any())
+            {
+                string stamp = "scriptorium-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+                backup = Path.Combine(config, stamp);
+                for (int n = 2; Directory.Exists(backup) || File.Exists(backup); n++) backup = Path.Combine(config, stamp + "-" + n);
+                try { CopyConfig(config, Path.Combine(backup, ".obsidian")); }
+                catch (Exception e)
+                {
+                    DeleteEntry(backup);
+                    throw new InvalidOperationException("The vault's .obsidian folder could not be backed up, so nothing was changed: " + e.Message, e);
+                }
+                report.Backup = backup;
+                log("Backed up .obsidian as it was in " + backup);
+            }
+            else if (!setup && replacing.Count > 0)
             {
                 string stamp = "scriptorium-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
                 backup = Path.Combine(vault, ".obsidian", stamp);
@@ -625,14 +867,22 @@ namespace ScriptoriumSetup
                 }
                 for (int i = made.Count - 1; i >= 0; i--) { try { Directory.Delete(made[i]); } catch { } }
                 if (restored && backup != null) DeleteEntry(backup);
-                log(restored ? "The update failed, so every file was put back as it was."
-                             : "The update failed, and some files could not be put back; the originals are in " + backup);
-                throw new InvalidOperationException((restored ? "The update failed and was undone: " : "The update failed: ") + e.Message, e);
+                string what = setup ? "setup" : "update";
+                log(restored ? "The " + what + " failed, so every file was put back as it was."
+                             : "The " + what + " failed, and some files could not be put back; the originals are in " + backup);
+                throw new InvalidOperationException("The " + what + " failed" + (restored ? " and was undone: " : ": ") + e.Message, e);
             }
 
-            foreach (Change c in changes) if (c.Note != null) log(c.Note);
             report.Replaced = replacing.Count;
             report.Added = changes.Count - replacing.Count;
+            if (setup)
+            {
+                if (report.Added > 0) log("Added " + Count(report.Added, "file"));
+                if (report.Replaced > 0) log("Replaced or merged " + Count(report.Replaced, "file"));
+                log(changes.Count == 0 ? "Scriptorium is already set up here" : "Your notes were not touched");
+                return;
+            }
+            foreach (Change c in changes) if (c.Note != null) log(c.Note);
             if (report.Replaced > 0) log("Replaced " + Count(report.Replaced, "file"));
             if (report.Added > 0) log("Added " + Count(report.Added, "missing file"));
             if (changes.Count == 0) log("Scriptorium's files were already up to date");
@@ -2202,14 +2452,16 @@ namespace ScriptoriumSetup
         void ShowTarget(Vaults.Target t, bool valid, string version)
         {
             target = valid ? t : Vaults.Target.New;
-            installButton.Text = valid && t == Vaults.Target.Vault ? "Update" : "Install";
+            installButton.Text = valid && t == Vaults.Target.Vault ? "Update" : valid && t == Vaults.Target.Folder ? "Set up" : "Install";
             string open = target == Vaults.Target.Vault ? OpenUpdated : OpenNew;
             if (openBox.Text != open) { openBox.Text = open; openBox.Width = openBox.PreferredWidth(); }
             if (!valid) Status("That folder path is not valid.", true);
             else if (t == Vaults.Target.Vault)
                 Status("This is a Scriptorium vault (" + (version ?? "unknown version") + "). Update replaces Scriptorium's files and keeps your notes and settings.");
             else if (t == Vaults.Target.Empty) Status("This folder is empty: Scriptorium will be installed in it.");
-            else if (t == Vaults.Target.Other) Status("This folder already exists and isn't a Scriptorium vault. Choose a new or empty folder.", true);
+            else if (t == Vaults.Target.Folder)
+                Status("This folder has files in it. Set up makes it a Scriptorium vault: your notes are not touched and your settings are merged.");
+            else if (t == Vaults.Target.Other) Status("That is a file, not a folder. Choose a folder.", true);
             else Status("Ready.");
         }
 
@@ -2405,9 +2657,18 @@ namespace ScriptoriumSetup
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Scriptorium Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             if (t == Vaults.Target.Other)
             {
-                MessageBox.Show(this, "This folder already exists and isn't a Scriptorium vault:\n" + dest + "\n\nChoose a new folder name.",
+                MessageBox.Show(this, "That is a file, not a folder:\n" + dest + "\n\nChoose a folder.",
                                 "Scriptorium Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
+            }
+            if (t == Vaults.Target.Folder)
+            {
+                // Show what setting it up will change, and ask.
+                ShowTarget(t, true, null);
+                Vaults.SetupPlan plan;
+                try { plan = Vaults.PlanSetUp(dest); }
+                catch (Exception ex) { MessageBox.Show(this, ex.Message, "Scriptorium Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+                using (var ask = new ConfirmForm(dest, plan)) if (ask.ShowDialog(this) != DialogResult.OK) return;
             }
             if (t == Vaults.Target.Vault)
             {
@@ -2470,7 +2731,7 @@ namespace ScriptoriumSetup
                     if (wanted.Count > 0) Installer.AnnounceFontChange();
                 }
                 cancel.Token.ThrowIfCancellationRequested();
-                if (target == Vaults.Target.Vault) { UpdateVault(dest, temp, longform, open, exe); return; }
+                if (target == Vaults.Target.Vault || target == Vaults.Target.Folder) { UpdateVault(dest, temp, longform, open, exe, target == Vaults.Target.Folder); return; }
                 Status("Creating the vault …"); Progress(0, true);
                 Installer.ExtractVault(dest, Log, target == Vaults.Target.Empty);
                 if (longform)
@@ -2515,7 +2776,7 @@ namespace ScriptoriumSetup
             }
             catch (OperationCanceledException)
             {
-                Status(target == Vaults.Target.Vault ? "Stopped. Nothing in the vault was changed." : "Stopped. Nothing was created.");
+                Status(target == Vaults.Target.Vault || target == Vaults.Target.Folder ? "Stopped. Nothing in the vault was changed." : "Stopped. Nothing was created.");
                 UI(() => ResetControls());
             }
             catch (Exception ex)
@@ -2569,8 +2830,9 @@ namespace ScriptoriumSetup
         }
 
         // Update: Longform is downloaded first (if ticked), then the vault is updated in one step, backed up and undone on
-        // failure (see Vaults.Update).
-        void UpdateVault(string dest, string temp, bool longform, bool open, string exe)
+        // failure (see Vaults.Update). setup: the folder is not a Scriptorium vault yet, and is set up as one (see
+        // Vaults.SetUp); it is then opened like a new vault, with its plugins turned on.
+        void UpdateVault(string dest, string temp, bool longform, bool open, string exe, bool setup)
         {
             string longformFiles = null;
             if (longform)
@@ -2589,9 +2851,29 @@ namespace ScriptoriumSetup
                 }
             }
             cancel.Token.ThrowIfCancellationRequested();
-            Status("Updating the vault …"); Progress(0, true);
-            Vaults.Report report = Vaults.Update(dest, longformFiles, line => Log(line));
+            Status(setup ? "Setting up the vault …" : "Updating the vault …"); Progress(0, true);
+            Vaults.Report report = setup ? Vaults.SetUp(dest, longformFiles, line => Log(line.TrimStart()))
+                                         : Vaults.Update(dest, longformFiles, line => Log(line));
             Progress(100, false);
+            if (setup)
+            {
+                AutoOpen.Outcome opened = open ? OpenNewVault(dest, exe) : null;
+                Progress(100, false);
+                installedPath = dest;
+                string setUp = Vaults.SetUpStatus(report);
+                UI(() => UpdateDone(setUp));
+                if (opened != null && opened.Result == AutoOpen.Result.Trusted) Log("Opened the vault in Obsidian with its community plugins on.");
+                else if (opened != null && opened.Result == AutoOpen.Result.Opened)
+                    Log("Opened the vault in Obsidian. When it asks, choose \"Trust author and enable plugins\".");
+                else
+                {
+                    if (opened != null && opened.Problem != null) Log("Did not open the vault in Obsidian: " + opened.Problem + ".", true);
+                    Log("Open the vault in Obsidian (reload it if it was open) and, when it asks, choose \"Trust author and enable plugins\".");
+                }
+                if (opened != null && opened.CliPending)
+                    Log("Obsidian's command line interface, turned on for setup, will be turned off when Obsidian closes.");
+                return;
+            }
             installedPath = dest;
             string message = Vaults.UpdatedMessage(dest, report), done = Vaults.UpdatedStatus(report);
             UI(() => UpdateDone(done));
@@ -2659,7 +2941,10 @@ namespace ScriptoriumSetup
         float ruleY;
         const float PageWidth = 480, PageMargin = 34;
 
-        public ConfirmForm(string vault)
+        public ConfirmForm(string vault) : this(vault, null) { }
+
+        // plan: not null when the folder is to be set up as a Scriptorium vault (what will change is said in the question).
+        public ConfirmForm(string vault, Vaults.SetupPlan plan)
         {
             SuspendLayout();
             Text = "Scriptorium Setup";
@@ -2671,9 +2956,22 @@ namespace ScriptoriumSetup
             DoubleBuffered = true;
             Font = Typefaces.Make(Typefaces.Text, 16f, FontStyle.Regular);
 
-            heading = new InkLabel("Update Scriptorium in this vault?", Typefaces.Make(Typefaces.Display, 31f, FontStyle.Regular), Ink.Red, false) { Above = 0.9f, Below = 0.28f };
-            body = new InkLabel("Your notes and settings stay; Scriptorium's files are replaced (the old ones are backed up in " +
-                                ".obsidian\\scriptorium-backup-…).", Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
+            string question = "Update Scriptorium in this vault?";
+            string says = "Your notes and settings stay; Scriptorium's files are replaced (the old ones are backed up in " +
+                          ".obsidian\\scriptorium-backup-…).";
+            if (plan != null)
+            {
+                question = "Set up Scriptorium in this vault?";
+                yes.Text = "Set up";
+                says = plan.Adds + plan.Replaces == 0
+                    ? "Scriptorium is already set up here: nothing will be changed."
+                    : "Your notes are not touched. In its .obsidian folder, " + plan.Adds + (plan.Adds == 1 ? " file is" : " files are") + " added and " +
+                      plan.Replaces + " replaced or merged: Scriptorium's plugins, snippet and theme are added, your own plugins and " +
+                      "snippets stay on, and the theme becomes Typewriter. The folder as it is now is first copied to " +
+                      ".obsidian\\scriptorium-backup-….";
+            }
+            heading = new InkLabel(question, Typefaces.Make(Typefaces.Display, 31f, FontStyle.Regular), Ink.Red, false) { Above = 0.9f, Below = 0.28f };
+            body = new InkLabel(says, Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
             where = new InkLabel(vault, Typefaces.Make(Typefaces.Text, 15.5f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2 };
             yes.Name = "confirm-update"; no.Name = "confirm-cancel";
             yes.DialogResult = DialogResult.OK; no.DialogResult = DialogResult.Cancel;
@@ -2813,7 +3111,7 @@ namespace ScriptoriumSetup
         }
 
         // Updating a vault: the folder is a Scriptorium vault (the button reads Update), the question, the update done;
-        // and a folder that is neither new, empty nor a vault.
+        // and a folder with files in it that is not a vault yet (the button reads Set up), and its question.
         static void UpdateStates(string dir)
         {
             Ink.S = 1f;
@@ -2851,8 +3149,14 @@ namespace ScriptoriumSetup
             }
             using (SetupForm f = Open())
             {
-                f.PreviewTarget(Vaults.Target.Other, null);
-                Save(f, dir, "13-not-a-vault.png");
+                f.PreviewTarget(Vaults.Target.Folder, null);
+                Save(f, dir, "13-set-up-ready.png");
+                using (var ask = new ConfirmForm(f.PreviewPath, new Vaults.SetupPlan { Adds = 25, Replaces = 2 }) { StartPosition = FormStartPosition.Manual, Location = new Point(-30000, -30000) })
+                {
+                    ask.Show();
+                    Application.DoEvents();
+                    Save(ask, dir, "14-set-up-confirm.png");
+                }
             }
         }
 

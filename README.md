@@ -103,7 +103,8 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
 
 - **Windows:** download `Scriptorium-Setup.exe` from the
   [latest release](https://github.com/william590y/scriptorium/releases/latest), open it, choose the vault folder and
-  click **Install**. It creates a new vault folder (or fills an empty one; any other existing folder is never changed)
+  click **Install**. It creates a new vault folder (or fills an empty one; a folder that already has files in it is
+  never changed by Install: see [Setting up a vault you already have](#setting-up-a-vault-you-already-have))
   and, if you tick them, installs Obsidian, EB Garamond and Cormorant Garamond for the current user, and downloads the
   Longform plugin. No administrator rights are needed. With **Open the vault in Obsidian and turn on its plugins**
   ticked (the default), it then opens the new vault in Obsidian with its community plugins on, so Obsidian does not ask
@@ -120,6 +121,7 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   `.obsidian\scriptorium-backup-<date>-<time>\`, and if anything fails half-way the vault is put back as it was.
   Restart Obsidian (or reload the vault) afterwards. (An updated vault is one Obsidian already knows, so **Open
   Obsidian when done** only starts Obsidian.)
+- **A vault you already have:** see [Setting up a vault you already have](#setting-up-a-vault-you-already-have).
 - **Script installers:** `installers/Install-Scriptorium-Windows.cmd`, `Install-Scriptorium-macOS.command` and
   `Install-Scriptorium-Linux.sh` do the same from a terminal; they download the configuration from
   williamliaw.com, pinned by SHA-256. They always open the new vault in Obsidian with its plugins on, as Setup does,
@@ -157,6 +159,45 @@ Obsidian, or in `obsidian.json` once Obsidian has closed (if Obsidian stops answ
 waits for it to close). An Obsidian older than 1.12 has no command line interface: the vault is opened and Obsidian
 asks. To review the plugins later, or to turn them off, use **Settings → Community plugins → Restricted mode**.
 
+## Setting up a vault you already have
+
+Any vault can be made a Scriptorium vault in one step: a vault you already write in, a new vault Obsidian has just
+made, or a folder of notes that has never been opened in Obsidian. There are three ways, and they follow the same
+rules:
+
+- **In Obsidian:** in a Scriptorium vault, run **Scriptorium: Set up another vault** from the command palette, choose
+  the other vault's folder, read what will change, and click **Set up**. It copies Scriptorium from the vault you are
+  in (never your Lagrange API keys or any other setting of yours). **Scriptorium: Set up this vault** does the same to
+  the vault you are in, which turns Scriptorium's theme, snippet and plugins back on if they were turned off. Obsidian
+  on a computer only.
+- **Windows:** open `Scriptorium-Setup.exe` and choose the vault's folder. For a folder that has files in it and is not
+  a Scriptorium vault yet, the button reads **Set up**; it asks first, saying how many files it will add and merge.
+  (`Scriptorium-Setup.exe --setup-plan <folder>` prints the whole list and changes nothing; `--setup-only <folder>`
+  sets it up without a window.)
+- **Any system:** `python3 installers/Setup-Scriptorium-Vault.py /path/to/vault` (Python 3.8 or later, nothing else).
+  It lists what it will change and asks before doing it; `--dry-run` only lists, `--yes` does not ask. From a checkout
+  it takes Scriptorium from `vault/`; alone, it downloads `Scriptorium.zip` from williamliaw.com, pinned by SHA-256.
+
+What setting up does, and does not do:
+
+- It writes only inside the vault's `.obsidian` folder. **No note is touched**, nothing is deleted, and the sample
+  note and README of the Scriptorium vault are not brought along.
+- Scriptorium's own files are added: the `manuscript` snippet, the Typewriter theme, and the Scriptorium, Lagrange,
+  Manuscriptum and Typewriter Mode plugins. A file of the same name that differs is replaced.
+- Your settings are merged, not overwritten. Your community plugins stay on and Scriptorium's are added to the list;
+  your snippets stay on and `manuscript` is added; the theme becomes Typewriter; Scriptorium's text size (22) is set
+  only if you have not chosen one. A plugin's own settings (`data.json`) are written only if it has none. Your hotkeys,
+  workspace, core plugins and every other setting are left as they are.
+- Before anything changes, the whole `.obsidian` folder as it was is copied to
+  `.obsidian/scriptorium-backup-<date>-<time>/.obsidian`. If anything fails half-way, every file is put back. To undo
+  a setup later, copy the files back from that folder.
+- Run again, it changes nothing and makes no second backup.
+
+Close the vault in Obsidian first (Obsidian rewrites some of these files while a vault is open), or reload it
+afterwards. When you open it, Obsidian asks whether to trust the author of its plugins: choose **Trust author and
+enable plugins**. Install the fonts as in **Manual** above if this computer does not have them (Scriptorium Setup
+offers to).
+
 ## Building
 
 Everything is built from this repository; the release files are built by GitHub Actions
@@ -168,6 +209,7 @@ Everything is built from this repository; the release files are built by GitHub 
 | `dist/Scriptorium-Setup.exe` | `tools/build_exe.sh` (rebuilds the zip first) | [Mono](https://www.mono-project.com) (`csc` on `PATH`, or `MONO=<prefix>`) |
 | `installer/fonts/*.ttf` (committed) | `python3 tools/build_fonts.py` | Python 3.9 or later, [fontTools](https://github.com/fonttools/fonttools) |
 | Lagrange's unit tests | `node --test plugins-tests/lagrange.test.js` | Node.js 18 or later |
+| Setting up a vault you already have | `python3 tools/test_setup_vault.py [dist/Scriptorium-Setup.exe]` | Python 3.9 or later; Node.js for the plugin's command; Mono for the exe off Windows |
 
 The Scriptorium plugin's layout and parsing helpers (sidenote placement and stacking, footnote definitions, image
 captions) are tested with `node --test plugins-tests/scriptorium.test.js` (Node 18 or later); CI runs it on Linux.
@@ -213,8 +255,8 @@ frames of a whole install) and saves them as PNGs. CI does this on every build a
 vault/        the vault template (the Scriptorium and Lagrange plugins and the snippet live here)
 plugins-tests/ unit tests for Lagrange's plain functions (not packaged)
 installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico, and fonts/ (the window's type)
-installers/   the script installers
-tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py
+installers/   the script installers, and Setup-Scriptorium-Vault.py (sets up a vault you already have)
+tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py, test_auto_open.py, test_setup_vault.py
 plugins-tests/ tests for the Scriptorium plugin's layout and parsing (node --test plugins-tests/scriptorium.test.js)
 licenses/     licenses of embedded fonts
 ```
