@@ -311,6 +311,46 @@ def test_refusals(tool, work):
     check(r.returncode != 0 and snapshot(inside.parent) == before, "a vault's .obsidian folder itself: refused, unchanged")
 
 
+def test_script_download(work):
+    print("\n== Setup-Scriptorium-Vault.py: the download names itself, and a failed download is said plainly ==")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("setup_vault", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    seen = {}
+
+    class Reply:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"not the package"
+
+    def opener(request, timeout=None):
+        seen["agent"] = request.get_header("User-agent")
+        seen["url"] = request.full_url
+        if seen.get("fail"):
+            raise mod.urllib.request.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+        return Reply()
+
+    real = mod.urllib.request.urlopen
+    mod.urllib.request.urlopen = opener
+    try:
+        try:
+            mod.download_package()
+            check(False, "a download that does not match the pinned SHA-256 is refused")
+        except mod.SetupError as e:
+            check("SHA-256" in str(e), "a download that does not match the pinned SHA-256 is refused")
+        check(seen.get("agent", "").startswith("Setup-Scriptorium-Vault/"), "the request names the script (the site refuses Python's default User-Agent)")
+        check(seen.get("url", "").startswith("https://williamliaw.com/"), "it asks williamliaw.com, over https")
+        seen["fail"] = True
+        try:
+            mod.download_package()
+            check(False, "an HTTP error is a plain message, not a traceback")
+        except mod.SetupError as e:
+            check("--package" in str(e) and "403" in str(e), "an HTTP error is a plain message that says what to do")
+    finally:
+        mod.urllib.request.urlopen = real
+
+
 def test_same_result(found, work):
     print("\n== Every program leaves the same vault ==")
     vaults = []
@@ -347,6 +387,7 @@ def main():
             test_unreadable_json(tool, sub)
             test_rollback(tool, sub)
             test_refusals(tool, sub)
+        test_script_download(work)
         if len(found) > 1:
             test_same_result(found, work)
     finally:
