@@ -96,8 +96,14 @@ def load_package(source):
 
 
 def download_package():
-    with urllib.request.urlopen(PACKAGE_URL, timeout=120) as r:   # https only: the URL is fixed above
-        data = r.read()
+    # The site turns away Python's default User-Agent (403), so the request names this script instead.
+    request = urllib.request.Request(PACKAGE_URL, headers={"User-Agent": "Setup-Scriptorium-Vault/1.2"})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as r:   # https only: the URL is fixed above
+            data = r.read()
+    except OSError as e:   # URLError and HTTPError are OSErrors
+        raise SetupError(f"Scriptorium could not be downloaded from {PACKAGE_URL} ({e}); nothing was changed. "
+                         "Download Scriptorium.zip yourself and pass it with --package.") from e
     digest = hashlib.sha256(data).hexdigest()
     if digest != PACKAGE_SHA256:
         raise SetupError(f"The download does not match its pinned SHA-256 (got {digest}); nothing was changed.")
