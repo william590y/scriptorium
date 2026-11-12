@@ -14,7 +14,7 @@ const realLoad = Module._load;
 Module._load = function (request, ...rest) {
   if (request === 'obsidian') {
     class Stub {}
-    return { Plugin: Stub, PluginSettingTab: Stub, Setting: Stub, MarkdownView: Stub, MarkdownRenderer: Stub, Component: Stub, Scope: Stub };
+    return { Plugin: Stub, PluginSettingTab: Stub, Setting: Stub, MarkdownView: Stub, MarkdownRenderer: Stub, Component: Stub, Scope: Stub, Modal: Stub, Notice: Stub, Platform: {} };
   }
   return realLoad.call(this, request, ...rest);
 };
@@ -210,4 +210,106 @@ test('web images are found outside code', () => {
 test('image addresses match without the timestamp Obsidian adds', () => {
   assert.equal(S.sourceKey('app://abc/vault/fig%20a.png?1794437986486'), 'app://abc/vault/fig a.png');
   assert.equal(S.sourceKey('https://example.org/a.png?x=1'), 'https://example.org/a.png?x=1');
+});
+
+
+// ---------------------------------------------------------------- setting up a vault
+const fs = require('node:fs');
+const os = require('node:os');
+const VAULT = path.join(__dirname, '..', 'vault');
+
+function tempVault(files) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scriptorium-setup-'));
+  for (const [rel, text] of Object.entries(files || {})) {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), typeof text === 'string' ? text : JSON.stringify(text, null, 2));
+  }
+  return dir;
+}
+
+test('set up a vault: which files are Scriptorium’s, which are merged, and which are never brought along', () => {
+  for (const rel of ['.obsidian/snippets/manuscript.css', '.obsidian/themes/Typewriter/theme.css', '.obsidian/plugins/scriptorium/main.js',
+    '.obsidian/plugins/lagrange/styles.css', '.obsidian/plugins/lagrange/LagrangeHand-OFL.txt', '.obsidian/plugins/manuscriptum/LICENSE',
+    '.obsidian/plugins/typewriter-mode/manifest.json', '.obsidian/plugins/longform/main.js']) assert.equal(S.setupRule(rel), 'replace', rel);
+  for (const rel of ['.obsidian/core-plugins.json', '.obsidian/plugins/scriptorium/data.json', '.obsidian/plugins/lagrange/data.json']) assert.equal(S.setupRule(rel), 'missing', rel);
+  assert.equal(S.setupRule('.obsidian/community-plugins.json'), 'plugins');
+  assert.equal(S.setupRule('.obsidian/appearance.json'), 'appearance');
+  assert.equal(S.setupRule('.obsidian/app.json'), 'app');
+  for (const rel of ['Lorem Ipsum.md', 'README.md', 'Notes/My note.md', '.obsidian/workspace.json', '.obsidian/graph.json', '.obsidian/hotkeys.json',
+    '.obsidian/plugins/calendar/main.js', '.obsidian/plugins/longform/data.json', '.obsidian/snippets/mine.css', '.obsidian/themes/Minimal/theme.css',
+    '.obsidian/plugins/scriptorium/sub/main.js']) assert.equal(S.setupRule(rel), null, rel);
+});
+
+test('set up a vault: every file of the package that the rules name is in the plan for an empty folder, and no other', () => {
+  const pkg = S.setupPackage(fs, path, VAULT);
+  const dir = tempVault({ 'Essay.md': 'An essay.\n' });
+  try {
+    const plan = S.planVaultSetup(fs, path, pkg, dir);
+    const all = [];
+    const walk = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else all.push(path.relative(VAULT, f).split(path.sep).join('/')); } };
+    walk(VAULT);
+    assert.deepEqual(plan.changes.map(c => c.rel).sort(), all.filter(rel => S.setupRule(rel)).sort());
+    assert.ok(plan.changes.every(c => !c.replaces && c.rel.startsWith('.obsidian/')));
+    for (const c of plan.changes) {
+      if (c.rel === '.obsidian/community-plugins.json') assert.deepEqual(JSON.parse(c.content), ['manuscriptum', 'typewriter-mode', 'scriptorium', 'lagrange']);
+      else assert.ok(c.content.equals(fs.readFileSync(path.join(VAULT, c.rel))), `${c.rel} is the package's, byte for byte`);
+    }
+    assert.equal(S.describeVaultSetup(plan).length, plan.changes.length);
+    assert.equal(S.applyVaultSetup(fs, path, dir, plan), null, 'no .obsidian to back up');
+    assert.equal(fs.readFileSync(path.join(dir, 'Essay.md'), 'utf8'), 'An essay.\n');
+    assert.deepEqual(S.planVaultSetup(fs, path, pkg, dir).changes, [], 'a second run has nothing to do');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('set up a vault: what is personal in the vault it copies from stays behind (API keys, other settings, other plugins)', () => {
+  const source = tempVault({
+    '.obsidian/plugins/lagrange/data.json': { provider: 'anthropic', anthropicApiKey: 'sk-ant-SECRET', openaiApiKey: 'sk-SECRET', openaiPlatformKey: 'sk-ALSO', penSpeed: 2 },
+    '.obsidian/plugins/lagrange/main.js': '/* lagrange */',
+    '.obsidian/plugins/scriptorium/main.js': '/* scriptorium */',
+    '.obsidian/plugins/scriptorium/manifest.json': { id: 'scriptorium', version: '9.9.9' },
+    '.obsidian/plugins/calendar/main.js': '/* calendar */',
+    '.obsidian/plugins/longform/main.js': '/* longform */',
+    '.obsidian/snippets/manuscript.css': '/* manuscript */',
+    '.obsidian/snippets/private.css': '/* private */',
+    '.obsidian/app.json': { baseFontSize: 20, attachmentFolderPath: 'Private/Attachments', userIgnoreFilters: ['Diary/'] },
+    '.obsidian/appearance.json': { theme: 'moonstone', cssTheme: 'Minimal', enabledCssSnippets: ['private'], accentColor: '#ff0000', baseFontSize: 24 },
+    '.obsidian/community-plugins.json': ['calendar', 'longform', 'scriptorium', 'secret-plugin'],
+    '.obsidian/hotkeys.json': { x: 1 },
+    '.obsidian/workspace.json': { lastOpenFiles: ['Diary/today.md'] },
+    '.obsidian/scriptorium-backup-20260101-000000/.obsidian/plugins/scriptorium/main.js': '/* old */',
+    'Diary/today.md': 'Dear diary.',
+  });
+  try {
+    const pkg = S.setupPackage(fs, path, source);
+    const text = Object.values(pkg).map(b => b.toString('utf8')).join('\n');
+    assert.doesNotMatch(text, /SECRET|sk-ALSO|Diary|Private|private|secret-plugin|calendar|#ff0000|Minimal|old/);
+    assert.deepEqual(JSON.parse(pkg['.obsidian/plugins/lagrange/data.json']), { provider: 'anthropic', anthropicApiKey: '', openaiApiKey: '', openaiPlatformKey: '', penSpeed: 2 });
+    assert.deepEqual(JSON.parse(pkg['.obsidian/app.json']), { baseFontSize: 24 }, 'the text size Obsidian keeps in appearance.json');
+    assert.deepEqual(JSON.parse(pkg['.obsidian/appearance.json']), { theme: 'moonstone', cssTheme: 'Typewriter', enabledCssSnippets: ['manuscript'] });
+    assert.deepEqual(JSON.parse(pkg['.obsidian/community-plugins.json']), ['longform', 'scriptorium', 'manuscriptum', 'typewriter-mode', 'lagrange']);
+    assert.deepEqual(Object.keys(pkg).sort(), ['.obsidian/app.json', '.obsidian/appearance.json', '.obsidian/community-plugins.json',
+      '.obsidian/plugins/lagrange/data.json', '.obsidian/plugins/lagrange/main.js', '.obsidian/plugins/longform/main.js',
+      '.obsidian/plugins/scriptorium/main.js', '.obsidian/plugins/scriptorium/manifest.json', '.obsidian/snippets/manuscript.css']);
+    // Longform goes along when this vault has it, and is then turned on.
+    const target = tempVault({ 'a.md': 'x' });
+    const plan = S.planVaultSetup(fs, path, pkg, target);
+    assert.deepEqual(JSON.parse(plan.changes.find(c => c.rel.endsWith('community-plugins.json')).content), ['longform', 'scriptorium', 'manuscriptum', 'typewriter-mode', 'lagrange']);
+    fs.rmSync(target, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(source, { recursive: true, force: true });
+  }
+});
+
+test('set up a vault: the folder typed or chosen', () => {
+  const posix = path.posix, win = path.win32;
+  assert.equal(S.setupFolder(posix, '  /home/me/Notes/  '), '/home/me/Notes');
+  assert.equal(S.setupFolder(posix, '"/home/me/My Notes"'), '/home/me/My Notes');
+  assert.equal(S.setupFolder(posix, '/'), '/');
+  assert.equal(S.setupFolder(posix, 'Notes'), '', 'a relative path is refused');
+  assert.equal(S.setupFolder(posix, ''), '');
+  assert.equal(S.setupFolder(win, 'C:\\Users\\me\\Notes\\'), 'C:\\Users\\me\\Notes');
+  assert.equal(S.setupFolder(win, 'C:\\'), 'C:\\');
+  assert.equal(S.setupFolder(win, 'Notes\\Mine'), '');
 });

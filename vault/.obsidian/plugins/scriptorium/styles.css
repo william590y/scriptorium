@@ -300,3 +300,24 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
   }
 }
 @keyframes scriptorium-focus-in { from { opacity: 0; } }
+
+/* ==========================================================
+   Setting up a vault (the commands "Set up another vault" and "Set up this vault")
+   ========================================================== */
+.scriptorium-setup-row { display: flex; gap: 8px; align-items: center; }
+.scriptorium-setup-row .scriptorium-setup-path { flex: 1 1 auto; min-width: 0; }
+.scriptorium-setup-where { font-style: italic; color: var(--text-muted); overflow-wrap: anywhere; }
+.scriptorium-setup-problem { min-height: 1.4em; color: var(--text-error); }
+.scriptorium-setup-note { font-size: var(--font-ui-small); color: var(--text-muted); overflow-wrap: anywhere; }
+.scriptorium-setup-plan {
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

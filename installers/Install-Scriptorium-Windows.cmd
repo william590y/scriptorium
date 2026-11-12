@@ -80,7 +80,7 @@ Write-Host 'Scriptorium - Obsidian configuration installer'
 $defaultPath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Scriptorium'
 $answer = Read-Host "New vault folder (Enter for $defaultPath)"
 $destination = if ([string]::IsNullOrWhiteSpace($answer)) { $defaultPath } else { [IO.Path]::GetFullPath($answer) }
-if (Test-Path -LiteralPath $destination) { throw "Folder already exists: $destination. Choose a new folder; nothing was changed." }
+if (Test-Path -LiteralPath $destination) { throw "Folder already exists: $destination. Choose a new folder; nothing was changed. To set up Scriptorium in a vault you already have, use Scriptorium-Setup.exe (Set up)." }
 $tempPath = Join-Path ([IO.Path]::GetTempPath()) ('obsidian-writing-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $tempPath | Out-Null
 try {

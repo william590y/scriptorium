@@ -8,6 +8,7 @@ destination="${destination:-$default_path}"
 case "$destination" in /*) ;; *) printf 'Please enter an absolute path.\n'; exit 1 ;; esac
 if [ -e "$destination" ] || [ -L "$destination" ]; then
   printf 'Folder already exists: %s. Choose a new folder; nothing was changed.\n' "$destination"
+  printf 'To set up Scriptorium in a vault you already have, use Setup-Scriptorium-Vault.py (see the README).\n'
   exit 1
 fi
 for utility in curl unzip; do

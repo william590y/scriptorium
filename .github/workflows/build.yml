@@ -78,6 +78,10 @@ jobs:
         shell: pwsh
         run: python tools/test_update.py dist/Scriptorium-Setup.exe
 
+      - name: Test setting up a vault that is not a Scriptorium vault yet (Setup, the script and the plugin's command)
+        shell: pwsh
+        run: python tools/test_setup_vault.py dist/Scriptorium-Setup.exe
+
       - name: Test adding a vault to Obsidian's vault list (Setup and the Windows script)
         shell: pwsh
         run: python tools/test_auto_open.py dist/Scriptorium-Setup.exe
@@ -148,6 +152,10 @@ jobs:
           bash -n installers/Install-Scriptorium-Linux.sh
           bash -n installers/Install-Scriptorium-macOS.command
           python3 tools/test_auto_open.py --scripts-only
+      - name: Setting up a vault that is not a Scriptorium vault yet (the script and the plugin's command)
+        run: |
+          python3 -m py_compile installers/Setup-Scriptorium-Vault.py
+          python3 tools/test_setup_vault.py
 
   plugin-tests:
     name: Test the Scriptorium and Lagrange plugins (Node)
