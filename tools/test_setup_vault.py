@@ -205,7 +205,7 @@ def test_my_vault(tool, work):
 
     print(f"\n== {tool.name}: an old copy of one of Scriptorium's files is replaced, and backed up ==")
     target = vault / OBS / "snippets" / "manuscript.css"
-    target.write_text("/* an old manuscript.css */\n", encoding="utf-8")
+    target.write_bytes(b"/* an old manuscript.css */\n")
     r = tool.setup(vault)
     check(r.returncode == 0, "setting up exits 0")
     check(target.read_bytes() == package(f"{OBS}/snippets/manuscript.css"), "the snippet is the package's again")
