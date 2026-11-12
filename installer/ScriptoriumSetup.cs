@@ -57,8 +57,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Scriptorium")]
 [assembly: AssemblyCompany("williamliaw.com")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 William Liaw. GPL-3.0-or-later.")]
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace ScriptoriumSetup
 {
@@ -527,7 +527,8 @@ namespace ScriptoriumSetup
             if (k == ".obsidian/appearance.json") return Rule.Appearance;
             if (setup && k == ".obsidian/app.json") return Rule.App;
             if (k == ".obsidian/snippets/manuscript.css" || k == ".obsidian/plugins/lagrange/LagrangeHand-OFL.txt" ||
-                k.StartsWith(".obsidian/themes/Typewriter/", StringComparison.Ordinal)) return Rule.Replace;
+                k.StartsWith(".obsidian/themes/Typewriter/", StringComparison.Ordinal) ||
+                k.StartsWith(".obsidian/plugins/scriptorium/dropcaps/", StringComparison.Ordinal)) return Rule.Replace;   // the plugin's own sets of drop caps
             if (!setup && k == "README.md") return Rule.Replace;
             foreach (string plugin in BundledPlugins)
                 foreach (string file in PluginCode)
