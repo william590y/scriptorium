@@ -349,3 +349,4 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
   color: var(--text-accent);
 }
 .scriptorium-dropcap-hint { margin: 0.8em 0 0; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.scriptorium-setup-mono { display: block; margin: 0 0 10px; font-size: var(--font-ui-small); }

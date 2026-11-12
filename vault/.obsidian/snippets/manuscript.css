@@ -54,7 +54,8 @@
    like any other paragraph. A footnote shown in Obsidian's hover popover is not a chapter opening, so it never has one.
    One note can have a drop cap of its own (the command "Scriptorium: Choose the drop cap for this note" writes
    "dropcap: goudy" and the like in its properties): the plugin then marks each block of that note with
-   .scriptorium-dropcap and .scriptorium-dropcap-<which>, which outrank the classes on body. */
+   .scriptorium-dropcap and .scriptorium-dropcap-<which>, which outrank the classes on body. A set of drop caps (the
+   plugin's own, and the writer's) is marked the same way: see "Drop caps: sets of images" below. */
 body.scriptorium-initials-goudy,
 .el-p.scriptorium-dropcap-goudy {
   --scriptorium-initial-font: "Scriptorium Goudy", var(--manuscript-display);
@@ -97,6 +98,75 @@ body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h
 .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-none > p,
 .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-none > p {
   text-align: justify;
+}
+
+/* ---------- Drop caps: sets of images, and the writer's own ----------
+   A set of drop caps (the Scriptorium plugin's "Sets of drop caps") is images, one per letter, or a font of initials.
+   A font is only another --scriptorium-initial-font, set on the block by the plugin. An image takes the first
+   letter's place: it is floated where the initial would stand, three lines deep, and the letter itself is hidden
+   (it stays in the text, for copying and for screen readers). The plugin gives the block the image for its letter
+   (--scriptorium-dropcap-light, -dark) and its shape (--scriptorium-dropcap-ratio, width over height). A set of
+   one colour (.scriptorium-dropcap-mono) is drawn through a mask in the accent colour, so it follows the theme. */
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image > p::before,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::before {
+  content: "";
+  float: left;
+  height: 4.15em;                                        /* three lines of 1.45, less the first line's ascent */
+  width: calc(4.15em * var(--scriptorium-dropcap-ratio, 0.8));
+  margin: 0.28em 0.55em 0 0;
+  background: var(--scriptorium-dropcap-light) left top / contain no-repeat;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image > p::before,
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::before {
+  background-image: var(--scriptorium-dropcap-dark);
+}
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before {
+  background: var(--manuscript-accent);
+  -webkit-mask: var(--scriptorium-dropcap-light) left top / contain no-repeat;
+  mask: var(--scriptorium-dropcap-light) left top / contain no-repeat;
+}
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image > p::first-letter,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::first-letter {
+  float: none;
+  font-size: 0;                                          /* the image is the letter */
+  line-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+/* ---------- Drop caps: inked in ----------
+   When a note's drop cap is chosen or changed (and when Lagrange has drawn one), the plugin marks the note's blocks
+   .scriptorium-dropcap-inked for a moment: a letter fills with ink, an image is uncovered from its head to its foot.
+   Never with reduced motion. */
+@property --scriptorium-ink {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 100%;
+}
+@keyframes scriptorium-ink {
+  from { --scriptorium-ink: 0%; }
+  to { --scriptorium-ink: 100%; }
+}
+@keyframes scriptorium-uncover {
+  from { clip-path: inset(0 0 100% 0); opacity: 0.35; }
+  60% { opacity: 1; }
+  to { clip-path: inset(0 0 0 0); opacity: 1; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .markdown-rendered .el-p.scriptorium-dropcap-inked > p { animation: scriptorium-ink 1.5s ease-out both; }
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-inked:not(.scriptorium-dropcap-image):not(.scriptorium-dropcap-none) > p::first-letter,
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-inked:not(.scriptorium-dropcap-image):not(.scriptorium-dropcap-none) > p::first-letter {
+    color: color-mix(in srgb, var(--manuscript-accent) var(--scriptorium-ink), transparent);
+  }
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image > p::before,
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image > p::before {
+    animation: scriptorium-uncover 1.5s ease-out both;
+  }
 }
 
 /* ---------- Superscripts (footnote references) and subscripts keep the leading even ----------
