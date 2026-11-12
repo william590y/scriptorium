@@ -105,6 +105,12 @@ body:not(.theme-dark) .lagrange-view {
   color: var(--lagrange-muted);
 }
 .lagrange-actions .lagrange-icon:hover { color: var(--lagrange-rubric); }
+.lagrange-actions .lagrange-icon:disabled { opacity: 0.32; cursor: default; color: var(--lagrange-muted); }
+/* With five buttons at its head, a narrow panel sets its title to the left of them. */
+.lagrange-head { container-type: inline-size; }
+@container (max-width: 400px) {
+  .lagrange-title, .lagrange-subject { text-align: left; padding-right: 128px; }
+}
 
 .lagrange-log {
   flex: 1 1 auto;
@@ -154,6 +160,27 @@ body:not(.theme-dark) .lagrange-view {
   border-top: 1px solid var(--lagrange-rule);
 }
 .lagrange-turn--user:not(:first-child)::before { top: 1.1em; }
+/* "Rewind to here", at the right of each message: quiet until the message is pointed at or has the focus. */
+.lagrange-turn--user { padding-right: 1.7em; }
+.lagrange-view button.lagrange-rewind {
+  position: absolute;
+  right: -4px;
+  top: -2px;
+  height: auto;
+  padding: 3px;
+  background: none;
+  box-shadow: none;
+  color: var(--lagrange-muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.lagrange-turn--user:not(:first-child) > button.lagrange-rewind { top: calc(1.1em - 2px); }
+.lagrange-turn--user:hover > button.lagrange-rewind,
+.lagrange-view button.lagrange-rewind:focus-visible,
+body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
+.lagrange-view button.lagrange-rewind:hover { opacity: 1; color: var(--lagrange-rubric); }
+.lagrange-view button.lagrange-rewind.is-expired { color: var(--lagrange-faint); }
+.lagrange-view button.lagrange-rewind svg { width: 14px; height: 14px; }
 
 /* Lagrange's replies: Markdown, set as text. */
 .lagrange-turn-body { overflow-wrap: anywhere; }
@@ -581,6 +608,25 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
 /* An equation in the pen's script, typeset by MathJax and drawn symbol by symbol. */
 .lagrange-pen-math { display: inline-block; vertical-align: middle; margin: 0 0.25em; font-size: 0.82em; }
 .lagrange-pen-math mjx-container { display: inline-block !important; margin: 0 !important; color: inherit; }
+/* Code in the pen's script: a slip of paper, typed on (the typewriter is drawn in the pen's layer). */
+.lagrange-pen-code {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 0.3em;
+  padding: 0.25em 0.6em 0.3em;
+  border: 1px solid var(--lagrange-line);
+  background: var(--lagrange-wash);
+  font-family: var(--font-monospace, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace);
+  font-size: 0.5em;
+  line-height: 1.45;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: pre;
+  color: var(--lagrange-ink);
+}
+.lagrange-pen-code.is-block { display: table; margin: 0.35em 0 0; }   /* on a line of its own, as wide as its code */
+.lagrange-pen-code-rest { visibility: hidden; }
+.lagrange-typewriter { filter: drop-shadow(1px 2px 1.5px color-mix(in srgb, var(--lagrange-ink) 25%, transparent)); }
 .lagrange-pen-trail { mix-blend-mode: multiply; }
 body.theme-dark .lagrange-pen-trail { mix-blend-mode: screen; }
 .lagrange-pen-gone { color: var(--lagrange-muted); }
