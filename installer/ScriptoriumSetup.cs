@@ -5,7 +5,8 @@
 // Garamond for the current user if they are missing. The Longform plugin is not bundled: if the user ticks it, it is
 // downloaded from its author's official release into the new vault. Every download is pinned by SHA-256. An existing
 // folder is never changed, except a Scriptorium vault, which it can update in place: Scriptorium's own files are replaced
-// (the old ones backed up in .obsidian/scriptorium-backup-<time>), the user's notes and settings are kept.
+// (the old ones backed up in .obsidian/scriptorium-backup-<time>), the user's notes and settings are kept. If the user
+// ticks it, a new vault is then opened in Obsidian with its community plugins turned on (see AutoOpen).
 // Targets .NET Framework 4.8, which ships with Windows 10 and 11, so nothing else needs installing.
 //
 // The window is drawn like a Scriptorium page: ink on warm paper, set in EB Garamond and Cormorant Garamond (static
@@ -35,12 +36,15 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.IO;
 using System.IO.Compression;
+using System.IO.Pipes;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -81,6 +85,33 @@ namespace ScriptoriumSetup
                 }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
             }
+            // Headless (used by the tests): add <vault> to the vault list in the obsidian.json given, as the auto-open does;
+            // with --cli, turn Obsidian's command line interface on too. Prints the vault's id and whether "cli" was on.
+            if ((args.Length == 3 || (args.Length == 4 && args[3] == "--cli")) && args[0] == "--register-only")
+            {
+                try
+                {
+                    string file = Path.GetFullPath(args[1]);
+                    string text = File.Exists(file) ? File.ReadAllText(file, Encoding.UTF8) : null;
+                    AutoOpen.Registration r = AutoOpen.Register(text, args[2], AutoOpen.Now(), args.Length == 4, AutoOpen.NewId);
+                    if (r.Changed) AutoOpen.WriteFile(file, r.Text);
+                    Console.WriteLine(r.Id + " " + (r.Listed ? "listed" : "added") + " cli-" + (r.CliWasOn ? "on" : "off"));
+                    return 0;
+                }
+                catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
+            }
+            // Headless (used by the tests): open the vault <vault> with the Obsidian <exe>, as Install does when "Open the
+            // vault in Obsidian" is ticked. Exit code 0 if its plugins were turned on.
+            if (args.Length == 3 && args[0] == "--auto-open-only")
+            {
+                if (AutoOpen.ObsidianRunning()) { Console.Error.WriteLine("FAILED: Obsidian is running"); return 1; }
+                AutoOpen.Trace = Console.WriteLine;
+                AutoOpen.Outcome o = AutoOpen.Open(args[2], Path.GetFullPath(args[1]), 120000, CancellationToken.None);
+                Console.WriteLine(o.Result + (o.Problem != null ? ": " + o.Problem : ""));
+                if (!AutoOpen.Settle(false)) { Console.WriteLine("Waiting for Obsidian to close, to turn its command line interface off"); AutoOpen.Settle(true); }
+                Console.WriteLine("cli " + (o.CliLeftOn ? "was on before; left on" : "off"));
+                return o.Result == AutoOpen.Result.Trusted ? 0 : 1;
+            }
             if (Installer.IsWindows) { try { SetProcessDPIAware(); } catch { } }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -89,6 +120,10 @@ namespace ScriptoriumSetup
             if (args.Length == 2 && args[0] == "--render") return Preview.Run(Path.GetFullPath(args[1]));
             try { using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) Ink.S = Math.Max(1f, g.DpiX / 96f); } catch { }
             Application.Run(new SetupForm());
+            // If setup turned Obsidian's command line interface on and could not yet turn it off (the window was closed
+            // while the vault was being opened, or Obsidian stopped answering), it is turned off now, without a window:
+            // through Obsidian, or in obsidian.json once Obsidian has closed.
+            AutoOpen.Settle(true);
             return 0;
         }
     }
@@ -274,7 +309,24 @@ namespace ScriptoriumSetup
                     if (File.Exists(exe)) return exe;
                 }
             }
-            return null;
+            return ObsidianFromProtocol();
+        }
+
+        // The program the obsidian:// links open ("C:\...\Obsidian.exe" "%1"), for an Obsidian installed elsewhere.
+        static string ObsidianFromProtocol()
+        {
+            if (!IsWindows) return null;
+            try
+            {
+                using (RegistryKey k = Registry.ClassesRoot.OpenSubKey(@"obsidian\shell\open\command"))
+                {
+                    string command = k != null ? (k.GetValue("") as string ?? "").Trim() : "";
+                    int end = command.StartsWith("\"") ? command.IndexOf('"', 1) : -1;
+                    string exe = end > 1 ? command.Substring(1, end - 1) : "";
+                    return exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(exe) ? exe : null;
+                }
+            }
+            catch { return null; }
         }
 
         public static bool ObsidianProtocolRegistered()
@@ -611,8 +663,381 @@ namespace ScriptoriumSetup
         }
     }
 
+    // ---------- opening a new vault in Obsidian, with its plugins on ----------
+    // The first time Obsidian opens a vault that comes with community plugins, it asks whether to trust the vault's author,
+    // and keeps the answer in its own browser storage (localStorage "enable-plugin-<vault id>"), which nothing outside
+    // Obsidian should write. Obsidian 1.12 and later has a command line interface that gives the same answer:
+    // "plugins:restrict off" does what the question's "Trust author and enable plugins" button does, then reloads the vault
+    // with its plugins on. The interface answers only while "cli": true is in Obsidian's obsidian.json, which Obsidian
+    // reads when it starts and rewrites while it runs. So, with Obsidian closed, setup adds the vault to the vault list in
+    // obsidian.json (keeping every other key and vault) and turns the interface on; starts Obsidian on the vault; sends
+    // "plugins:restrict off" through Obsidian's pipe until Obsidian answers; and turns the interface off again through
+    // Obsidian itself, unless it was already on. If anything fails, Obsidian asks its usual question, and the interface is
+    // still turned off: through Obsidian if it answers, otherwise in obsidian.json once Obsidian has closed.
+    static class AutoOpen
+    {
+        public enum Result { Trusted, Opened, NotOpened }
+
+        public sealed class Outcome
+        {
+            public Result Result;
+            public string Problem;     // why the plugins were not turned on (or the vault not opened), for the log
+            public bool CliLeftOn;     // the interface was on before setup, so it was left on
+            public bool CliPending;    // setup turned the interface on and could not turn it off yet (Settle will)
+        }
+
+        // What Register did to obsidian.json.
+        public sealed class Registration
+        {
+            public string Id;          // the vault's id in the list (the CLI's vault=<id>, and Obsidian's storage keys)
+            public bool Listed;        // the folder was in the list already
+            public bool HadCli;        // obsidian.json had a "cli" key,
+            public object PriorCli;    // with this value
+            public bool CliWasOn;      // the interface was on already: it is left alone
+            public bool CliTurnedOn;   // Register turned it on, so it must be turned off again
+            public string Text;        // obsidian.json's new content
+            public bool Changed { get { return !Listed || CliTurnedOn; } }
+        }
+
+        // The answer that turns the interface off: Obsidian's own setting switch ("cli" over its ipc), which also updates
+        // obsidian.json. Obsidian answers "=> false" (the interface's new state).
+        const string CliOff = "code=require('electron').ipcRenderer.sendSync('cli',false)";
+        static readonly object gate = new object();
+        static Registration pending;   // setup turned the interface on, and it is not off again yet
+        static string pendingFile;
+        public static Action<string> Trace;   // each command and Obsidian's answer (the headless mode prints them)
+
+        // Obsidian's settings folder: %APPDATA%\obsidian. (Elsewhere, where only the tests run this, $XDG_CONFIG_HOME/obsidian.)
+        public static string ConfigDir()
+        {
+            if (Installer.IsWindows) return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "obsidian");
+            string xdg = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+            return Path.Combine(string.IsNullOrEmpty(xdg) ? Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? "/", ".config") : xdg, "obsidian");
+        }
+
+        public static long Now() { return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds; }
+
+        // A new vault id the way Obsidian makes them: 16 hexadecimal digits.
+        public static string NewId()
+        {
+            var bytes = new byte[8];
+            using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+            return string.Concat(bytes.Select(b => b.ToString("x2")));
+        }
+
+        // A folder's path as Obsidian keeps it (Node's path.resolve: absolute, no trailing separator).
+        public static string VaultPath(string folder)
+        {
+            string p = Path.GetFullPath(folder), root = Path.GetPathRoot(p) ?? "";
+            while (p.Length > root.Length && (p[p.Length - 1] == Path.DirectorySeparatorChar || p[p.Length - 1] == Path.AltDirectorySeparatorChar))
+                p = p.Substring(0, p.Length - 1);
+            return p;
+        }
+
+        static bool SamePath(string listed, string path)
+        {
+            try { return string.Equals(VaultPath(listed), path, Installer.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal); }
+            catch { return false; }
+        }
+
+        // How Obsidian reads "cli": JavaScript truthiness.
+        static bool Truthy(object v)
+        {
+            if (v == null) return false;
+            if (v is bool) return (bool)v;
+            if (v is string) return ((string)v).Length > 0;
+            var n = v as MiniJson.Num;
+            double d;
+            if (n != null) return !double.TryParse(n.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out d) || d != 0;
+            return true;
+        }
+
+        static KeyValuePair<string, object> Pair(string key, object value) { return new KeyValuePair<string, object>(key, value); }
+        static int IndexOf(MiniJson.Obj o, string key) { for (int k = 0; k < o.Count; k++) if (o[k].Key == key) return k; return -1; }
+
+        // Adds the vault to obsidian.json's vault list (or finds it there) and, with turnOnCli, turns the command line
+        // interface on. text is the file's content (null if there is none); every other key and vault is kept as it was.
+        // Throws FormatException if the file is not a JSON object with an object for its vault list; it is then left alone.
+        public static Registration Register(string text, string vault, long now, bool turnOnCli, Func<string> newId)
+        {
+            var conf = (string.IsNullOrWhiteSpace(text) ? new MiniJson.Obj() : MiniJson.Parse(text)) as MiniJson.Obj;
+            if (conf == null) throw new FormatException("obsidian.json is not a JSON object");
+            var r = new Registration();
+            string path = VaultPath(vault);
+            int at = IndexOf(conf, "vaults");
+            MiniJson.Obj vaults;
+            if (at < 0) conf.Insert(0, Pair("vaults", vaults = new MiniJson.Obj()));
+            else if ((vaults = conf[at].Value as MiniJson.Obj) == null) throw new FormatException("the vault list in obsidian.json is not a JSON object");
+            foreach (var kv in vaults)
+            {
+                var entry = kv.Value as MiniJson.Obj;
+                string listed = entry != null ? entry.Get("path") as string : null;
+                if (listed != null && SamePath(listed, path)) { r.Id = kv.Key; r.Listed = true; break; }
+            }
+            if (!r.Listed)
+            {
+                do r.Id = newId(); while (vaults.Has(r.Id));
+                vaults.Add(Pair(r.Id, new MiniJson.Obj { Pair("path", path), Pair("ts", new MiniJson.Num(now.ToString(CultureInfo.InvariantCulture))) }));
+            }
+            at = IndexOf(conf, "cli");
+            r.HadCli = at >= 0;
+            r.PriorCli = r.HadCli ? conf[at].Value : null;
+            r.CliWasOn = Truthy(r.PriorCli);
+            if (turnOnCli && !r.CliWasOn)
+            {
+                if (r.HadCli) conf[at] = Pair("cli", true); else conf.Add(Pair("cli", true));
+                r.CliTurnedOn = true;
+            }
+            r.Text = MiniJson.WriteCompact(conf);
+            return r;
+        }
+
+        // obsidian.json with "cli" put back as it was before Register turned it on, for when Obsidian is closed; null if
+        // there is nothing to put back ("cli" is no longer true).
+        public static string RestoreCli(string text, Registration r)
+        {
+            var conf = MiniJson.Parse(text) as MiniJson.Obj;
+            int at = conf != null ? IndexOf(conf, "cli") : -1;
+            if (at < 0 || !(conf[at].Value is bool) || !(bool)conf[at].Value) return null;
+            if (r.HadCli) conf[at] = Pair("cli", r.PriorCli); else conf.RemoveAt(at);
+            return MiniJson.WriteCompact(conf);
+        }
+
+        // Written next to the file first, then moved over it, so the file is never half-written.
+        public static void WriteFile(string file, string text)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            string temp = file + ".scriptorium-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            File.WriteAllText(temp, text, new UTF8Encoding(false));
+            try { if (File.Exists(file)) File.Replace(temp, file, null); else File.Move(temp, file); }
+            finally { if (File.Exists(temp)) File.Delete(temp); }
+        }
+
+        // Is Obsidian running for this user? (Its processes are all Obsidian.exe; elsewhere, for the tests, obsidian.)
+        public static bool ObsidianRunning()
+        {
+            int session = -1;
+            try { session = Process.GetCurrentProcess().SessionId; } catch { }
+            foreach (Process p in Process.GetProcessesByName(Installer.IsWindows ? "Obsidian" : "obsidian"))
+                using (p)
+                {
+                    try { if (!Installer.IsWindows || session < 0 || p.SessionId == session) return true; }
+                    catch { return true; }
+                }
+            return false;
+        }
+
+        // Obsidian 1.12 and later have the command line interface. Obsidian updates itself by downloading newer app
+        // packages (obsidian-<version>.asar) into its settings folder and runs the newest, so the version that runs is the
+        // newer of Obsidian.exe's and those. (Elsewhere, for the tests: its CLI client ships next to it from 1.12 on.)
+        public static bool HasCli(string exe, string configDir)
+        {
+            var since = new Version(1, 12, 0);
+            Version best = null;
+            try
+            {
+                if (!Installer.IsWindows) return File.Exists(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(exe)), "obsidian-cli"));
+                FileVersionInfo info = FileVersionInfo.GetVersionInfo(exe);
+                best = new Version(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart);
+            }
+            catch { }
+            try
+            {
+                foreach (string f in Directory.GetFiles(configDir, "obsidian-*.asar"))
+                {
+                    Match m = Regex.Match(Path.GetFileName(f), @"^obsidian-(\d+)\.(\d+)\.(\d+)\.asar$");
+                    if (!m.Success) continue;
+                    var v = new Version(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value));
+                    if (best == null || v > best) best = v;
+                }
+            }
+            catch { }
+            return best != null && best >= since;
+        }
+
+        // ---------- talking to Obsidian's command line interface ----------
+        // What Obsidian's own client (Obsidian.com) sends: one line of JSON with the arguments, then it reads Obsidian's
+        // answer until Obsidian closes the connection.
+        public static string Request(string[] argv, string cwd)
+        {
+            var b = new StringBuilder("{\"argv\":[");
+            for (int k = 0; k < argv.Length; k++) { if (k > 0) b.Append(','); MiniJson.Quote(b, argv[k]); }
+            b.Append("],\"tty\":false,\"cwd\":");
+            MiniJson.Quote(b, cwd);
+            return b.Append("}\n").ToString();
+        }
+
+        // Sends one command; returns Obsidian's answer, or null if Obsidian's CLI could not be reached or did not answer
+        // within timeoutMs. The working directory sent is a drive's root, so that no vault is chosen by it.
+        public static string Send(string[] argv, int timeoutMs)
+        {
+            if (timeoutMs <= 0) return null;
+            var clock = Stopwatch.StartNew();
+            Stream s = null;
+            try
+            {
+                s = Connect(Math.Min(timeoutMs, 2000));
+                if (s == null) return null;
+                byte[] head = Encoding.UTF8.GetBytes(Request(argv, Path.GetPathRoot(Path.GetTempPath())));
+                s.Write(head, 0, head.Length);
+                s.Flush();
+                var answer = new MemoryStream();
+                var buffer = new byte[8192];
+                while (true)
+                {
+                    int left = timeoutMs - (int)clock.ElapsedMilliseconds;
+                    if (left <= 0) return null;
+                    var read = s.ReadAsync(buffer, 0, buffer.Length);
+                    if (!read.Wait(left)) return null;
+                    if (read.Result == 0) break;
+                    answer.Write(buffer, 0, read.Result);
+                }
+                string text = Encoding.UTF8.GetString(answer.ToArray()).Trim();
+                if (Trace != null) Trace("obsidian " + string.Join(" ", argv) + "  ->  " + text);
+                return text;
+            }
+            catch { return null; }
+            finally { if (s != null) s.Dispose(); }
+        }
+
+        // Obsidian listens on the pipe \\.\pipe\obsidian-cli-<user name>. (Elsewhere, where only the tests run this, on the
+        // Unix socket $XDG_RUNTIME_DIR/.obsidian-cli.sock, or ~/.obsidian-cli.sock.)
+        static Stream Connect(int timeoutMs)
+        {
+            if (Installer.IsWindows)
+            {
+                var pipe = new NamedPipeClientStream(".", "obsidian-cli-" + Environment.UserName, PipeDirection.InOut);
+                try { pipe.Connect(timeoutMs); return pipe; }
+                catch { pipe.Dispose(); return null; }
+            }
+            string dir = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+            if (string.IsNullOrEmpty(dir)) dir = Environment.GetEnvironmentVariable("HOME") ?? "/";
+            var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            try { socket.Connect(new UnixEndPoint(Path.Combine(dir, ".obsidian-cli.sock"))); return new NetworkStream(socket, true); }
+            catch { socket.Dispose(); return null; }
+        }
+
+        sealed class UnixEndPoint : EndPoint
+        {
+            readonly string path;
+            public UnixEndPoint(string path) { this.path = path; }
+            public override AddressFamily AddressFamily { get { return AddressFamily.Unix; } }
+            public override SocketAddress Serialize()
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(path);
+                var sa = new SocketAddress(AddressFamily.Unix, 2 + bytes.Length + 1);
+                for (int k = 0; k < bytes.Length; k++) sa[2 + k] = bytes[k];
+                return sa;
+            }
+            public override EndPoint Create(SocketAddress sa) { return this; }
+        }
+
+        static bool Launch(string exe, string vault)
+        {
+            try
+            {
+                using (Process.Start(new ProcessStartInfo(exe, "\"" + (vault.EndsWith("\\") ? vault + "\\" : vault) + "\"") { UseShellExecute = false })) { }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Opens the new vault in Obsidian (which must be closed: see ObsidianRunning) and turns its community plugins on.
+        // Never throws: the outcome says what happened. Gives Obsidian timeoutMs to start and answer.
+        public static Outcome Open(string exe, string vault, int timeoutMs, CancellationToken cancel)
+        {
+            var o = new Outcome { Result = Result.NotOpened };
+            string dir = ConfigDir(), file = Path.Combine(dir, "obsidian.json");
+            bool cli = HasCli(exe, dir);
+            Registration r;
+            try
+            {
+                r = Register(File.Exists(file) ? File.ReadAllText(file, Encoding.UTF8) : null, vault, Now(), cli, NewId);
+                if (r.CliTurnedOn) lock (gate) { pending = r; pendingFile = file; }
+                if (r.Changed) WriteFile(file, r.Text);
+            }
+            catch (Exception e)
+            {
+                lock (gate) pending = null;
+                o.Problem = "Obsidian's vault list could not be updated (" + e.Message + ")";
+                return o;
+            }
+            o.CliLeftOn = r.CliWasOn;
+            if (!Launch(exe, VaultPath(vault)))
+            {
+                Settle(false);
+                o.Problem = "Obsidian could not be started";
+                return o;
+            }
+            o.Result = Result.Opened;
+            if (!cli) { o.Problem = "this Obsidian is older than 1.12 and has no command line interface"; return o; }
+
+            string target = "vault=" + r.Id;
+            bool asked = false, trusted = false;
+            var clock = Stopwatch.StartNew();
+            while (!asked && o.Problem == null && clock.ElapsedMilliseconds < timeoutMs && !cancel.IsCancellationRequested)
+            {
+                // Until Obsidian is up there is no pipe; then Obsidian answers once the vault has loaded.
+                string answer = Send(new[] { target, "plugins:restrict", "off" }, timeoutMs - (int)clock.ElapsedMilliseconds);
+                if (answer == null) { Thread.Sleep(500); continue; }
+                if (answer.StartsWith("Restricted mode disabled", StringComparison.Ordinal) ||
+                    answer.StartsWith("Restricted mode is already disabled", StringComparison.Ordinal)) asked = true;
+                else if (answer.StartsWith("Command line interface is not enabled", StringComparison.Ordinal) ||
+                         answer.StartsWith("Vault not found", StringComparison.Ordinal)) o.Problem = "Obsidian answered \"" + answer + "\"";
+                else Thread.Sleep(500);
+            }
+            // Obsidian reloads the vault after answering; the next answer comes from the reloaded vault.
+            clock.Restart();
+            while (asked && !trusted && clock.ElapsedMilliseconds < 60000 && !cancel.IsCancellationRequested)
+            {
+                if (Send(new[] { target, "plugins:restrict" }, 60000 - (int)clock.ElapsedMilliseconds) == "off") trusted = true;
+                else Thread.Sleep(500);
+            }
+            if (trusted) o.Result = Result.Trusted;
+            else if (o.Problem == null)
+                o.Problem = cancel.IsCancellationRequested ? "setup was stopped" : asked ? "Obsidian did not confirm that the plugins are on" : "Obsidian did not answer in time";
+            o.CliPending = !Settle(false);
+            return o;
+        }
+
+        // Turns the command line interface off again if setup turned it on: through Obsidian (any open vault; none is
+        // opened for it) or, if Obsidian has closed, in obsidian.json. With wait, waits for Obsidian to close if it does not
+        // answer; without, gives up for now. True when nothing is left to do.
+        public static bool Settle(bool wait)
+        {
+            Registration r;
+            string file;
+            lock (gate) { r = pending; file = pendingFile; }
+            if (r == null) return true;
+            // Right after a reload Obsidian may not know every command yet ("Command "eval" not found"): ask again.
+            for (int k = 0; k < 10 && ObsidianRunning(); k++)
+            {
+                string answer = Send(new[] { "eval", CliOff }, 15000);
+                if (answer == "=> false" || (answer != null && answer.StartsWith("Command line interface is not enabled", StringComparison.Ordinal)))
+                { Done(r); return true; }
+                Thread.Sleep(1000);
+            }
+            while (ObsidianRunning())
+            {
+                if (!wait) return false;
+                Thread.Sleep(3000);
+            }
+            try
+            {
+                string text = RestoreCli(File.ReadAllText(file, Encoding.UTF8), r);
+                if (text != null) WriteFile(file, text);
+            }
+            catch { }
+            Done(r);
+            return true;
+        }
+
+        static void Done(Registration r) { lock (gate) if (pending == r) pending = null; }
+    }
+
     // Just enough JSON for Obsidian's settings files: parses to MiniJson.Obj (keys in order), List<object>, string,
-    // MiniJson.Num (the number's text, unchanged), bool and null; writes the way Obsidian does (JSON.stringify, 2 spaces).
+    // MiniJson.Num (the number's text, unchanged), bool and null; writes the way Obsidian does: a vault's settings with
+    // JSON.stringify(value, null, 2) (Write), its own obsidian.json with plain JSON.stringify (WriteCompact).
     static class MiniJson
     {
         public sealed class Obj : List<KeyValuePair<string, object>>
@@ -755,31 +1180,39 @@ namespace ScriptoriumSetup
             return b.ToString();
         }
 
+        public static string WriteCompact(object value)
+        {
+            var b = new StringBuilder();
+            Write(b, value, null);
+            return b.ToString();
+        }
+
+        // indent null: no whitespace at all.
         static void Write(StringBuilder b, object v, string indent)
         {
-            string inner = indent + "  ";
+            string inner = indent != null ? indent + "  " : null, open = indent != null ? "\n" : "", colon = indent != null ? ": " : ":";
             var o = v as Obj;
             var a = v as List<object>;
             if (o != null)
             {
                 if (o.Count == 0) { b.Append("{}"); return; }
-                b.Append("{\n");
+                b.Append('{').Append(open);
                 for (int k = 0; k < o.Count; k++)
                 {
-                    b.Append(inner); Quote(b, o[k].Key); b.Append(": ");
+                    b.Append(inner); Quote(b, o[k].Key); b.Append(colon);
                     Write(b, o[k].Value, inner);
-                    b.Append(k < o.Count - 1 ? ",\n" : "\n");
+                    b.Append(k < o.Count - 1 ? "," : "").Append(open);
                 }
                 b.Append(indent).Append('}');
             }
             else if (a != null)
             {
                 if (a.Count == 0) { b.Append("[]"); return; }
-                b.Append("[\n");
+                b.Append('[').Append(open);
                 for (int k = 0; k < a.Count; k++)
                 {
                     b.Append(inner); Write(b, a[k], inner);
-                    b.Append(k < a.Count - 1 ? ",\n" : "\n");
+                    b.Append(k < a.Count - 1 ? "," : "").Append(open);
                 }
                 b.Append(indent).Append(']');
             }
@@ -789,7 +1222,7 @@ namespace ScriptoriumSetup
             else b.Append("null");
         }
 
-        static void Quote(StringBuilder b, string s)
+        internal static void Quote(StringBuilder b, string s)
         {
             b.Append('"');
             foreach (char c in s)
@@ -1697,7 +2130,7 @@ namespace ScriptoriumSetup
             ShowInstalled(FontsInstalled(), ObsidianInstalled());
             fontsBox.Name = "fonts"; obsidianBox.Name = "obsidian"; longformBox.Name = "longform"; openBox.Name = "open";
             longformBox.Text = "Download the Longform plugin from its official release"; longformBox.Checked = true;
-            openBox.Text = "Open Obsidian when done"; openBox.Checked = true;
+            openBox.Text = OpenNew; openBox.Checked = true;
 
             installButton.Name = "install"; closeButton.Name = "close";
             installButton.Click += OnInstall; closeButton.Click += (s, e) => Close();
@@ -1762,10 +2195,16 @@ namespace ScriptoriumSetup
             });
         }
 
+        // What the last box offers: a new vault is opened in Obsidian with its plugins on; an update (of a vault Obsidian
+        // already knows and trusts) just opens Obsidian, as before.
+        const string OpenNew = "Open the vault in Obsidian and turn on its plugins", OpenUpdated = "Open Obsidian when done";
+
         void ShowTarget(Vaults.Target t, bool valid, string version)
         {
             target = valid ? t : Vaults.Target.New;
             installButton.Text = valid && t == Vaults.Target.Vault ? "Update" : "Install";
+            string open = target == Vaults.Target.Vault ? OpenUpdated : OpenNew;
+            if (openBox.Text != open) { openBox.Text = open; openBox.Width = openBox.PreferredWidth(); }
             if (!valid) Status("That folder path is not valid.", true);
             else if (t == Vaults.Target.Vault)
                 Status("This is a Scriptorium vault (" + (version ?? "unknown version") + "). Update replaces Scriptorium's files and keeps your notes and settings.");
@@ -2050,19 +2489,29 @@ namespace ScriptoriumSetup
                     }
                 }
                 Progress(100, false);
+                AutoOpen.Outcome opened = open ? OpenNewVault(dest, exe) : null;
+                Progress(100, false);
                 installedPath = dest;
                 UI(() => Done(dest));
-                Log("In Obsidian, choose \"Open folder as vault\" and select the folder above (its path is on the clipboard).");
-                Log("Then open Lorem Ipsum in Reading view. Restart Obsidian if it was already running, so it sees new fonts.");
-                if (open)
+                if (opened != null && opened.Result == AutoOpen.Result.Trusted)
                 {
-                    try
-                    {
-                        if (exe != null) Process.Start(new ProcessStartInfo(exe, "obsidian://choose-vault") { UseShellExecute = false });
-                        else Process.Start("obsidian://choose-vault");
-                    }
-                    catch (Exception ex) { Log("Could not open Obsidian: " + ex.Message, true); }
+                    Log("Opened the vault in Obsidian with its community plugins on.");
+                    Log("Open Lorem Ipsum in Reading view.");
                 }
+                else if (opened != null && opened.Result == AutoOpen.Result.Opened)
+                {
+                    Log("Opened the vault in Obsidian; its plugins are not on yet (" + opened.Problem + ").", opened.Problem != null && !opened.Problem.StartsWith("this Obsidian"));
+                    Log("When Obsidian asks, choose \"Trust author and enable plugins\". Then open Lorem Ipsum in Reading view.");
+                }
+                else
+                {
+                    if (opened != null && opened.Problem != null) Log("Did not open the vault in Obsidian: " + opened.Problem + ".", true);
+                    Log("In Obsidian, choose \"Open folder as vault\" and select the folder above (its path is on the clipboard).");
+                    Log("Then open Lorem Ipsum in Reading view. Restart Obsidian if it was already running, so it sees new fonts.");
+                    if (open) OpenVaultChooser(exe);
+                }
+                if (opened != null && opened.CliPending)
+                    Log("Obsidian's command line interface, turned on for setup, will be turned off when Obsidian closes.");
             }
             catch (OperationCanceledException)
             {
@@ -2082,6 +2531,41 @@ namespace ScriptoriumSetup
             {
                 try { Directory.Delete(temp, true); } catch { }
             }
+        }
+
+        // "Open the vault in Obsidian and turn on its plugins" (see AutoOpen). That needs Obsidian closed, so if it is open
+        // the user is asked to close it and retry, or to skip (the vault is then left for "Open folder as vault").
+        AutoOpen.Outcome OpenNewVault(string dest, string exe)
+        {
+            if (exe == null) return new AutoOpen.Outcome { Problem = "Obsidian.exe was not found" };
+            while (AutoOpen.ObsidianRunning())
+            {
+                Status("Obsidian is open …");
+                DialogResult answer = Ask("Obsidian is open. To open the new vault with its plugins turned on, Setup has to start " +
+                                          "Obsidian itself.\n\nClose Obsidian, then choose Retry. Choose Cancel to skip this; you can " +
+                                          "then open the vault from Obsidian's vault switcher.");
+                if (answer != DialogResult.Retry) return new AutoOpen.Outcome { Problem = "Obsidian was open" };
+            }
+            Status("Opening the vault in Obsidian and turning on its plugins …"); Progress(0, true);
+            return AutoOpen.Open(exe, dest, 120000, cancel.Token);
+        }
+
+        DialogResult Ask(string text)
+        {
+            if (IsDisposed) return DialogResult.Cancel;
+            return (DialogResult)Invoke(new Func<DialogResult>(() =>
+                MessageBox.Show(this, text, "Scriptorium Setup", MessageBoxButtons.RetryCancel, MessageBoxIcon.Information)));
+        }
+
+        // Obsidian's vault switcher, where "Open folder as vault" is.
+        void OpenVaultChooser(string exe)
+        {
+            try
+            {
+                if (exe != null) Process.Start(new ProcessStartInfo(exe, "obsidian://choose-vault") { UseShellExecute = false });
+                else Process.Start("obsidian://choose-vault");
+            }
+            catch (Exception ex) { Log("Could not open Obsidian: " + ex.Message, true); }
         }
 
         // Update: Longform is downloaded first (if ticked), then the vault is updated in one step, backed up and undone on
@@ -2312,8 +2796,8 @@ namespace ScriptoriumSetup
                 f.Log("Installed Longform 2.1.0 from its official release");
                 f.Progress(100, false);
                 f.Done(f.PreviewPath);
-                f.Log("In Obsidian, choose \"Open folder as vault\" and select the folder above (its path is on the clipboard).");
-                f.Log("Then open Lorem Ipsum in Reading view. Restart Obsidian if it was already running, so it sees new fonts.");
+                f.Log("Opened the vault in Obsidian with its community plugins on.");
+                f.Log("Open Lorem Ipsum in Reading view.");
                 Save(f, dir, "04-done.png");
             }
             using (SetupForm f = Open())
@@ -2404,10 +2888,12 @@ namespace ScriptoriumSetup
                 f.Status("Downloading Longform …"); f.Progress(0, false);
                 foreach (int p in new[] { 34, 67, 100 }) { f.Progress(p, false); frame(130); }
                 f.Log("Installed Longform 2.1.0 from its official release");
+                f.Status("Opening the vault in Obsidian and turning on its plugins …"); f.Progress(0, true); f.Bar.StopTimer();
+                for (int k = 0; k < 5; k++) { f.Bar.Phase = 0.2f + k / 6f; f.Bar.Invalidate(); frame(110); }
                 f.Progress(100, false);
                 f.Done(f.PreviewPath);
-                f.Log("In Obsidian, choose \"Open folder as vault\" and select the folder above (its path is on the clipboard).");
-                f.Log("Then open Lorem Ipsum in Reading view. Restart Obsidian if it was already running, so it sees new fonts.");
+                f.Log("Opened the vault in Obsidian with its community plugins on.");
+                f.Log("Open Lorem Ipsum in Reading view.");
                 frame(1400);
                 f.InstallButton.Hover = true; frame(3000);
             }
