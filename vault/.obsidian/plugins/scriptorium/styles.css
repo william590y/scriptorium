@@ -323,6 +323,40 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
 }
 
 /* ==========================================================
+   Backing up to Google Drive (the commands "Back up this vault to Google Drive", "Sync now" and "Retrieve a vault")
+   ========================================================== */
+.scriptorium-drive-tag {
+  margin-left: 0.6em;
+  padding: 1px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  font-size: var(--font-ui-smaller);
+  font-weight: normal;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.scriptorium-drive-wait, .scriptorium-drive-stage { font-style: italic; }
+.scriptorium-drive-bar { display: block; width: 100%; height: 8px; margin: 0.4em 0 0.8em; accent-color: var(--interactive-accent); }
+.scriptorium-drive-plan, .scriptorium-drive-steps { margin: 0 0 0.8em; padding-left: 1.3em; }
+.scriptorium-drive-plan li, .scriptorium-drive-steps li { margin: 0.25em 0; }
+.scriptorium-drive-skipped { margin: 0 0 0.8em; }
+.scriptorium-drive-skipped summary { cursor: pointer; color: var(--text-muted); }
+.scriptorium-drive-skipped .scriptorium-setup-plan { margin-top: 0.4em; max-height: 20vh; }
+.scriptorium-drive-vaults { display: flex; flex-direction: column; gap: 4px; margin: 0 0 0.8em; max-height: 36vh; overflow: auto; }
+.scriptorium-drive-vault {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.scriptorium-drive-vault:has(input:checked) { border-color: var(--interactive-accent); }
+.scriptorium-drive-vault input { margin-top: 0.35em; }
+.scriptorium-drive-vault-name { font-weight: var(--font-semibold); overflow-wrap: anywhere; }
+
+/* ==========================================================
    The drop cap of one note (the command "Choose the drop cap for this note")
    ========================================================== */
 .scriptorium-dropcap-file { margin: 0 0 0.6em; font-style: italic; color: var(--text-muted); }

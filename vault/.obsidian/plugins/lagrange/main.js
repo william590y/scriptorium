@@ -1512,16 +1512,18 @@ function cliErrorMessage(which, text) {
 }
 
 /* Runs a command-line tool, feeding `input` on stdin and passing each stdout line to onLine. Resolves with the exit
-   code and stderr; rejects on a missing executable. hooks.signal stops it. */
+   code and stderr; rejects on a missing executable. hooks.signal stops it; hooks.cwd is the folder it runs in (the
+   temporary folder if none) and hooks.env adds environment variables. Scriptorium's Google Drive backup runs Claude
+   Code through this too (runCliTakesEnv says that cwd and env are honoured). */
 function runCli(which, exe, args, input, onLine, hooks) {
   const cp = nodeModule('child_process'), os = nodeModule('os'), path = nodeModule('path');
   const win = process.platform === 'win32';
-  const env = Object.assign({}, process.env);
+  const env = Object.assign({}, process.env, hooks.env);
   env.PATH = [path.dirname(exe), env.PATH || ''].filter(Boolean).join(path.delimiter);
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = cp.spawn(exe, args, { cwd: os.tmpdir(), env, windowsHide: true, shell: win && /\.cmd$/i.test(exe), stdio: ['pipe', 'pipe', 'pipe'] });
+      child = cp.spawn(exe, args, { cwd: hooks.cwd || os.tmpdir(), env, windowsHide: true, shell: win && /\.cmd$/i.test(exe), stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       reject(new LagrangeError(`${CLI[which].label} couldn’t be started (${e.message}). ${CLI[which].install}`, { kind: 'setup', cause: e }));
       return;
@@ -4327,7 +4329,7 @@ LagrangePlugin.internals = {
   parseErrorBody, describeError, noteStats, excerpt, demoProofreadEdits, demoRevise, demoChatReply,
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,
   chatSystemPrompt, proofreadUserMessage, reviseUserMessage, runEdits, LagrangeError,
-  transcriptPrompt, applyClaudeCodeLine, applyCodexLine, cliErrorMessage, findCli, runCli, streamClaudeCode, streamCodex, checkCli,
+  transcriptPrompt, applyClaudeCodeLine, applyCodexLine, cliErrorMessage, findCli, runCli, runCliTakesEnv: true, streamClaudeCode, streamCodex, checkCli,
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };

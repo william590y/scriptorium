@@ -13,7 +13,8 @@ quiet admonitions and a focused view of images, after [gwern.net](https://gwern.
 - **the vault template** (`vault/`): the Typewriter theme, the `manuscript` CSS snippet, writing plugins and a
   Lorem Ipsum sample note;
 - **the Scriptorium plugin** (`vault/.obsidian/plugins/scriptorium`), which switches between the regular and the
-  Fancy typography, chooses the drop cap, and sets footnotes in the margin and images in focus;
+  Fancy typography, chooses the drop cap, sets footnotes in the margin and images in focus, and (experimental) backs
+  the vault up to your own Google Drive and brings it back;
 - **Lagrange** (`vault/.obsidian/plugins/lagrange`), a writing companion: a chat about the open note that also edits
   it when you ask (and commands to revise a selection or proofread a note), each edit struck through and written in by
   a pen;
@@ -290,6 +291,85 @@ afterwards. When you open it, Obsidian asks whether to trust the author of its p
 enable plugins**. Install the fonts as in **Manual** above if this computer does not have them (Scriptorium Setup
 offers to).
 
+## Backing up a vault to Google Drive (experimental)
+
+If your Claude account is connected to Google Drive, Scriptorium can keep a copy of a vault in your own Drive and bring
+it back on any computer: a free stand-in for a sync service, run only when you ask. It needs no Google API key and no
+server of ours. The work is done by [Claude Code](https://claude.com/code) on your computer, signed in to your Claude
+account (Pro or Max), through that account's Google Drive connector. It is **experimental**: it has been tested on
+Linux with Claude Code 2.1 and synthetic vaults, and Google or Anthropic may change the connector under it. Keep
+another backup of anything you cannot lose.
+
+Three commands, in the command palette (and two buttons in **Settings → Scriptorium**). Obsidian on a computer only;
+on a phone or tablet they say so.
+
+- **Scriptorium: Back up this vault to Google Drive.** Shows what it will do, then sends new and changed files to the
+  Drive folder `Scriptorium/<vault name>/`, in the vault's own folders. Only what changed since the last backup is
+  sent. A file you deleted is moved to `_trash/<date>/` inside that Drive folder, and the old copy of a file you
+  changed goes to Google Drive's trash: nothing is deleted for good. If another device has backed up since, its
+  changes are brought in first.
+- **Scriptorium: Sync now with Google Drive.** The same work under the name you would look for on a second computer:
+  bring in what changed in Drive, then send what changed here.
+- **Scriptorium: Retrieve a vault from Google Drive.** Lists the vaults in the Drive folder (name, number of files,
+  when and from which device it was last backed up), asks for a new or empty folder, downloads the vault into it,
+  checks every file against the SHA-256 recorded at backup, sets Scriptorium up in it (the same code as **Set up
+  another vault**), and offers to open it.
+
+To get a vault back on a new computer, three steps:
+
+1. Install Scriptorium (see **Install**) and open the vault it makes.
+2. Install Claude Code, run `claude` once in a terminal and sign in with the Claude account whose Google Drive
+   connector is on (claude.ai → **Settings → Connectors → Google Drive → Connect**).
+3. In Obsidian, run **Scriptorium: Retrieve a vault from Google Drive**, choose the vault and a folder, and click
+   **Open the vault** when it is done.
+
+If Claude Code is missing, not signed in, signed in with an API key, or the account has no Google Drive connector,
+the command says which, and what to do.
+
+**Two devices.** Each device remembers what it last saw of the backup. A file changed on one side goes to the other.
+A file changed on both sides keeps both: the version from Drive takes the file's name and yours is renamed
+`name (conflict <device> <date>).md`, and backed up too; compare them and delete the one you do not want. A change
+always wins over a deletion. A file deleted on another device is moved to this vault's `.trash` folder, not removed.
+Nothing syncs by itself in this version, and two devices should not sync at the same moment (there is no lock; the
+later one to finish writes the list of files).
+
+**What is backed up.** Your notes and attachments, and the settings that make the vault yours: Obsidian's settings
+files in `.obsidian` (not the workspace), your own CSS snippets and themes, and the settings of the Scriptorium,
+Manuscriptum, Typewriter Mode and Longform plugins. **Not** backed up: Lagrange's settings (they hold API keys), other
+plugins' code and settings, Scriptorium's own code, snippet and theme (setting up a vault puts those back), the
+workspace, caches, `.trash`, hidden folders, and `.obsidian/scriptorium-backup-…`. The dialog lists every file it
+leaves out because of its size.
+
+**Limits.**
+
+- A file over 7 MB is skipped and listed (the connector accepts about 7.4 MB per file). An empty file is recorded in
+  the backup's list only, since Drive takes no empty upload.
+- Speed, measured on a synthetic vault of 34 files (8.7 MB: 24 notes, a PDF, images and a 6.9 MB recording): first
+  backup 1 min 32 s, a later backup of eight changes 1 min 15 s, retrieving it all 45 s, and checking that nothing
+  changed 14 s. A vault of 500 notes should take roughly 5 to 8 minutes the first time (an estimate from those rates,
+  about 30 files every 15 s) and about a minute for a day's changes afterwards.
+- Images are stored in Drive under a neutral file type, so Drive's web page may not preview them; downloaded, by
+  Scriptorium or by hand, they are the same files. (Under an image type, Claude Code would hand a downloaded picture
+  to the model instead of saving its bytes.)
+- Stopping is safe: what was done is recorded after every batch, and running the command again carries on. A run
+  stopped at the wrong moment can leave a stray duplicate in the Drive folder; it is harmless.
+- The backup is as private as your Drive and your Claude account. It is not encrypted by Scriptorium.
+
+**What the model sees, and what it costs.** Scriptorium gives Claude Code a numbered list of exact Drive calls, about
+ten files to a run, three runs at a time. The model (Haiku, the smallest, unless you change it in the settings) is
+given the **names** of your files and folders (with the vault's path on your computer) and their Drive ids, and makes
+the calls. It is **not given what is in
+your files**: an upload names the file and its SHA-256 and Claude Code reads and sends the bytes itself; every result,
+downloads included, is saved by Claude Code to a file that only Scriptorium reads and then deletes; and every tool but
+the Google Drive ones is refused, so the model cannot open a file. File names and tool calls do pass through
+Anthropic, as in any use of Claude Code. Nothing the model says is trusted: Scriptorium reads each call and result
+itself and checks ids, sizes and hashes. Each run uses a little of your subscription's usage (a first backup of
+34 files was 13 runs, about $0.07 at API prices; 500 notes would be some 60 runs; nothing is billed on a subscription).
+
+**Other storage.** Box: not yet supported (untested; its connector cannot be inspected without signing in to Box).
+A ChatGPT account through Codex: not supported; the Codex command line showed no Google Drive or Box tools to a
+non-interactive run when this was written.
+
 ## Building
 
 Everything is built from this repository; the release files are built by GitHub Actions
@@ -350,6 +430,7 @@ installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.
 installers/   the script installers, and Setup-Scriptorium-Vault.py (sets up a vault you already have)
 tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py, test_auto_open.py, test_setup_vault.py
 plugins-tests/ tests for the Scriptorium plugin's layout and parsing (node --test plugins-tests/scriptorium.test.js)
+              and for its Google Drive backup, against a pretend Drive (drive-sync.test.js; drive-sync-cli.js runs it for real)
 licenses/     licenses of embedded fonts
 docs/         the pictures in this README (recorded and captured in Obsidian)
 ```
@@ -404,9 +485,13 @@ Scriptorium Setup downloads the following, and only when you tick the matching o
 
 Each download is verified against a SHA-256 hash pinned in the installer. Nothing is uploaded, and there is no
 telemetry, analytics or update check. Opening the new vault with its plugins on talks only to Obsidian on the same
-computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests, with one
-exception that you start yourself: **Download more drop caps from gwern.net** fetches the images of the set you choose
-from `gwern.net`, when you press its button, and sends nothing but the request for each image.
+computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests, with two
+exceptions that you start yourself. **Download more drop caps from gwern.net** fetches the images of the set you choose
+from `gwern.net`, when you press its button, and sends nothing but the request for each image. Its Google Drive backup
+(experimental, and only when you run one of its three commands) runs the Claude Code program on your computer, which
+sends the vault's files to your own Google Drive, or fetches them, through your Claude account's Google Drive
+connector; the names of the files, not their contents, are given to the Claude model that makes the calls (see
+**Backing up a vault to Google Drive**).
 
 Lagrange, the writing companion, sends the open note and what you write to it to the provider you choose in its
 settings, and only when you send it a message or run one of its commands: your Claude subscription through the Claude

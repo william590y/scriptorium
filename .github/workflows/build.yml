@@ -170,7 +170,7 @@ jobs:
           node --version
           node --check vault/.obsidian/plugins/scriptorium/main.js
           node --check vault/.obsidian/plugins/lagrange/main.js
-          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js
+          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js plugins-tests/drive-sync.test.js
 
   release:
     name: Publish the release
