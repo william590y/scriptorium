@@ -296,7 +296,9 @@ def main():
             print("node is not on PATH: the macOS installer's editor is not tested")
     for ed in editors:
         with tempfile.TemporaryDirectory(prefix="scriptorium-auto-open-") as tmp:
-            run_cases(ed, Path(tmp))
+            # realpath: on Windows runners TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which .NET Framework's
+            # Path.GetFullPath expands to the long name; compare against the long form, as Obsidian would see the folder.
+            run_cases(ed, Path(os.path.realpath(tmp)))
     print(f"\n{'All auto-open checks passed.' if not failures else f'{len(failures)} check(s) FAILED:'}")
     for f in failures:
         print("  " + f)
