@@ -2082,9 +2082,9 @@ function demoChatReply(question, note, agentic, look, have) {
   }
   if (DEMO_EXPLAIN_RE.test(String(question || ''))) {
     return parts.concat('A small body between two great ones can rest where their pulls and the turning of the frame balance. ' +
-      'At the first point, a distance $r$ from the smaller mass,',
-    '$$\\frac{M_1}{(R - r)^2} = \\frac{M_2}{r^2} + \\frac{M_1}{R^2} - \\frac{r\\,(M_1 + M_2)}{R^3}$$',
-    'and for a small $M_2$ this is close to the Hill radius:',
+      'At the first point, for a small $M_2$, its distance $r$ from the smaller mass is close to the Hill radius,',
+    '$$r \\approx R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}$$',
+    'which is quick to work out:',
     '```python\ndef hill_radius(m1, m2, r):\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n\nhill_radius(1.989e30, 5.972e24, 1.496e8)   # about 1.5 million km\n```',
     have && have.tikz ? DEMO_FIGURE : '*(With the TikZJax plugin turned on, a figure of the five points is drawn here.)*').join('\n\n');
   }

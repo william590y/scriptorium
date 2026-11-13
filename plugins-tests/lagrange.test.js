@@ -3021,7 +3021,7 @@ test('Demo mode: a diagram for the pen where TikZJax is on, and a reply with mat
   assert.doesNotMatch(fig, /\\documentclass|\\usetikzlibrary|\n\n|[^\x00-\x7f]/);
   const told = L.demoChatReply('Explain the first point', note, true, true, { tikz: true });
   assert.deepEqual(L.parseAgentReply(told).ops, [], 'an explanation edits nothing');
-  assert.match(told, /\$\$\\frac\{M_1\}/);
+  assert.match(told, /\$\$r \\approx R \\left\( \\frac\{M_2\}\{3 M_1\} \\right\)\^\{1\/3\}\$\$/);
   assert.match(told, /```python\ndef hill_radius/);
   assert.equal(L.figureKinds(told).tikz, 1);
   assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true, { tikz: false })).tikz, 0);
