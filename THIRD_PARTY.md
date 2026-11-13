@@ -163,6 +163,18 @@ is ticked. They are not part of this repository, the zip or the installer (apart
 - License: its own license, in its repository. Longform is enabled in `vault/.obsidian/community-plugins.json`; if it
   is not installed, install it from **Settings → Community plugins** in Obsidian.
 
+### rclone 1.76.0
+
+- Source: <https://downloads.rclone.org/v1.76.0/> (the official builds `rclone-v1.76.0-<system>-<processor>.zip`), or
+  the same files at <https://github.com/rclone/rclone/releases/tag/v1.76.0>
+- Author: Nick Craig-Wood and the rclone contributors
+- License: MIT (<https://rclone.org/licence/>)
+- Not bundled. The Scriptorium plugin's Google Drive sync runs rclone. If it is not on the computer, the plugin offers
+  to download the build for that system, when the writer agrees in the sync's window; the file is checked against the
+  SHA-256 from rclone's `SHA256SUMS` for that version (the values are in `RCLONE.assets` in
+  `vault/.obsidian/plugins/scriptorium/main.js`) and unpacked into Scriptorium's own folder outside every vault. An
+  rclone that is already installed (1.66 or newer) is used as it is.
+
 ### Obsidian 1.15.0
 
 - Source: <https://github.com/obsidianmd/obsidian-releases/releases/tag/v1.15.0>

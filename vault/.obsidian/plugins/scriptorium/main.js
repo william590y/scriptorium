@@ -670,88 +670,53 @@ class ScriptoriumSettings extends PluginSettingTab {
         .setValue(settings.imageFocus)
         .onChange(value => this.plugin.updateSettings({ imageFocus: value })));
 
-    // Google Drive backup (experimental): see "Backing up to Google Drive" below.
-    new Setting(el).setName('Google Drive backup (experimental)').setHeading();
-    const drive = driveSettings(settings, ''), way = driveTransport(settings), desktop = this.plugin.onDesktop();
-    const setDrive = patch => this.plugin.updateSettings({ drive: Object.assign({}, this.plugin.settings.drive, patch) });
-    if (!desktop) { new Setting(el).setName('Back up, sync or retrieve').setDesc(DRIVE_MOBILE); return; }
+    // Syncing with Google Drive through rclone: see "Syncing with Google Drive" below.
+    new Setting(el).setName('Google Drive sync (new)').setHeading();
+    if (!this.plugin.onDesktop()) { new Setting(el).setName('Sync or retrieve').setDesc(SYNC_MOBILE); return; }
+    const plugin = this.plugin, sync = syncSettings(settings), kit = plugin.syncKit();
+    const setSync = patch => plugin.updateSettings({ sync: Object.assign({}, plugin.settings.sync, patch) });
+    const link = plugin.syncLink(), conn = syncConnection(kit.fs, kit.paths.conf);
+    const open = mode => new SyncModal(plugin, mode, { onClose: () => this.display() }).open();
     new Setting(el)
-      .setName('Back up, sync or retrieve')
-      .setDesc('Keeps a copy of this vault in your own Google Drive. Nothing runs by itself: a backup happens when you ask for one. ' + (way === 'direct' ? DRIVE_PRIVACY_DIRECT : DRIVE_PRIVACY))
-      .addButton(b => b.setButtonText('Back up now').setCta().onClick(() => new DriveModal(this.plugin, 'backup').open()))
-      .addButton(b => b.setButtonText('Retrieve a vault…').onClick(() => new DriveModal(this.plugin, 'retrieve').open()));
+      .setName(link && link.first ? 'This vault is synced' : 'Sync this vault')
+      .setDesc(link && link.first ? `With ${syncWhere(link)}. ${syncStatusText(plugin.engine.state, Date.now()).title}`
+        : 'Keeps this vault and a folder of your own Google Drive the same, in both directions: sign in to Google, pick the folder, and it stays in step by itself. ' + SYNC_PRIVACY)
+      .addButton(b => b.setButtonText(link && link.first ? 'Status…' : 'Set up…').setCta().onClick(() => open(link && link.first ? 'status' : 'setup')))
+      .addButton(b => b.setButtonText('Retrieve a vault…').onClick(() => open('retrieve')));
+    if (plugin.oldDriveBackup()) new Setting(el).setName('Coming from the older Google Drive backup?').setDesc(SYNC_MOVED);
     new Setting(el)
-      .setName('Connection')
-      .setDesc('How Scriptorium reaches Google Drive. Through Claude Code: Claude Code, signed in to your Claude account, makes the calls with that account’s Google Drive connector. ' +
-        'Google sign-in, directly: you sign in to Google in your browser and Scriptorium talks to Google Drive itself, with no model in between, files of any size, and pictures that Drive can show; ' +
-        'it is a preview, not yet checked against the real Google Drive by its author. A backup belongs to the way that made it: the direct sign-in cannot see a backup made through Claude Code.')
-      .addDropdown(d => {
-        for (const [value, label] of Object.entries(DRIVE_WAYS)) d.addOption(value, label);
-        d.setValue(way).onChange(async value => { await setDrive({ transport: value }); this.display(); });
-      });
-    if (way === 'direct') {
-      let kit = null, st = null;
-      try { kit = this.plugin.driveKit(); st = kit.status(); } catch (e) { new Setting(el).setName('Google account').setDesc(`The sign-in could not be read: ${e.message}`); }
-      if (kit) {
-        if (kit.endpoints.test) new Setting(el).setName('TEST').setDesc(`Talking to a pretend Google at ${kit.endpoints.test}, not to Google.`);
-        const account = new Setting(el).setName('Google account')
-          .setDesc(st.connected ? `Connected${st.email ? ` as ${st.email}` : ''}. Scriptorium can reach only the files it stored itself. Disconnect withdraws the sign-in at Google and deletes it from this computer; the backups stay in your Drive.`
-            : st.problem || (st.client.id ? 'Not connected on this computer.' : 'Not connected. A Google client ID is needed first (below); Connect explains how to make one.'));
-        if (st.connected) {
-          account.addButton(b => b.setButtonText('Disconnect').setWarning().onClick(async () => {
-            b.setDisabled(true);
-            const r = await kit.disconnect();
-            new Notice(r.revoked ? 'Disconnected: Google has withdrawn the sign-in, and it is deleted from this computer.'
-              : `The sign-in is deleted from this computer, but Google could not be told (${r.why}). To withdraw it there too: myaccount.google.com → Security → Your connections to third-party apps.`, 12000);
-            this.display();
-          }));
-        } else {
-          account.addButton(b => b.setButtonText('Connect…').setCta().onClick(() => {
-            const m = new DriveModal(this.plugin, 'connect');
-            const closed = m.onClose.bind(m);
-            m.onClose = () => { closed(); this.display(); };
-            m.open();
-          }));
-        }
-        const saved = kit.store.load();
-        const said = el.createEl('p', { cls: 'setting-item-description scriptorium-setup-problem', text: '' });
-        const saveClient = (id, secret) => {
-          const c = driveParseClient(id, secret);
-          said.setText(c.problem || '');
-          if (c.problem) return;
-          try { kit.store.save({ clientId: c.id, clientSecret: c.id ? c.secret : '' }); } catch (e) { said.setText(`It could not be saved (${e.message}).`); }
-        };
-        let idBox, secretBox;
-        new Setting(el)
-          .setName('Google OAuth client ID')
-          .setDesc(DRIVE_DEFAULT_CLIENT.id ? 'Empty: the client ID that comes with Scriptorium. Or one of your own (a “Desktop app” client in a Google Cloud project with the Drive API on).'
-            : 'Google asks every program that signs people in for a client ID. This copy of Scriptorium has none built in, so you make one of your own, once (five minutes, free): Connect shows the steps, and so does the README. Paste the ID, or the whole JSON file Google gives you.')
-          .addText(t => { idBox = t; t.setPlaceholder('1234567890-….apps.googleusercontent.com').setValue(saved.clientId || '').onChange(v => saveClient(v, secretBox ? secretBox.getValue() : '')); });
-        new Setting(el)
-          .setName('Google OAuth client secret')
-          .setDesc('The secret that goes with that client ID. Google does not treat a desktop program’s client secret as a secret; it is kept on this computer, outside your vaults, and never backed up.')
-          .addText(t => { secretBox = t; t.inputEl.type = 'password'; t.setPlaceholder('GOCSPX-…').setValue(saved.clientSecret || '').onChange(v => saveClient(idBox.getValue(), v)); });
-        el.appendChild(said);
-      }
-    }
+      .setName('Google account')
+      .setDesc(conn.connected ? `This computer is signed in (${conn.own ? 'with a client ID of your own' : 'with rclone’s shared sign-in'}). The sign-in is kept outside every vault, in ${kit.paths.conf}. Disconnect withdraws it where Google allows and deletes it from this computer; your files stay where they are.`
+        : `Not signed in. ${SYNC_UNVERIFIED}`)
+      .addButton(b => b.setButtonText(conn.connected ? 'Disconnect' : 'Connect…').onClick(async () => {
+        if (!conn.connected) { open('connect'); return; }
+        try { await (await plugin.syncApi()).disconnect(); new Notice('Disconnected from Google Drive on this computer.'); }
+        catch (e) { new Notice(`${e.message} ${e.next || ''}`.trim(), 12000); }
+        plugin.engine.start(false);
+        plugin.refreshSync();
+        this.display();
+      }));
     new Setting(el)
-      .setName('Folder in Google Drive')
-      .setDesc('The folder in My Drive that holds one folder per vault.')
-      .addText(t => t.setPlaceholder(DRIVE_ROOT).setValue(drive.folder === DRIVE_ROOT ? '' : drive.folder).onChange(v => setDrive({ folder: v })));
+      .setName('Sync by itself')
+      .setDesc('When Obsidian starts, on a timer, and shortly after a note changes. Off: only when you choose “Sync now”.')
+      .addToggle(t => t.setValue(sync.auto).onChange(v => setSync({ auto: v })));
     new Setting(el)
-      .setName('This device’s name')
-      .setDesc('Recorded with each backup, and used in the name of a file kept after a conflict. Empty: the computer’s name.')
-      .addText(t => t.setValue((settings.drive && settings.drive.device) || '').onChange(v => setDrive({ device: v })));
-    if (way === 'claude') {
-      new Setting(el)
-        .setName('Model that makes the Drive calls')
-        .setDesc('A Claude Code model name. The smallest one is enough (it only copies a list of calls), and uses the least of your subscription.')
-        .addText(t => t.setPlaceholder(DRIVE_MODEL).setValue(drive.model === DRIVE_MODEL ? '' : drive.model).onChange(v => setDrive({ model: v })));
-    }
+      .setName('Minutes between syncs')
+      .setDesc('From 1 to 720. Each sync asks Google Drive what changed; five minutes is a good balance.')
+      .addText(t => t.setPlaceholder(String(SYNC_DEFAULTS.minutes)).setValue(String(sync.minutes)).onChange(v => { if (/^\d+$/.test(v.trim())) void setSync({ minutes: Number(v) }); }));
     new Setting(el)
-      .setName('Diagnostic report')
-      .setDesc('What the last backup, sync or retrieval on this computer tried and what answered, to paste when asking for help. It has no text of any note, no name of any file, and no password, token or key.')
-      .addButton(b => b.setButtonText('Copy diagnostic report').onClick(() => this.plugin.copyDriveReport()));
+      .setName('Sync Obsidian’s settings, plugins, themes and snippets')
+      .setDesc('So that a second computer gets the same setup. Never synced either way: the layout of the windows, caches, and Lagrange’s settings (they hold API keys). Other plugins’ settings are synced as they are: if one of them keeps a password or key, it goes to your Drive with the rest. Every computer that syncs this vault should have this set the same way (the setting itself is synced when this is on).')
+      .addToggle(t => t.setValue(sync.obsidian).onChange(v => setSync({ obsidian: v })));
+    new Setting(el)
+      .setName('Safety limit on deletions')
+      .setDesc('A sync stops and asks if more than this share of the files (in percent) disappeared on one side since the last sync. rclone’s own default is 50.')
+      .addText(t => t.setPlaceholder(String(SYNC_DEFAULTS.maxDelete)).setValue(String(sync.maxDelete)).onChange(v => { if (/^\d+$/.test(v.trim())) void setSync({ maxDelete: Number(v) }); }));
+    new Setting(el)
+      .setName('rclone')
+      .setDesc(`The program that does the syncing (rclone.org, MIT licence; Scriptorium was written for version ${RCLONE.version}). Empty: Scriptorium looks for it, and offers to download it. Or the path to an rclone of your own. This is kept for this computer only.`)
+      .addText(t => t.setPlaceholder('found by itself').setValue(kit.device().rclone || '').onChange(v => { kit.setDevice({ rclone: v.trim() }); plugin.rcloneFound = null; }))
+      .addButton(b => b.setButtonText('Copy diagnostic report').onClick(() => plugin.copyDriveReport()));
   }
 }
 
@@ -1937,6 +1902,8 @@ class SetupVaultModal extends Modal {
     const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: problem || '' });
     const buttons = el.createDiv({ cls: 'modal-button-container' });
     const next = buttons.createEl('button', { cls: 'mod-cta', text: 'Show what will change' });
+    // A vault that is kept in Google Drive is brought down, set up and linked in one go by the sync's own window.
+    buttons.createEl('button', { text: 'Retrieve one from Google Drive…' }).addEventListener('click', () => { this.close(); new SyncModal(this.plugin, 'retrieve').open(); });
     buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
     const go = () => {
       this.typed = input.value;
@@ -2020,1134 +1987,484 @@ function setupDialog() {
 }
 
 /* ==========================================================
-   Backing up to Google Drive (experimental)
+   Syncing with Google Drive, through rclone (new)
    ==========================================================
-   "Scriptorium: Back up this vault to Google Drive", "Sync now with Google Drive" and "Retrieve a vault from Google
-   Drive" keep a copy of the vault in the writer's own Google Drive, in the folder Scriptorium/<vault name>/. There are
-   two ways to reach the Drive behind one engine (DriveSync, which is handed a `run` that makes Drive calls): through
-   Claude Code, described here, and with a Google sign-in of the writer's own ("Google Drive, directly", further
-   down). Through Claude Code no Google API key is needed: the calls are made by Claude Code, signed in to the
-   writer's Claude account, through that account's Google Drive connector. How it works:
-     - Scriptorium runs `claude -p` once per batch with a numbered list of exact Drive calls. The model (Haiku unless
-       changed) makes them; it is given file names, folder names and Drive ids. It is never given what is in a file:
-       an upload names the file by reference (sha256:<hash>:<path>) and Claude Code sends the bytes itself; every
-       result, downloads included, is saved by Claude Code to a file that only Scriptorium reads
-       (MAX_MCP_OUTPUT_TOKENS=1); and a hook refuses every tool but the Drive ones, so the model cannot read a file.
-     - Nothing the model says is trusted: Scriptorium reads each call and each result from Claude Code's event stream,
-       matches them against the list, and checks ids, sizes and (after a download) SHA-256.
-     - The Drive folder holds the vault's files in the vault's own folders, and scriptorium-manifest.json: for each
-       file its path, SHA-256, size, modified time and Drive id. The connector cannot replace a file's content, so a
-       changed file is uploaded again and the old copy goes to Drive's trash; a deleted file is moved to
-       _trash/<date>/ in the vault's Drive folder. Nothing is ever deleted for good.
-     - This device remembers (drive-sync.json, next to this file) the hash of every file as of the last sync. Local,
-       remote and remembered are compared file by file: changed on one side, that side wins; changed on both, both
-       are kept (the local one is renamed "name (conflict <device> <date>).md"). Changes made on another device are
-       always brought in before anything is sent.
-     - What is done is recorded after every batch, so a stopped or failed run is continued by running it again.
-   Not backed up: Obsidian's workspace and caches, .trash, hidden folders, the code of plugins and of Scriptorium's own
-   theme and snippet (Setup or "Set up another vault" puts those back), other plugins' settings, and Lagrange's
-   settings, which hold API keys. The functions below take fs, path and crypto as arguments and are tested under Node
-   with a pretend Drive (plugins-tests/drive-sync.test.js). */
+   "Scriptorium: Sync this vault with Google Drive", "Sync now with Google Drive" and "Retrieve a vault from Google
+   Drive" keep a vault and a folder of the writer's own Google Drive the same, in both directions, by running rclone
+   (https://rclone.org, MIT licence): the writer signs in to Google in the browser, picks the Drive folder by hand,
+   and the two are then synced on a timer with `rclone bisync`. How it works:
+     - rclone is found on the computer (a path in the settings, PATH, the usual places) or, when the writer agrees,
+       downloaded: one pinned version from downloads.rclone.org (or its GitHub release), checked against the SHA-256
+       that rclone published for it and that is written below, and unpacked into Scriptorium's own folder outside
+       every vault. A file whose hash differs is deleted, never run.
+     - The sign-in is rclone's own: `rclone config update scriptorium-drive scope=drive` opens Google's page in the
+       browser and listens on 127.0.0.1:53682 for the answer. The token is kept by rclone in a config file that
+       belongs to Scriptorium alone (rclone.conf in that same folder, readable only by the writer; `--config` is on
+       every call, so the writer's own rclone configuration is never read or changed). No token is ever in a vault,
+       in this plugin's data or in a report.
+     - The Drive folder is chosen in a small browser over `rclone lsjson --dirs-only`, and remembered for this vault
+       in that folder too (sync-vaults.json), not in the vault: another computer makes its own choice.
+     - The first sync is a `bisync --resync` after a page that says what is on each side. A file that differs on the
+       two sides is kept twice by default. After that every run is a plain `bisync` with the guards below.
+     - Guards: one run at a time (a lock file); a check file (.scriptorium-sync) that must be on both sides, so that
+       a Drive folder that was emptied, moved or cannot be reached, or a vault whose disk is not there, stops the run
+       instead of deleting the other side (rclone also refuses an empty side by itself); a limit on how much one run
+       may delete (--max-delete, half the files unless changed); a file changed on both sides keeps both (the older
+       one is renamed "name.conflict1.md"); whatever a run deletes or replaces on this computer is moved to a folder
+       of Scriptorium's own for thirty days instead; Drive's own trash keeps what is deleted there; an interrupted
+       run is picked up by the next one (--resilient --recover).
+   Not synced: Obsidian's workspace, caches and .trash, hidden folders, Lagrange's settings (they hold API keys),
+   Google's own documents (Docs, Sheets), and what the older Drive backup left behind. The functions below take fs,
+   path, spawn and the like as arguments and are tested under Node (plugins-tests/rclone-sync.test.js with a pretend
+   rclone, rclone-real.test.js with the real one and a second folder standing in for Drive).
+   NOT YET VERIFIED: the sign-in with the real Google. It follows rclone's documentation for the pinned version and
+   is tested up to the moment the browser opens. */
 
-const DRIVE_TOOL = 'mcp__claude_ai_Google_Drive__';
-const DRIVE_SCHEMA = 1;
-const DRIVE_MANIFEST = 'scriptorium-manifest.json';
-const DRIVE_STATE = '.obsidian/plugins/scriptorium/drive-sync.json';
-const DRIVE_FOLDER_TYPE = 'application/vnd.google-apps.folder';
-const DRIVE_ROOT = 'Scriptorium';
-const DRIVE_MODEL = 'haiku';
-// A batch is one run of Claude Code; up to `parallel` run at once. The connector takes a request of at most
-// 10,000,000 bytes, and a file travels as base64 (4 bytes for every 3), so a file of more than about 7.4 MB cannot go
-// up: one over 7 MB is listed as not backed up.
-const DRIVE_LIMITS = { fileBytes: 7 * 1000 * 1000, batchFiles: 10, batchBytes: 20 * 1000 * 1000, parallel: 3, tries: 3, runMs: 10 * 60 * 1000, checkMs: 90 * 1000 };
-const DRIVE_SYSTEM = 'You make the Google Drive tool calls you are given, exactly as written, and nothing else. ' +
-  'You never read, open or summarise a file, and you never repeat a call.';
-/* The type a file is uploaded under. Only types that were seen to come back byte for byte are named. Everything else,
-   images above all, goes up under a neutral type: Google Drive would call "a.png" an image whatever it is told except
-   a type of its own, and Claude Code hands a downloaded image to the model as a picture, resized, instead of saving
-   its bytes. (So Drive's web page may show no preview of an image in the backup; downloaded, it is the same file.) */
-const DRIVE_MIME = { md: 'text/markdown', txt: 'text/plain', json: 'application/json', canvas: 'application/json', css: 'text/css', pdf: 'application/pdf', mp3: 'audio/mpeg' };
-const DRIVE_MIME_OTHER = 'application/x-scriptorium-file';
-function driveMime(name) {
-  const dot = name.lastIndexOf('.');
-  return (dot > 0 && Object.prototype.hasOwnProperty.call(DRIVE_MIME, name.slice(dot + 1).toLowerCase()) && DRIVE_MIME[name.slice(dot + 1).toLowerCase()]) || DRIVE_MIME_OTHER;
-}
+const RCLONE = {
+  version: '1.76.0',
+  min: [1, 66, 0],            // bisync's --conflict-resolve, --recover and --max-lock came with 1.66
+  remote: 'scriptorium-drive',
+  port: 53682,                // rclone's sign-in listener: http://127.0.0.1:53682/
+  licence: 'MIT',
+  sources: ['https://downloads.rclone.org/v{v}/{f}', 'https://github.com/rclone/rclone/releases/download/v{v}/{f}'],
+  hosts: ['downloads.rclone.org', 'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'],
+  /* The official builds of that version: name on rclone's server, size, and the SHA-256 from its SHA256SUMS. */
+  assets: {
+    'win32-x64': ['windows-amd64', 32193987, '8b4fd2737ade4e70c057ef4a49deb7cffe94b0fb9d7587c189d149823f21a1dc'],
+    'win32-arm64': ['windows-arm64', 29049527, 'c406c8a69a5a408e50624aa990fbb0a6266b3a4e83782a94de3cb96f50f86f10'],
+    'win32-ia32': ['windows-386', 30225774, 'b9c8d062ff61e2addfc31c1981219d90f99e0012cba45b649f728082ad810d5c'],
+    'darwin-x64': ['osx-amd64', 35749026, '4f5835733d52b818340f97b1fc0348a70461534d123363a183ca2b660219595a'],
+    'darwin-arm64': ['osx-arm64', 33189281, 'e72dc90b70f4947a7b72b61bde4a4fbba5777b2874fb448951ffdde67ebd0ab7'],
+    'linux-x64': ['linux-amd64', 32194302, 'b00f00b3266c3764413afe599d3ec316f6f43b3e0ea8a0bc1d186d2133e46df7'],
+    'linux-arm64': ['linux-arm64', 29231141, 'ee169016675e23a69d77240565133ff7dbc9b33d16fa8f7053d4af39f1eaeb78'],
+    'linux-arm': ['linux-arm-v7', 30389321, '090e1e2ce0f2a27c6c5ad5b2a2f7bbf7570933f3523e8bf83cb25ee50115f885'],
+    'linux-ia32': ['linux-386', 30575312, 'ac5a696aff30c2806475d7c9ae6bbb4eeda47067e5add32448bf33db54552a09'],
+  },
+};
+const SYNC_SENTINEL = '.scriptorium-sync';
+const SYNC_SENTINEL_TEXT = 'Scriptorium keeps this file on both sides of the sync with Google Drive, to be sure that both sides are really there before it changes anything. Leave it where it is.\n';
+const SYNC_DEFAULTS = { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30 };
+const SYNC_TIMES = { onStart: 8000, onChange: 45000, again: 5000, quit: 15000, signIn: 10 * 60 * 1000, call: 2 * 60 * 1000, lockStale: 6 * 60 * 60 * 1000 };
+const SYNC_CONFLICT = /\.conflict\d+(?:\.[^./\\]+)?$/;
+const SYNC_MOBILE = 'Syncing with Google Drive works only in Obsidian on a computer: it runs a program (rclone) beside Obsidian, which a phone or tablet does not allow. ' +
+  'Open this vault on a computer to sync it or to retrieve one. On a phone, the Google Drive app can still show the files.';
+const SYNC_PRIVACY = 'Your files go from this computer straight to your own Google Drive, carried by rclone. No server of ours and no model is involved. ' +
+  'rclone is given access to your Drive (Google calls the permission “See, edit, create, and delete all of your Google Drive files”), which is what lets you pick any folder; ' +
+  'Scriptorium only ever points it at the folder you choose. The sign-in is kept on this computer, outside every vault, and the copy in Drive is as private as your Google account: it is not encrypted by Scriptorium.';
+/* What the writer is told about the Google app that asks for the permission. rclone's own (shared) client ID is
+   being retired by rclone during 2026 (its documentation for 1.76 says so), so a sign-in with it may be refused. */
+const SYNC_SHARED_CLIENT = 'rclone’s own sign-in with Google is shared by everyone who uses rclone, and rclone’s authors are retiring it during 2026. ' +
+  'If Google refuses it (a page that says “Access blocked”, “deleted_client” or “This app is blocked”), use a client ID of your own instead: it takes about ten minutes, once.';
+/* How to make a Google client ID for rclone: [text, link]. From rclone's documentation ("Making your own client_id"). */
+const SYNC_CLIENT_STEPS = [
+  ['Make a Google Cloud project: open the page below, sign in with any Google account (it need not be the one you sync with), name it (say “Scriptorium sync”) and click Create.', 'https://console.cloud.google.com/projectcreate'],
+  ['Turn on the Drive API for it: Menu → APIs & Services → Library → Google Drive API → Enable.', 'https://console.cloud.google.com/apis/library/drive.googleapis.com'],
+  ['Menu → Google Auth Platform → Get started. App name: rclone (or any name). Support email: yours. Audience: External. Contact: your email. Agree, then Create.', 'https://console.cloud.google.com/auth/overview'],
+  ['Data Access → Add or remove scopes → tick the one ending in /auth/drive (not drive.file) → Update → Save.', 'https://console.cloud.google.com/auth/scopes'],
+  ['Audience → Publish app → Confirm. (Left in “Testing”, Google signs you out after seven days, and only the accounts you list under Test users may sign in.)', 'https://console.cloud.google.com/auth/audience'],
+  ['Clients → Create client → Application type: Desktop app → Create. Copy the client ID and the client secret now (Google shows the secret only once), or download the JSON.', 'https://console.cloud.google.com/auth/clients'],
+  ['Paste them below. When you sign in, Google may say that it has not verified this app: it is your own, so choose Advanced → Go to (the name you gave it).', ''],
+];
 
-/* The settings of the backup, from the plugin's saved settings: {folder, model, device}. */
-function driveSettings(saved, hostname) {
-  const d = saved && saved.drive && typeof saved.drive === 'object' ? saved.drive : {};
-  const clean = (v, max) => String(v || '').replace(/[\u0000-\u001f\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+function syncSettings(saved) {
+  const d = saved && saved.sync && typeof saved.sync === 'object' ? saved.sync : {};
+  const num = (v, lo, hi, dflt) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt; };
   return {
-    folder: clean(d.folder, 80) || DRIVE_ROOT,
-    model: String(d.model || '').trim().replace(/[^\w.\-[\]]/g, '') || DRIVE_MODEL,
-    device: clean(d.device, 40) || clean(hostname, 40) || 'this device',
+    auto: d.auto !== false,
+    minutes: num(d.minutes, 1, 720, SYNC_DEFAULTS.minutes),
+    obsidian: d.obsidian !== false,
+    maxDelete: num(d.maxDelete, 1, 100, SYNC_DEFAULTS.maxDelete),
+    keepDays: num(d.keepDays, 1, 365, SYNC_DEFAULTS.keepDays),
   };
-}
-
-/* Whether the file at rel (forward slashes, relative to the vault) is backed up. */
-function driveRule(rel) {
-  const parts = String(rel || '').split('/');
-  const name = parts[parts.length - 1];
-  if (!name || parts.some(p => !p || p === '..' || p === '.') || /[\u0000-\u001f\\]/.test(rel)) return false;
-  if (name.endsWith('.scriptorium-tmp') || /^(?:Thumbs\.db|desktop\.ini)$/i.test(name) || name === DRIVE_AUTH_FILE) return false;   // litter, and the Google sign-in, wherever it is
-  if (parts[0] !== '.obsidian') return !parts.some(p => p.startsWith('.') || p === 'node_modules');
-  if (parts.length === 2) return name.endsWith('.json') && !name.startsWith('workspace');
-  if (setupRule(rel) === 'replace') return false;   // Scriptorium's own files: setting up a vault puts them back
-  if (parts[1] === 'snippets') return parts.length === 3 && name.endsWith('.css');
-  if (parts[1] === 'themes') return parts.length === 4 && (name === 'theme.css' || name === 'manifest.json');
-  if (parts[1] === 'plugins') {
-    return parts.length === 4 && name === 'data.json' && parts[2] !== 'lagrange' && (SETUP_PLUGINS.includes(parts[2]) || parts[2] === 'longform');
-  }
-  return false;
 }
 
 function driveBytes(n) {
   if (n < 1000) return `${n} B`;
   if (n < 1e6) return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)} kB`;
-  return `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
+  if (n < 1e9) return `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
+  return `${(n / 1e9).toFixed(n < 1e10 ? 1 : 0)} GB`;
 }
 
-/* The SHA-256 of a file, read a piece at a time: a recording of a gigabyte is not held in memory. */
-function driveHashFile(fs, crypto, file) {
-  const h = crypto.createHash('sha256'), fd = fs.openSync(file, 'r'), buf = Buffer.alloc(1024 * 1024);
-  try { for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n)); } finally { fs.closeSync(fd); }
-  return h.digest('hex');
+function driveCount(n, one, many) {
+  return `${n} ${n === 1 ? one : (many || `${one}s`)}`;
 }
 
-/* Why a file of the backup cannot be written on this computer under its own name, or '' if it can. Windows refuses
-   some characters and names that macOS and Linux allow. */
-function driveNameProblem(rel, platform) {
-  if (platform !== 'win32') return '';
-  for (const part of rel.split('/')) {
-    if (/[<>:"|?*]/.test(part)) return `Windows does not allow the character ${part.match(/[<>:"|?*]/)[0]} in a name (“${part}”); rename it on the computer it came from, back up there, and retrieve again`;
-    if (/[. ]$/.test(part)) return `Windows does not allow a name that ends with a full stop or a space (“${part}”); rename it on the computer it came from`;
-    if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) return `Windows keeps the name “${part}” for itself; rename it on the computer it came from`;
-  }
-  return '';
+/* ---------- Where things live on this computer ---------- */
+
+/* Scriptorium's own folder for this user, outside every vault: rclone (if downloaded), its config with the sign-in,
+   which Drive folder goes with which vault, and what a sync replaced. `path` is Node's path for the platform. */
+function syncUserDir(path, env, platform, home) {
+  env = env || {};
+  if (env.SCRIPTORIUM_USER_DIR && path.isAbsolute(env.SCRIPTORIUM_USER_DIR)) return path.normalize(env.SCRIPTORIUM_USER_DIR);
+  if (platform === 'win32') return path.join(env.LOCALAPPDATA && path.isAbsolute(env.LOCALAPPDATA) ? env.LOCALAPPDATA : path.join(home, 'AppData', 'Local'), 'Scriptorium');
+  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'Scriptorium');
+  return path.join(env.XDG_DATA_HOME && path.isAbsolute(env.XDG_DATA_HOME) ? env.XDG_DATA_HOME : path.join(home, '.local', 'share'), 'scriptorium');
 }
 
-/* The vault's files that are backed up: {files: {rel: {sha256, size, mtime}}, skipped: [{path, why}], hashes}.
-   cache is the hashes of an earlier scan ({rel: [size, mtime, sha256]}): a file of the same size and time is not
-   read again. */
-function driveScan(fs, path, crypto, dir, cache, limits) {
-  const max = (limits || DRIVE_LIMITS).fileBytes;
-  const files = {}, skipped = [], hashes = {};
-  // Only the folders that can hold a file that is backed up are walked.
-  const walkable = (rel, name) => {
-    const parts = rel ? rel.split('/') : [];
-    if (!parts.length) return name === '.obsidian' || !(name.startsWith('.') || name === 'node_modules');
-    if (parts[0] !== '.obsidian') return !(name.startsWith('.') || name === 'node_modules');
-    if (parts.length === 1) return ['snippets', 'themes', 'plugins'].includes(name);
-    return parts.length === 2 && parts[1] !== 'snippets';   // .obsidian/themes/<name> and .obsidian/plugins/<id>
+function syncPaths(path, dir, platform) {
+  return {
+    dir,
+    conf: path.join(dir, 'rclone.conf'),
+    exe: path.join(dir, 'rclone', `v${RCLONE.version}`, platform === 'win32' ? 'rclone.exe' : 'rclone'),
+    vaults: path.join(dir, 'sync-vaults.json'),
+    device: path.join(dir, 'sync-device.json'),
+    work: path.join(dir, 'bisync'),
+    kept: path.join(dir, 'replaced'),
+    filters: path.join(dir, 'filters'),
+    locks: path.join(dir, 'locks'),
   };
-  const walk = rel => {
-    let entries;
-    try { entries = fs.readdirSync(path.join(dir, rel), { withFileTypes: true }); } catch (e) { skipped.push({ path: rel || '.', why: `could not be read (${e.code || e.message})` }); return; }
-    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      const child = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) { if (walkable(rel, entry.name)) walk(child); continue; }
-      if (!entry.isFile()) continue;
-      if (!driveRule(child)) {
-        if (/[\u0000-\u001f\\]/.test(child)) skipped.push({ path: child, why: 'its name has a character that cannot be sent' });
-        continue;
-      }
-      try {
-        const stat = fs.statSync(path.join(dir, child));
-        const size = stat.size, mtime = Math.round(stat.mtimeMs);
-        if (size > max) { skipped.push({ path: child, why: `${driveBytes(size)}: larger than ${driveBytes(max)}` }); continue; }
-        const known = cache && cache[child];
-        const sha256 = known && known[0] === size && known[1] === mtime ? known[2] : driveHashFile(fs, crypto, path.join(dir, child));
-        files[child] = { sha256, size, mtime };
-        hashes[child] = [size, mtime, sha256];
-      } catch (e) {
-        skipped.push({ path: child, why: `could not be read (${e.code || e.message})` });
-      }
+}
+
+/* A short name for a vault's folder, the same every time on this computer. Windows and macOS do not tell
+   capitals apart in a path. */
+function syncVaultId(crypto, path, dir, platform) {
+  let d = path.resolve(dir).replace(/[\\/]+$/, '');
+  if (platform === 'win32' || platform === 'darwin') d = d.toLowerCase();
+  return crypto.createHash('sha256').update(d).digest('hex').slice(0, 16);
+}
+
+/* JSON kept in Scriptorium's folder: read without throwing, written whole and in place of the old one. */
+function syncReadJson(fs, file) {
+  try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); return j && typeof j === 'object' ? j : {}; } catch (e) { return {}; }
+}
+function syncWriteJson(fs, path, file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+/* Which Drive folder goes with a vault: {root: 'my' | 'shared' | 'drive', driveId, driveName, path, linked, first,
+   last, filters}, or null. */
+function syncLink(fs, file, id) {
+  const l = syncReadJson(fs, file)[id];
+  return l && typeof l === 'object' && typeof l.path === 'string' && l.path ? l : null;
+}
+function syncSaveLink(fs, path, file, id, link) {
+  const all = syncReadJson(fs, file);
+  if (link) all[id] = link; else delete all[id];
+  syncWriteJson(fs, path, file, all);
+}
+
+/* ---------- Finding rclone ---------- */
+
+function rcloneAsset(platform, arch) {
+  const a = RCLONE.assets[`${platform}-${arch}`];
+  if (!a) return null;
+  const file = `rclone-v${RCLONE.version}-${a[0]}.zip`;
+  return { file, bytes: a[1], sha256: a[2], exe: platform === 'win32' ? 'rclone.exe' : 'rclone', urls: RCLONE.sources.map(s => s.replace('{v}', RCLONE.version).replace('{f}', file)) };
+}
+
+/* Where rclone may be, most wanted first: [{file, kind}], kind 'custom' (the path in the settings), 'downloaded'
+   (Scriptorium's own copy), 'path' or 'usual'. A program started from the Dock or the Start menu is not given the
+   PATH of a terminal, so the usual places are looked in as well. */
+function rcloneCandidates(o) {
+  const { path, platform, home } = o, env = o.env || {};
+  const name = platform === 'win32' ? 'rclone.exe' : 'rclone';
+  const out = [], seen = new Set();
+  const add = (file, kind) => { if (file && !seen.has(file)) { seen.add(file); out.push({ file, kind }); } };
+  if (o.custom) {
+    let c = String(o.custom).trim().replace(/^"(.*)"$/, '$1');
+    if (c.startsWith('~') && home) c = path.join(home, c.slice(1));
+    add(c, 'custom');
+    if (platform === 'win32' && !/\.exe$/i.test(c)) add(`${c}.exe`, 'custom');
+    add(path.join(c, name), 'custom');   // a folder was given
+    return out;
+  }
+  if (o.exe) add(o.exe, 'downloaded');
+  const list = String(env.PATH || env.Path || env.path || '').split(platform === 'win32' ? ';' : ':');
+  for (const d of list) { const dir = d.trim().replace(/^"(.*)"$/, '$1'); if (dir && path.isAbsolute(dir)) add(path.join(dir, name), 'path'); }
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA || (home && path.join(home, 'AppData', 'Local'));
+    for (const d of [
+      env.ProgramFiles && path.join(env.ProgramFiles, 'rclone'), env['ProgramFiles(x86)'] && path.join(env['ProgramFiles(x86)'], 'rclone'),
+      local && path.join(local, 'Microsoft', 'WinGet', 'Links'), local && path.join(local, 'Programs', 'rclone'),
+      home && path.join(home, 'scoop', 'shims'), env.ProgramData && path.join(env.ProgramData, 'chocolatey', 'bin'),
+    ]) if (d) add(path.join(d, name), 'usual');
+  } else {
+    for (const d of ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin', '/usr/bin', '/bin', '/snap/bin', home && path.join(home, '.local', 'bin'), home && path.join(home, 'bin')]) {
+      if (d) add(path.join(d, name), 'usual');
     }
-  };
-  walk('');
-  return { files, skipped, hashes };
-}
-
-/* What a sync has to do, from the files here (local), the files in the Drive manifest (remote), each {rel: {sha256}},
-   and the hashes both had at the last sync (base: {rel: sha256}). A file changed on one side goes to the other; a
-   file changed on both sides, differently, is a conflict, except that a change always wins over a deletion. */
-function drivePlan(local, remote, base) {
-  const plan = { upload: [], download: [], conflicts: [], deleteLocal: [], deleteRemote: [], same: 0 };
-  const all = new Set(Object.keys(local).concat(Object.keys(remote), Object.keys(base || {})));
-  for (const rel of [...all].sort()) {
-    const l = local[rel] ? local[rel].sha256 : null, r = remote[rel] ? remote[rel].sha256 : null;
-    const b = base && typeof base[rel] === 'string' ? base[rel] : null;
-    if (l === r) { if (l) plan.same++; continue; }
-    if (l === b) (r ? plan.download : plan.deleteLocal).push(rel);          // only the remote changed
-    else if (r === b) (l ? plan.upload : plan.deleteRemote).push(rel);      // only this vault changed
-    else if (!l) plan.download.push(rel);                                   // deleted here, changed there: the change is kept
-    else if (!r) plan.upload.push(rel);                                     // changed here, deleted there: the change is kept
-    else plan.conflicts.push(rel);
   }
-  return plan;
-}
-
-/* The name a file changed on both sides is kept under: "Notes/a.md" -> "Notes/a (conflict laptop 2026-11-12).md".
-   taken(rel) says whether a name is in use. */
-function driveConflictName(rel, device, date, taken) {
-  const slash = rel.lastIndexOf('/'), folder = rel.slice(0, slash + 1), name = rel.slice(slash + 1);
-  const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
-  const who = String(device || '').replace(/[\u0000-\u001f\\/:*?"<>|()]/g, ' ').replace(/\s+/g, ' ').trim() || 'this device';
-  const d = date instanceof Date ? date : new Date(date);
-  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  for (let n = 1; ; n++) {
-    const out = `${folder}${stem} (conflict ${who} ${day}${n > 1 ? ` ${n}` : ''})${ext}`;
-    if (!taken || !taken(out)) return out;
-  }
-}
-
-/* The operations in groups of at most limits.batchFiles and limits.batchBytes (size(op) in bytes): one run each. */
-function driveBatches(ops, size, limits) {
-  const l = limits || DRIVE_LIMITS, out = [];
-  let group = [], bytes = 0;
-  for (const op of ops) {
-    const n = size ? size(op) : 0;
-    if (group.length && (group.length >= l.batchFiles || bytes + n > l.batchBytes)) { out.push(group); group = []; bytes = 0; }
-    group.push(op);
-    bytes += n;
-  }
-  if (group.length) out.push(group);
   return out;
 }
 
-/* A call's arguments as one string, to compare a call that was made with the call that was asked for: keys in
-   order, and true, 100 and "100" alike as text, since the model sometimes writes a number or a boolean as a string
-   (Google Drive takes either). */
-function driveStable(v) {
-  if (Array.isArray(v)) return `[${v.map(driveStable).join(',')}]`;
-  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${driveStable(v[k])}`).join(',')}}`;
-  return JSON.stringify(v === undefined || v === null ? '' : String(v));
-}
-
-/* What Claude Code is asked: to load the tools (Claude Code holds a connector's tools back until they are looked up,
-   and a call to one that is not loaded fails), then the calls, numbered, as JSON. */
-function drivePrompt(calls) {
-  const tools = [...new Set(calls.map(c => DRIVE_TOOL + c.tool))];
-  return `First call ToolSearch once with ${JSON.stringify({ query: `select:${tools.join(',')}`, max_results: tools.length })} to load the tools. ` +
-    `Then make exactly these ${calls.length === 1 ? 'tool call' : `${calls.length} tool calls`}, each once, with exactly these arguments, ` +
-    'copied character for character. You may make several at once. Make no other call. If a call fails, do not make ' +
-    'it again and do not try another way. A result that says its output has been saved to a file is a success: do ' +
-    'not read the file. When every call has been made, reply with the one word: done\n\n' +
-    calls.map((c, i) => `${i + 1}. ${DRIVE_TOOL}${c.tool} ${JSON.stringify(c.input)}`).join('\n') + '\n';
-}
-
-/* Applies one line of `claude -p --output-format stream-json` to st = {uses: [], results: {}, cost: 0}. */
-function applyDriveLine(st, line) {
-  line = String(line || '').trim();
-  if (!line) return;
-  let e;
-  try { e = JSON.parse(line); } catch (err) { return; }
-  const blocks = e && e.message && Array.isArray(e.message.content) ? e.message.content : [];
-  if (e.type === 'assistant') {
-    for (const b of blocks) if (b && b.type === 'tool_use') st.uses.push({ id: b.id, name: String(b.name), input: b.input || {} });
-  } else if (e.type === 'user') {
-    for (const b of blocks) {
-      if (!b || b.type !== 'tool_result') continue;
-      const text = typeof b.content === 'string' ? b.content
-        : (Array.isArray(b.content) ? b.content.filter(c => c && c.type === 'text').map(c => c.text).join('\n') : '');
-      st.results[b.tool_use_id] = { error: Boolean(b.is_error), text };
-    }
-  } else if (e.type === 'result') {
-    st.done = true;
-    st.cost += Number(e.total_cost_usd) || 0;
-    if (e.is_error) st.error = String(e.result || (e.errors && e.errors.join(' ')) || e.subtype || 'Claude Code reported an error.');
-  }
-}
-
-/* One result of a call, from what Claude Code gave the model: {ok, data} or {ok: false, error}. A result too large
-   for the model (every result is, by MAX_MCP_OUTPUT_TOKENS) was saved to a file, which is read here and deleted.
-   A download comes in one of two shapes: {content: <base64>, id, ...}, or, for some types of file, the bytes in a
-   file of their own ("Binary content (...) saved to <path>") next to {content: "(file sent separately)", id, ...};
-   then data.bytes holds them. */
-function driveResult(fs, path, r) {
-  if (!r) return { ok: false, error: 'No answer came back from Google Drive.' };
-  const take = file => {
-    const data = fs.readFileSync(file);
+/* The first of them that is a program: {file, kind}, or null. */
+function findRclone(fs, list, platform) {
+  for (const c of list) {
     try {
-      fs.unlinkSync(file);
-      // The folders Claude Code made for it, if nothing else is in them.
-      for (let d = path.dirname(file), n = 0; n < 3; n++, d = path.dirname(d)) fs.rmdirSync(d);
-    } catch (e) { /* not empty, or not ours to remove */ }
-    return data;
-  };
-  let text = r.text || '';
-  try {
-    const saved = text.match(/Output has been saved to (.+?[\\/]tool-results[\\/][^\\/\n]+?\.(?:txt|json))\.?\s*(?:\n|$)/);
-    if (saved) text = take(saved[1]).toString('utf8');
-    if (r.error) return { ok: false, error: text.replace(/<\/?tool_use_error>/g, '').slice(0, 400) || 'Google Drive refused the call.' };
-    if (!text.trim()) return { ok: true, data: {} };
-    let data = null;
-    try { data = JSON.parse(text); } catch (e) { /* not JSON alone */ }
-    if (Array.isArray(data)) {   // the result's blocks
-      text = data.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n');
-      data = null;
-    }
-    let bytes = null;
-    const blob = text.match(/Binary content \([^)\n]*\) saved to (.+?[\\/]tool-results[\\/][^\\/\n]+?)\s*(?:\n|$)/);
-    if (blob) {
-      bytes = take(blob[1]);
-      const rest = text.slice(blob.index + blob[0].length).trim();
-      try { data = JSON.parse(rest); } catch (e) { data = null; }
-    }
-    if (data && typeof data === 'object' && !Array.isArray(data)) {
-      if (bytes) data.bytes = bytes;
-      return { ok: true, data };
-    }
-  } catch (e) {
-    return { ok: false, error: `The saved result could not be read: ${e.message}` };
+      if (!fs.statSync(c.file).isFile()) continue;
+      if (platform !== 'win32') fs.accessSync(c.file, fs.constants.X_OK);
+      return c;
+    } catch (e) { /* not there, or not a program */ }
   }
-  return { ok: false, error: text.slice(0, 400) };
+  return null;
 }
 
-/* The results of the calls that were asked for, in order, from a finished run; extra lists Drive calls the model
-   made that were not asked for. */
-function driveResults(fs, path, st, calls) {
-  const used = new Set();
-  const results = calls.map(call => {
-    const key = driveStable(call.input);
-    // If the model made the call twice (it should not), the one that worked is the one that counts.
-    const made = st.uses.filter(u => !used.has(u.id) && u.name === DRIVE_TOOL + call.tool && driveStable(u.input) === key);
-    const use = made.find(u => st.results[u.id] && !st.results[u.id].error) || made[0];
-    if (!use) return { ok: false, error: 'Claude Code did not make this call as it was written.', missed: true };
-    used.add(use.id);
-    return driveResult(fs, path, st.results[use.id]);
-  });
-  const extra = st.uses.filter(u => !used.has(u.id) && u.name.startsWith(DRIVE_TOOL))
-    .map(u => ({ tool: u.name.slice(DRIVE_TOOL.length), input: u.input, result: driveResult(fs, path, st.results[u.id]) }));
-  return { results, extra };
+/* [1, 76, 0] from what `rclone version` prints, or null. */
+function rcloneVersion(text) {
+  const m = /rclone v(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(text || ''));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] || 0)] : null;
+}
+function rcloneOldEnough(v) {
+  if (!v) return false;
+  for (let i = 0; i < 3; i++) { if (v[i] !== RCLONE.min[i]) return v[i] > RCLONE.min[i]; }
+  return true;
 }
 
-/* Makes Drive calls by running Claude Code: returns run(calls, hooks) -> {results, extra, cost}. cli is Lagrange's
-   {runCli, cliErrorMessage}; exe the path of `claude`; dirs the folders files are uploaded from; work a private
-   folder Claude Code runs in. */
-function driveRunner(o) {
-  const { fs, path } = o;
-  const settings = path.join(o.work, 'drive-settings.json');
-  // Every tool but the Drive connector's (and the tool that looks tools up) is refused before it runs.
-  fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: '^(?!mcp__claude_ai_Google_Drive__|ToolSearch$).*', hooks: [{ type: 'command', command: 'exit 2' }] }] } }));
-  return async (calls, hooks = {}) => {
-    const cmd = process.platform === 'win32' && /\.cmd$/i.test(o.exe);
-    const quote = a => (cmd ? `"${String(a).replace(/"/g, '""')}"` : a);
-    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--model', quote(o.model || DRIVE_MODEL),
-      '--setting-sources', quote(''), '--settings', quote(settings), '--system-prompt', quote(DRIVE_SYSTEM)];
-    for (const d of o.dirs || []) args.push('--add-dir', quote(d));
-    args.push('--allowedTools', quote([...new Set(calls.map(c => DRIVE_TOOL + c.tool))].join(',')));
-    const st = { uses: [], results: {}, cost: 0, done: false, error: null };
-    const stop = new AbortController();
-    const onAbort = () => stop.abort();
-    if (hooks.signal) { if (hooks.signal.aborted) stop.abort(); else hooks.signal.addEventListener('abort', onAbort, { once: true }); }
-    let late = false;
-    const timer = setTimeout(() => { late = true; stop.abort(); }, (o.limits || DRIVE_LIMITS).runMs);
-    let ended;
-    try {
-      ended = await o.cli.runCli('claude', o.exe, args, drivePrompt(calls), line => {
-        applyDriveLine(st, line);
-        if (o.onLine) o.onLine(line);   // for plugins-tests/drive-sync-cli.js
-        if (hooks.onStep) hooks.onStep(Object.keys(st.results).length);
-      }, { signal: stop.signal, cwd: o.work, env: { MAX_MCP_OUTPUT_TOKENS: '1' } });
-    } catch (e) {
-      // Stopped part-way: the calls that were answered still count (and their saved results are read and deleted).
-      try { e.partial = driveResults(fs, path, st, calls).results; } catch (err) { /* nothing to salvage */ }
-      if (!late) throw e;
-      throw new Error('Claude Code took too long over one batch and was stopped. Run it again to continue.');
-    } finally {
-      clearTimeout(timer);
-      if (hooks.signal) hooks.signal.removeEventListener('abort', onAbort);
+/* ---------- Downloading rclone ---------- */
+
+/* Where in a zip file the entry called `want` (in any folder) is: {offset, packed, size, method}. `read(pos, len)`
+   gives bytes of the file; `total` is its length. Throws if the zip is not one, or has no such entry. */
+function zipEntry(read, total, want) {
+  const tailLen = Math.min(total, 66000), tail = read(total - tailLen, tailLen);
+  let at = -1;
+  for (let i = tail.length - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { at = i; break; }
+  if (at < 0) throw new Error('not a zip file');
+  const count = tail.readUInt16LE(at + 10), size = tail.readUInt32LE(at + 12), start = tail.readUInt32LE(at + 16);
+  if (start === 0xffffffff || start + size > total) throw new Error('a zip file of a kind that is not read here');
+  const dir = read(start, size);
+  for (let p = 0, n = 0; n < count && p + 46 <= dir.length; n++) {
+    if (dir.readUInt32LE(p) !== 0x02014b50) throw new Error('a damaged zip file');
+    const method = dir.readUInt16LE(p + 10), packed = dir.readUInt32LE(p + 20), full = dir.readUInt32LE(p + 24);
+    const nameLen = dir.readUInt16LE(p + 28), extraLen = dir.readUInt16LE(p + 30), noteLen = dir.readUInt16LE(p + 32), local = dir.readUInt32LE(p + 42);
+    const name = dir.toString('utf8', p + 46, p + 46 + nameLen);
+    if (name.split('/').pop() === want && !name.endsWith('/')) {
+      const head = read(local, 30);
+      if (head.readUInt32LE(0) !== 0x04034b50) throw new Error('a damaged zip file');
+      if (method !== 0 && method !== 8) throw new Error('a zip file packed in a way that is not read here');
+      return { offset: local + 30 + head.readUInt16LE(26) + head.readUInt16LE(28), packed, size: full, method };
     }
-    const out = driveResults(fs, path, st, calls);
-    if (st.error || (!st.uses.length && (ended.code || !st.done))) {
-      throw new Error(o.cli.cliErrorMessage('claude', st.error || ended.stderr || `exit code ${ended.code}`));
-    }
-    return Object.assign(out, { cost: st.cost });
-  };
+    p += 46 + nameLen + extraLen + noteLen;
+  }
+  throw new Error(`there is no ${want} in the zip file`);
 }
 
-/* Whether Claude Code is here and has the Google Drive connector: {ok: true, exe} or {ok: false, problem, steps}.
-   cli is Lagrange's {findCli, runCli}; custom a path to `claude` set in Lagrange's settings. */
-async function driveCheck(cli, custom, seen) {
-  seen = seen || {};
-  const steps = [
-    'Install Claude Code (claude.com/code).',
-    'Run “claude” once in a terminal and sign in with your Claude account (Pro or Max).',
-    'Connect Google Drive to that account: on claude.ai, open Settings → Connectors, choose Google Drive and Connect.',
-    'Run this command again.',
-  ];
-  let exe;
-  try { exe = cli.findCli('claude', custom); } catch (e) { return { ok: false, problem: e.message, steps: [] }; }
-  if (!exe) {
-    return { ok: false, problem: custom ? `Claude Code was not found at ${custom}, the path set in Lagrange’s settings. Correct it there, or empty it to have it looked for.`
-      : 'Claude Code was not found on this computer (looked in the PATH and in the usual folders). If it is installed somewhere else, give its full path in Lagrange’s settings (choose the Claude subscription there; the box is called “Claude Code”).', steps };
-  }
-  seen.exe = exe;
-  let text = '', ended, asked = 'claude auth status';
-  // A Claude Code that does not answer (it is waiting for a sign-in in a terminal, or for the network) is stopped.
-  const ask = (args, onLine) => {
-    const stop = new AbortController(), timer = setTimeout(() => stop.abort(), DRIVE_LIMITS.checkMs);
-    asked = `claude ${args.join(' ')}`;
-    return Promise.resolve(cli.runCli('claude', exe, args, '', onLine, { signal: stop.signal })).finally(() => clearTimeout(timer));
-  };
-  try {
-    // `claude auth status` prints JSON; an older Claude Code without it is asked for its connectors anyway.
-    let auth = '';
-    await ask(['auth', 'status'], line => { auth += `${line}\n`; });
-    let who = null;
-    try { who = JSON.parse(auth); } catch (e) { /* not JSON */ }
-    seen.auth = who ? (who.loggedIn === false ? 'not signed in' : String(who.authMethod || 'signed in')) : 'unknown (an older Claude Code)';
-    if (who && who.loggedIn === false) return { ok: false, problem: 'Claude Code is not signed in.', steps: steps.slice(1) };
-    if (who && who.loggedIn && who.authMethod && who.authMethod !== 'claude.ai') {
-      return { ok: false, problem: 'Claude Code is signed in with an API key. Connectors such as Google Drive belong to a Claude account: sign in with one (run “claude”, then /login).', steps: steps.slice(2) };
-    }
-    ended = await ask(['mcp', 'list'], line => { text += `${line}\n`; });
-  } catch (e) {
-    if (e && e.name === 'AbortError') {
-      return { ok: false, problem: `Claude Code did not answer within ${Math.round(DRIVE_LIMITS.checkMs / 1000)} seconds (“${asked}”). Run that command in a terminal to see what it is waiting for: often a sign-in, or a connector that does not respond.`, steps: [] };
-    }
-    return { ok: false, problem: e.message, steps };
-  }
-  const line = text.split('\n').find(l => /google drive/i.test(l));
-  // What Claude Code said of the connector, without its address.
-  seen.connector = line ? line.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim().slice(0, 120) : `not listed (${text.split('\n').filter(l => l.trim()).length} lines from “claude mcp list”)`;
-  if (line && /connected/i.test(line) && !/not connected|needs auth|failed/i.test(line)) return { ok: true, exe };
-  if (line) return { ok: false, problem: 'Your Claude account has the Google Drive connector, but it is not signed in to Google.', steps: steps.slice(2) };
-  if (/log ?in|sign ?in|authenticat/i.test(`${text} ${ended.stderr}`) && !/claude\.ai/i.test(text)) {
-    return { ok: false, problem: 'Claude Code is not signed in.', steps: steps.slice(1) };
-  }
-  return { ok: false, problem: 'Claude Code is here, but your Claude account has no Google Drive connector (or Claude Code is signed in with an API key, not a Claude account).', steps: steps.slice(1) };
-}
-
-/* The bytes of a download's result, or null if it has none. */
-function driveBytesOf(data) {
-  if (data && data.bytes) return data.bytes;
-  return data && typeof data.content === 'string' && data.content !== '(file sent separately)' ? Buffer.from(data.content, 'base64') : null;
-}
-
-function driveQuote(s) {
-  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-}
-
-/* A manifest that was downloaded, checked: the object, or an Error to throw. */
-function driveManifest(data) {
-  let m;
-  try { m = JSON.parse(driveBytesOf(data).toString('utf8')); } catch (e) { m = null; }
-  if (!m || typeof m !== 'object' || m.app !== 'scriptorium' || !m.files || typeof m.files !== 'object' || Array.isArray(m.files)) {
-    return new Error('The backup’s list of files (scriptorium-manifest.json) in Google Drive could not be read.');
-  }
-  if (!(Number(m.schema) <= DRIVE_SCHEMA)) return new Error('This backup was written by a newer Scriptorium. Update Scriptorium on this computer, then try again.');
-  for (const [rel, f] of Object.entries(m.files)) {
-    if (!driveRule(rel) || !f || !/^[0-9a-f]{64}$/.test(f.sha256) || !(f.size >= 0) || !(f.id === null || typeof f.id === 'string')) delete m.files[rel];
-  }
-  m.seq = Number(m.seq) || 0;
-  m.folders = m.folders && typeof m.folders === 'object' ? m.folders : {};
-  m.deleted = Array.isArray(m.deleted) ? m.deleted : [];
-  m.stale = Array.isArray(m.stale) ? m.stale.filter(id => typeof id === 'string') : [];
-  return m;
-}
-
-/* The name of the backup the vault in dir is tied to in the Drive folder `folder` (a retrieved vault keeps its
-   backup's name even if its own folder is called something else), or null if it has not been synced there. */
-function driveLinked(fs, path, dir, folder) {
-  try {
-    const s = JSON.parse(fs.readFileSync(path.join(dir, DRIVE_STATE), 'utf8'));
-    return s && s.schema === DRIVE_SCHEMA && s.rootName === folder && typeof s.vault === 'string' && s.vault && s.folderId ? s.vault : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-/* Why a backup made one way is not written to the other way. */
-function driveOtherWay(via) {
-  return via === 'direct'
-    ? 'This backup was made with the direct Google sign-in. Through Claude Code it would be written in a way the direct sign-in cannot read afterwards: choose “Google sign-in, directly” in Settings → Scriptorium to work with it.'
-    : 'This backup was made through Claude Code. Choose “Through Claude Code” in Settings → Scriptorium to work with it.';
-}
-
-const DRIVE_EMPTY = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';   // the SHA-256 of no bytes
-
-/* One vault and its copy in Drive. o: {fs, path, crypto, dir, work, run, folder, vault, device, say, signal, now,
-   limits}. run(calls, hooks) makes Drive calls (driveRunner, or a pretend Drive in the tests); say({stage, done,
-   total}) reports progress; work is a private folder for the manifest on its way up. */
-class DriveSync {
-  constructor(o) {
-    Object.assign(this, { limits: DRIVE_LIMITS, now: () => new Date(), say: () => {}, folder: DRIVE_ROOT }, o);
-    this.runs = 0;
-    this.cost = 0;
-    this.failed = [];
-    this.done = { uploaded: 0, downloaded: 0, conflicts: [], deletedHere: 0, deletedThere: 0, bytesUp: 0, bytesDown: 0 };
-    this.extraManifests = [];
-    // What this way of reaching Drive can do (driveDirect: run.caps), and which way it is: a backup belongs to the
-    // way that made it, because the direct connection cannot see files that Claude's connector stored.
-    this.caps = (this.run && this.run.caps) || {};
-    this.via = this.caps.via || 'claude';
-    this.mime = this.caps.mime || driveMime;
-    this.platform = this.platform || (typeof process !== 'undefined' ? process.platform : '');
-    this.state = this.loadState();
-  }
-
-  loadState() {
-    let s = null;
-    try { s = JSON.parse(this.fs.readFileSync(this.path.join(this.dir, DRIVE_STATE), 'utf8')); } catch (e) { /* none yet */ }
-    if (!s || typeof s !== 'object' || s.schema !== DRIVE_SCHEMA || s.rootName !== this.folder || s.vault !== this.vault) s = {};
-    // Backed up the other way before: that backup is another folder in Drive, and nothing remembered of it holds here.
-    if (s.folderId && (s.via || 'claude') !== this.via) { this.switched = s.via || 'claude'; s = {}; }
-    return {
-      schema: DRIVE_SCHEMA, via: this.via, rootName: this.folder, vault: this.vault, rootId: s.rootId || null, folderId: s.folderId || null,
-      seq: Number(s.seq) || 0, manifestId: s.manifestId || null, synced: s.synced || null,
-      base: s.base && typeof s.base === 'object' ? s.base : {}, hashes: s.hashes && typeof s.hashes === 'object' ? s.hashes : {},
-      journal: s.journal && typeof s.journal === 'object' ? s.journal : null,
-      untidy: Array.isArray(s.untidy) ? s.untidy.filter(id => typeof id === 'string') : [],
-    };
-  }
-
-  /* Written to a temporary file and renamed, so a crash leaves the old one or the new one, never half of one. */
-  saveState() {
-    const file = this.path.join(this.dir, DRIVE_STATE);
-    this.fs.mkdirSync(this.path.dirname(file), { recursive: true });
-    if (this.w && this.dirty) this.state.journal = { onSeq: this.remote ? this.remote.seq : 0, manifest: this.w };
-    this.fs.writeFileSync(`${file}.scriptorium-tmp`, JSON.stringify(this.state));
-    this.fs.renameSync(`${file}.scriptorium-tmp`, file);
-  }
-
-  check() {
-    if (this.signal && this.signal.aborted) { const e = new Error('Stopped.'); e.name = 'AbortError'; throw e; }
-  }
-
-  async batch(calls, onStep) {
-    this.check();
-    this.runs++;
-    const out = await this.run(calls, { signal: this.signal, onStep });
-    this.cost += out.cost || 0;
-    // A file or folder made by a call that was not asked for is ours to tidy away: it goes to Drive's trash later.
-    for (const x of out.extra || []) {
-      if (x.tool === 'create_file' && x.result.ok && typeof x.result.data.id === 'string' && this.w) { this.w.stale.push(x.result.data.id); this.dirty = true; }
-    }
-    return out.results;
-  }
-
-  /* One call that has to work: tried up to limits.tries times. */
-  async must(call, what) {
-    let why = '';
-    for (let n = 0; n < this.limits.tries; n++) {
-      const [r] = await this.batch([call]);
-      if (r.ok) return r.data;
-      why = r.error;
-    }
-    throw new Error(`${what}: ${why}`);
-  }
-
-  /* Runs call(op) for every op, in batches, trying again those that fail; done(op, data) takes each result and may
-     throw to refuse it. Those that still fail are added to this.failed and returned. */
-  async each(ops, o) {
-    let left = ops.slice(), finished = 0;
-    const total = ops.length, flying = new Map();
-    const tell = () => this.say({ stage: o.stage, done: Math.min(total, finished + [...flying.values()].reduce((a, n) => a + n, 0)), total });
-    for (let attempt = 1; left.length && attempt <= this.limits.tries; attempt++) {
-      const again = [], groups = driveBatches(left, o.size, this.limits);
-      let next = 0, halted = null;
-      // Up to limits.parallel runs of Claude Code at once, each with its own batch.
-      const worker = async () => {
-        while (next < groups.length && !halted) {
-          const group = groups[next++];
-          let results;
-          try {
-            flying.set(group, 0);
-            tell();
-            results = await this.batch(group.map(o.call), n => { flying.set(group, Math.min(group.length, n)); tell(); });
-          } catch (e) {
-            halted = halted || e;
-            results = Array.isArray(e.partial) ? e.partial : null;   // what a stopped run did before it stopped is kept
-            if (!results) return;
-          } finally {
-            flying.delete(group);
-          }
-          for (let i = 0; i < group.length; i++) {
-            const op = group[i], r = results[i];
-            try {
-              if (!r.ok) throw new Error(r.error);
-              await o.done(op, r.data);
-              finished++;
-            } catch (e) {
-              op.error = e.message;
-              again.push(op);
-            }
-          }
-          this.saveState();
-          tell();
-        }
-      };
-      await Promise.all(Array.from({ length: Math.max(1, Math.min(this.limits.parallel || 1, groups.length)) }, worker));
-      if (halted) { this.saveState(); throw halted; }
-      left = again;
-    }
-    for (const op of left) this.failed.push({ path: op.rel || op.title || '', why: `${o.stage}: ${op.error}` });
-    return left;
-  }
-
-  async find(query) {
-    const files = [];
-    let token = null;
-    for (let page = 0; page < 50; page++) {
-      const input = { query, excludeContentSnippets: true, pageSize: 100 };
-      if (token) input.pageToken = token;
-      const data = await this.must({ tool: 'search_files', input }, 'Google Drive could not be searched');
-      for (const f of Array.isArray(data.files) ? data.files : []) if (f && typeof f.id === 'string') files.push(f);
-      token = data.nextPageToken || null;
-      if (!token) break;
-    }
-    return files;
-  }
-
-  async mkdir(title, parentId) {
-    const data = await this.must({ tool: 'create_file', input: { title, parentId, contentMimeType: DRIVE_FOLDER_TYPE } }, `The folder ${title} could not be made in Google Drive`);
-    if (typeof data.id !== 'string' || data.mimeType !== DRIVE_FOLDER_TYPE) throw new Error(`The folder ${title} could not be made in Google Drive.`);
-    return data.id;
-  }
-
-  async folderNamed(title, parentId) {
-    const found = (await this.find(`title = '${driveQuote(title)}' and parentId = '${driveQuote(parentId)}' and mimeType = '${DRIVE_FOLDER_TYPE}'`))
-      .filter(f => f.title === title && f.mimeType === DRIVE_FOLDER_TYPE && !f.trashed)
-      .sort((a, b) => String(a.createdTime) < String(b.createdTime) ? -1 : 1);
-    return found.length ? found[0].id : null;
-  }
-
-  manifestQuery(folderId) {
-    return `title = '${DRIVE_MANIFEST}' and parentId = '${driveQuote(folderId)}'`;
-  }
-
-  /* Finds the vault's folder in Drive and its manifest: sets this.remote (the manifest, or null) and the ids in
-     this.state. With create, the folders are made if they are not there. */
-  async locate(create) {
-    const st = this.state;
-    let manifests = null, early = null;
-    this.say({ stage: 'Looking in Google Drive' });
-    if (st.folderId) {
-      // Known from last time: one run checks that the folder is still there, looks for the manifest, and downloads
-      // the manifest this device saw last, which is the current one unless another device has backed up since.
-      const calls = [
-        { tool: 'get_file_metadata', input: { fileId: st.folderId, excludeContentSnippets: true } },
-        { tool: 'search_files', input: { query: this.manifestQuery(st.folderId), excludeContentSnippets: true, pageSize: 100 } },
-      ];
-      if (st.manifestId) calls.push({ tool: 'download_file_content', input: { fileId: st.manifestId } });
-      const [meta, search, known] = await this.batch(calls);
-      if (meta.ok && meta.data.id === st.folderId && !meta.data.trashed && search.ok) {
-        manifests = Array.isArray(search.data.files) ? search.data.files : [];
-        if (known && known.ok && known.data.id === st.manifestId) early = known.data;
-      } else if ((meta.ok && search.ok) || (!meta.ok && /not found|404/i.test(meta.error))) { st.folderId = null; st.rootId = null; }
-      else throw new Error(`Google Drive could not be read: ${(meta.ok ? search : meta).error}`);
-    }
-    if (!st.folderId) {
-      st.rootId = await this.folderNamed(this.folder, 'root');
-      if (!st.rootId && create) st.rootId = await this.mkdir(this.folder, 'root');
-      if (st.rootId) {
-        st.folderId = await this.folderNamed(this.vault, st.rootId);
-        if (!st.folderId && create) { st.folderId = await this.mkdir(this.vault, st.rootId); manifests = []; }
+/* Fetches a URL into a file with https, following redirects to rclone's and GitHub's servers only.
+   Resolves {bytes, sha256}. */
+function syncFetch(o, url, file, hops) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch (e) { reject(new Error('a bad address')); return; }
+    if (u.protocol !== 'https:' || !RCLONE.hosts.includes(u.hostname)) { reject(new Error(`a redirect to ${u.hostname}, which is not one of rclone’s servers`)); return; }
+    const req = o.https.get(u, { headers: { 'User-Agent': 'Scriptorium', Accept: 'application/octet-stream' } }, res => {
+      const s = res.statusCode;
+      if (s >= 300 && s < 400 && res.headers.location) {
+        res.resume();
+        if ((hops || 0) >= 5) { reject(new Error('too many redirects')); return; }
+        let next;
+        try { next = new URL(res.headers.location, u).toString(); } catch (e) { reject(new Error('a bad redirect')); return; }
+        syncFetch(o, next, file, (hops || 0) + 1).then(resolve, reject);
+        return;
       }
-      if (st.folderId && !manifests) manifests = await this.find(this.manifestQuery(st.folderId));
-    }
-    this.remote = null;
-    this.extraManifests = [];
-    manifests = (manifests || []).filter(f => f && f.title === DRIVE_MANIFEST && !f.trashed && typeof f.id === 'string')
-      .sort((a, b) => String(a.createdTime) > String(b.createdTime) ? -1 : 1);
-    if (manifests.length) {
-      const data = early && manifests[0].id === st.manifestId ? early
-        : await this.must({ tool: 'download_file_content', input: { fileId: manifests[0].id } }, 'The backup’s list of files could not be downloaded');
-      const m = driveManifest(data);
-      if (m instanceof Error) throw m;
-      this.remote = m;
-      this.remoteId = manifests[0].id;
-      this.extraManifests = manifests.slice(1).map(f => f.id);
-    }
-    return this.remote;
-  }
-
-  /* The manifest being worked on: the remote one (or an empty one), or the one a stopped run left, if the remote
-     has not moved since. */
-  working() {
-    const j = this.state.journal, seq = this.remote ? this.remote.seq : 0;
-    this.dirty = false;
-    if (j && j.onSeq === seq && j.manifest && j.manifest.files && (this.remote || !this.state.folderId || j.manifest.folder === this.state.folderId)) {
-      this.w = j.manifest;
-      this.dirty = true;
-    } else {
-      this.state.journal = null;
-      // No backup in Drive (none yet, or its folder was removed): what this device remembers of one no longer holds,
-      // and must not be read as "deleted there".
-      if (!this.remote) this.state.base = {};
-      this.w = this.remote ? JSON.parse(JSON.stringify(this.remote))
-        : { schema: DRIVE_SCHEMA, app: 'scriptorium', vault: this.vault, seq: 0, folders: {}, files: {}, deleted: [], stale: [] };
-    }
-    for (const k of ['folders', 'files']) if (!this.w[k] || typeof this.w[k] !== 'object') this.w[k] = {};
-    for (const k of ['deleted', 'stale']) if (!Array.isArray(this.w[k])) this.w[k] = [];
-  }
-
-  scan() {
-    const s = driveScan(this.fs, this.path, this.crypto, this.dir, this.state.hashes, this.limits);
-    this.state.hashes = s.hashes;
-    this.local = s.files;
-    this.skipped = s.skipped;
-    // A file here that is not backed up (too large, unreadable) is not "deleted here": it is left alone on both sides.
-    const out = new Set(s.skipped.map(x => x.path));
-    this.plan = drivePlan(this.local, this.w.files, this.state.base);
-    this.plan.deleteRemote = this.plan.deleteRemote.filter(rel => !out.has(rel));
-    return this.plan;
-  }
-
-  /* Looks at both sides and says what a sync would do. Nothing is changed, here or in Drive. */
-  async prepare() {
-    await this.locate(false);
-    this.working();
-    this.scan();
-    const size = list => list.reduce((n, rel) => n + ((this.local[rel] || this.w.files[rel] || {}).size || 0), 0);
-    const p = this.plan;
-    return {
-      plan: p, skipped: this.skipped, remote: this.remote, first: !this.remote, resumed: this.dirty,
-      upBytes: size(p.upload), downBytes: p.download.concat(p.conflicts).reduce((n, rel) => n + (this.w.files[rel].size || 0), 0),
-      nothing: Boolean(this.remote) && !this.dirty && !p.upload.length && !p.download.length && !p.conflicts.length && !p.deleteLocal.length && !p.deleteRemote.length
-        && !this.extraManifests.length && !this.w.stale.length,
-    };
-  }
-
-  hashNow(rel) {
-    try { return driveHashFile(this.fs, this.crypto, this.path.join(this.dir, rel)); } catch (e) { return null; }
-  }
-
-  /* Whether the disk the vault is on holds "A.md" and "a.md" to be one file (Windows and macOS, as a rule). */
-  foldsCase() {
-    if (this.folds !== undefined) return this.folds;
-    const { fs, path } = this, name = `scriptorium-CaseProbe-${process.pid}.scriptorium-tmp`;
-    try {
-      fs.mkdirSync(this.dir, { recursive: true });
-      fs.writeFileSync(path.join(this.dir, name), '');
-      this.folds = fs.existsSync(path.join(this.dir, name.toLowerCase()));
-      fs.unlinkSync(path.join(this.dir, name));
-    } catch (e) { this.folds = this.platform === 'win32' || this.platform === 'darwin'; }
-    return this.folds;
-  }
-
-  /* Puts downloaded bytes at rel. If the file here is not what the plan saw (it was changed on both sides, or while
-     the sync ran), it is first renamed to a conflict name: nothing is overwritten that is not in Drive too. */
-  place(rel, bytes, entry, expected) {
-    const { fs, path } = this, target = path.join(this.dir, rel);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    const now = fs.existsSync(target) ? this.hashNow(rel) : null;
-    if (now && now !== entry.sha256 && now !== expected) {
-      const name = driveConflictName(rel, this.device, this.now(), r => fs.existsSync(path.join(this.dir, r)));
-      fs.renameSync(target, path.join(this.dir, name));
-      this.done.conflicts.push({ path: rel, kept: name });
-    }
-    if (Buffer.isBuffer(bytes)) fs.writeFileSync(`${target}.scriptorium-tmp`, bytes);
-    else {
-      // A large download, in a file of its own: moved here, or copied if it is on another disk.
-      try { fs.renameSync(bytes.file, `${target}.scriptorium-tmp`); } catch (e) { fs.copyFileSync(bytes.file, `${target}.scriptorium-tmp`); }
-    }
-    fs.renameSync(`${target}.scriptorium-tmp`, target);
-    if (entry.mtime > 0) { try { fs.utimesSync(target, new Date(entry.mtime), new Date(entry.mtime)); } catch (e) { /* the time is only a convenience */ } }
-    this.state.base[rel] = entry.sha256;
-  }
-
-  /* Brings in what changed in Drive: downloads (checked against the manifest's SHA-256), conflicts, and deletions
-     (the file here goes to the vault's .trash folder). */
-  async pull() {
-    const { fs, path } = this, p = this.plan, files = this.w.files;
-    const conflicts = new Set(p.conflicts);
-    const ops = p.download.concat(p.conflicts).map(rel => ({ rel, entry: files[rel], expected: conflicts.has(rel) ? null : (this.local[rel] ? this.local[rel].sha256 : null) }));
-    // bytes: a Buffer, or {file, sha256, size} for a large download that the direct connection wrote to a file.
-    const got = (op, bytes) => {
-      const big = !Buffer.isBuffer(bytes);
-      try {
-        const sha = big ? bytes.sha256 : this.crypto.createHash('sha256').update(bytes).digest('hex');
-        const size = big ? bytes.size : bytes.length;
-        if (sha !== op.entry.sha256 || size !== op.entry.size) throw new Error('what came from Google Drive does not match the backup’s SHA-256, so it was not written');
-        this.place(op.rel, bytes, op.entry, op.expected);
-        this.done.downloaded++;
-        this.done.bytesDown += size;
-      } finally {
-        if (big) { try { fs.unlinkSync(bytes.file); } catch (e) { /* moved into place */ } }
-      }
-    };
-    // A file that cannot be written here under its name is said so once, not asked of Drive three times: a name
-    // Windows refuses, or two names that differ only in capitals where this disk holds them to be one.
-    const blocked = new Set();
-    const fold = this.foldsCase() ? rel => rel.normalize('NFC').toLowerCase() : null;
-    const seen = new Map();
-    if (fold) for (const rel of Object.keys(this.local)) seen.set(fold(rel), rel);
-    for (const op of ops) {
-      let why = driveNameProblem(op.rel, this.platform);
-      if (!why && fold) {
-        const other = seen.get(fold(op.rel));
-        if (other && other !== op.rel) why = `this computer’s disk treats it as the same file as “${other}” (the names differ only in capital letters); rename one of them on the computer it came from`;
-        else seen.set(fold(op.rel), op.rel);
-      }
-      if (why) { blocked.add(op); this.failed.push({ path: op.rel, why: `Downloading: ${why}` }); }
-    }
-    if (blocked.size) ops.splice(0, ops.length, ...ops.filter(op => !blocked.has(op)));
-    const empty = ops.filter(op => op.entry.id === null);
-    for (const op of empty) {
-      try { if (op.entry.sha256 !== DRIVE_EMPTY) throw new Error('the backup has no copy of it'); got(op, Buffer.alloc(0)); }
-      catch (e) { this.failed.push({ path: op.rel, why: `Downloading: ${e.message}` }); }
-    }
-    await this.each(ops.filter(op => op.entry.id !== null), {
-      stage: 'Downloading', size: op => op.entry.size,
-      call: op => ({ tool: 'download_file_content', input: { fileId: op.entry.id } }),
-      done: (op, data) => {
-        const bytes = data.file ? { file: data.file, sha256: data.sha256, size: data.size } : driveBytesOf(data);
-        if (data.id !== op.entry.id || !bytes) throw new Error('Google Drive answered with something else');
-        got(op, bytes);
-      },
-    });
-    for (const rel of p.deleteLocal) {
-      const target = path.join(this.dir, rel);
-      try {
-        if (this.hashNow(rel) !== this.local[rel].sha256) continue;   // changed since it was looked at: kept, and sent next time
-        let to = path.join(this.dir, '.trash', rel);
-        for (let n = 2; fs.existsSync(to); n++) to = path.join(this.dir, '.trash', `${rel}.${n}`);
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        fs.renameSync(target, to);
-        delete this.state.base[rel];
-        this.done.deletedHere++;
-      } catch (e) {
-        this.failed.push({ path: rel, why: `Could not be moved to .trash: ${e.message}` });
-      }
-    }
-    this.saveState();
-  }
-
-  /* The Drive folders for these vault folders ('' is the vault's own), made level by level where they are missing. */
-  async folders(dirs) {
-    const w = this.w;
-    w.folders[''] = this.state.folderId;
-    const need = new Set();
-    for (const d of dirs) for (let p = d; p && !w.folders[p]; p = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '') need.add(p);
-    const depth = p => p.split('/').length;
-    for (const level of [...new Set([...need].map(depth))].sort((a, b) => a - b)) {
-      const ops = [...need].filter(p => depth(p) === level).sort().map(rel => ({ rel, title: rel.slice(rel.lastIndexOf('/') + 1), parent: rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '' }))
-        .filter(op => w.folders[op.parent]);
-      await this.each(ops, {
-        stage: 'Making folders',
-        call: op => ({ tool: 'create_file', input: { title: op.title, parentId: w.folders[op.parent], contentMimeType: DRIVE_FOLDER_TYPE } }),
-        done: (op, data) => {
-          if (typeof data.id !== 'string' || data.mimeType !== DRIVE_FOLDER_TYPE) throw new Error('Google Drive did not make the folder');
-          w.folders[op.rel] = data.id;
-          this.dirty = true;
-        },
+      if (s !== 200) { res.resume(); reject(new Error(`the server answered ${s}`)); return; }
+      const hash = o.crypto.createHash('sha256'), out = o.fs.createWriteStream(file, { mode: 0o600 });
+      let bytes = 0;
+      res.on('data', chunk => {
+        bytes += chunk.length; hash.update(chunk);
+        if (bytes > o.asset.bytes + 1024) { req.destroy(new Error('the download is larger than the file it should be')); return; }
+        if (o.onProgress) o.onProgress(bytes, o.asset.bytes);
       });
-    }
-  }
-
-  /* Sends what changed here: uploads (new files, and changed ones, whose old copy goes to Drive's trash when the
-     new manifest is up) and deletions (the copy in Drive is moved to _trash/<date>/). */
-  async push() {
-    const { path } = this, w = this.w, p = this.plan;
-    const folderOf = rel => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '');
-    // Where the connection can put new content into a file that is there, a changed file keeps its Drive file.
-    const upload = p.upload.map(rel => ({ rel, title: rel.slice(rel.lastIndexOf('/') + 1), folder: folderOf(rel), local: this.local[rel],
-      replaces: this.caps.update && w.files[rel] && w.files[rel].id ? w.files[rel].id : null }));
-    const record = (op, id) => {
-      const old = w.files[op.rel];
-      if (old && old.id && old.id !== id) w.stale.push(old.id);
-      w.files[op.rel] = { sha256: op.local.sha256, size: op.local.size, mtime: op.local.mtime, id, device: this.device };
-      this.state.base[op.rel] = op.local.sha256;
-      this.dirty = true;
-      this.done.uploaded++;
-      this.done.bytesUp += op.local.size;
-    };
-    for (const op of upload.filter(o => o.local.size === 0)) record(op, null);   // Drive takes no empty file: the manifest alone records it
-    const real = upload.filter(o => o.local.size > 0);
-    await this.folders(real.map(op => op.folder));
-    const ready = real.filter(op => w.folders[op.folder]);
-    for (const op of real) if (!w.folders[op.folder]) this.failed.push({ path: op.rel, why: 'Uploading: its folder could not be made in Google Drive' });
-    await this.each(ready, {
-      stage: 'Uploading', size: op => op.local.size,
-      call: op => {
-        const input = {
-          title: op.title, parentId: w.folders[op.folder], contentMimeType: this.mime(op.title),
-          disableConversionToGoogleType: true,
-          base64Content: `sha256:${op.local.sha256}:${path.join(this.dir, op.rel).split(path.sep).join('/')}`,
-        };
-        return op.replaces ? { tool: 'update_content', input: Object.assign({ fileId: op.replaces }, input) } : { tool: 'create_file', input };
-      },
-      done: (op, data) => {
-        if (typeof data.id !== 'string') throw new Error('Google Drive gave no id for it');
-        if (op.replaces && data.id === op.replaces) {
-          if (String(data.fileSize) !== String(op.local.size)) throw new Error('what arrived in Google Drive is not the file that was sent');
-        } else if (String(data.fileSize) !== String(op.local.size) || String(data.title).normalize('NFC') !== op.title.normalize('NFC') || data.parentId !== w.folders[op.folder]
-            || data.mimeType !== this.mime(op.title)) {
-          w.stale.push(data.id);
-          this.dirty = true;
-          throw new Error('what arrived in Google Drive is not the file that was sent');
-        }
-        record(op, data.id);
-      },
+      res.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', () => resolve({ bytes, sha256: hash.digest('hex') }));
+      res.pipe(out);
     });
-    const gone = p.deleteRemote.filter(rel => w.files[rel]);
-    if (gone.length) {
-      const d = this.now(), day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      const bin = `_trash/${day}`;
-      const moved = (rel, id) => {
-        w.deleted.push({ path: rel, sha256: w.files[rel].sha256, size: w.files[rel].size, id, folder: id ? bin : null, at: d.toISOString(), device: this.device });
-        delete w.files[rel];
-        delete this.state.base[rel];
-        this.dirty = true;
-        this.done.deletedThere++;
-      };
-      for (const rel of gone.filter(rel => !w.files[rel].id)) moved(rel, null);
-      const ops = gone.filter(rel => w.files[rel]).map(rel => ({ rel, id: w.files[rel].id }));
-      if (ops.length) {
-        await this.folders([bin]);
-        if (!w.folders[bin]) for (const op of ops) this.failed.push({ path: op.rel, why: 'Deleting: the _trash folder could not be made in Google Drive' });
-        else {
-          await this.each(ops, {
-            stage: 'Moving deleted files to _trash',
-            call: op => ({ tool: 'update_file', input: { fileId: op.id, parentId: w.folders[bin] } }),
-            done: (op, data) => {
-              if (data.id !== op.id || data.parentId !== w.folders[bin]) throw new Error('Google Drive did not move it');
-              moved(op.rel, op.id);
-            },
-          });
-        }
-      }
+    req.on('error', reject);
+    req.setTimeout(60000, () => req.destroy(new Error('the server stopped answering')));
+    if (o.signal) {
+      if (o.signal.aborted) req.destroy(new Error('stopped'));
+      else o.signal.addEventListener('abort', () => req.destroy(new Error('stopped')), { once: true });
     }
-    for (const rel of p.deleteRemote) if (!w.files[rel]) delete this.state.base[rel];
-  }
+  });
+}
 
-  /* Uploads the manifest as it now is, then sends the old manifest and the old copies of changed files to Drive's
-     trash. Until the new manifest is up, the old one stands and describes files that are all still there. */
-  async publish() {
-    const { fs, path } = this, w = this.w, st = this.state;
-    this.say({ stage: 'Writing the list of files' });
-    // The direct connection writes the new list into the old one's Drive file; the other way uploads a new file.
-    const inPlace = this.caps.update && this.remoteId ? this.remoteId : null;
-    const stale = w.stale.concat(st.untidy, this.extraManifests, this.remoteId && !inPlace ? [this.remoteId] : []);
-    w.via = this.via;
-    w.schema = DRIVE_SCHEMA;
-    w.app = 'scriptorium';
-    w.vault = this.vault;
-    w.seq = (this.remote ? this.remote.seq : 0) + 1;
-    w.updated = this.now().toISOString();
-    w.device = this.device;
-    w.root = st.rootId;
-    w.folder = st.folderId;
-    w.stale = [];
-    const file = path.join(this.work, DRIVE_MANIFEST);
-    const bytes = Buffer.from(JSON.stringify(w, null, 1), 'utf8');
-    fs.writeFileSync(file, bytes);
-    const sha = this.crypto.createHash('sha256').update(bytes).digest('hex');
-    let data;
+/* Downloads the pinned rclone for this computer, checks it, and unpacks the program to o.exe.
+   o: {fs, path, crypto, zlib, https, asset, exe, onProgress, signal, fetch (tests)}. Throws a problem (syncProblem)
+   in plain words; a file that fails the check is deleted and nothing is unpacked from it. */
+async function rcloneInstall(o) {
+  const { fs, path } = o, dir = path.dirname(o.exe);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {
+    throw syncProblem('disk', `Scriptorium could not make its folder ${dir}.`, `The system said: ${e.code || e.message}.`, 'Check that your home folder can be written to, then try again.');
+  }
+  const zip = path.join(dir, `${o.asset.file}.download`);
+  const fetch = o.fetch || syncFetch;
+  let got = null, why = '';
+  for (const url of o.asset.urls) {
+    try { got = await fetch(o, url, zip); break; } catch (e) {
+      why = (e && e.message) || String(e);
+      try { fs.rmSync(zip, { force: true }); } catch (x) { /* nothing was written */ }
+      if (o.signal && o.signal.aborted) throw syncProblem('stopped', 'The download was stopped.', '', 'Run it again when you like: nothing was installed.');
+    }
+  }
+  if (!got) {
+    throw syncProblem('network', 'rclone could not be downloaded.', `Neither rclone’s server nor GitHub could be reached from this computer (${why}).`,
+      'Check the internet connection and try again. Or install rclone yourself from rclone.org/downloads and give its path in Settings → Scriptorium.');
+  }
+  if (got.sha256 !== o.asset.sha256 || got.bytes !== o.asset.bytes) {
+    try { fs.rmSync(zip, { force: true }); } catch (x) { /* it is not used either way */ }
+    throw syncProblem('checksum', 'The downloaded file is not the rclone that Scriptorium expects, so it was deleted and not run.',
+      'Its SHA-256 or size differs from what rclone published for this version. The download may have been cut short, or changed on the way by a proxy or filter.',
+      'Try again on another network. Or install rclone yourself from rclone.org/downloads and give its path in Settings → Scriptorium.');
+  }
+  const tmp = `${o.exe}.unpacking`;
+  try {
+    const fd = fs.openSync(zip, 'r');
+    let entry;
     try {
-      const input = { title: DRIVE_MANIFEST, parentId: st.folderId, contentMimeType: 'application/json', disableConversionToGoogleType: true, base64Content: `sha256:${sha}:${file.split(path.sep).join('/')}` };
-      data = await this.must(inPlace ? { tool: 'update_content', input: Object.assign({ fileId: inPlace }, input) } : { tool: 'create_file', input }, 'The list of files could not be uploaded');
-      if (typeof data.id !== 'string' || String(data.fileSize) !== String(bytes.length)) throw new Error('The list of files did not arrive whole in Google Drive.');
-    } catch (e) {
-      w.stale = stale.filter(id => id !== this.remoteId && !this.extraManifests.includes(id) && !st.untidy.includes(id));
-      this.saveState();
-      throw e;
-    } finally {
-      try { fs.unlinkSync(file); } catch (e) { /* gone */ }
-    }
-    this.remote = JSON.parse(JSON.stringify(w));
-    this.remoteId = data.id;
-    this.extraManifests = [];
-    st.seq = w.seq;
-    st.manifestId = data.id;
-    st.journal = null;
-    this.dirty = false;
-    this.saveState();
-    // Tidying: a failure here costs nothing but clutter in Drive, and is not reported as a failure of the backup.
-    const left = [];
-    if (stale.length) {
-      const before = this.failed.length;
-      const ops = [...new Set(stale)].map(id => ({ id }));
-      const kept = await this.each(ops, { stage: 'Tidying old copies', call: op => ({ tool: 'trash_file', input: { fileId: op.id } }), done: () => {} });
-      this.failed.length = before;
-      for (const op of kept) if (!/not found|404/i.test(op.error || '')) left.push(op.id);
-    }
-    st.untidy = left;   // tried again with the next manifest
-    this.untidy = left.length;
-    this.saveState();
-  }
-
-  /* After a sync, what both sides have in common is remembered: the next sync compares against it. */
-  settle() {
-    const st = this.state, files = this.w.files;
-    const s = driveScan(this.fs, this.path, this.crypto, this.dir, st.hashes, this.limits);
-    st.hashes = s.hashes;
-    const base = {};
-    for (const rel of new Set(Object.keys(files).concat(Object.keys(s.files)))) {
-      const l = s.files[rel] ? s.files[rel].sha256 : null, r = files[rel] ? files[rel].sha256 : null;
-      if (l && l === r) base[rel] = l;
-      else if (typeof st.base[rel] === 'string') base[rel] = st.base[rel];
-    }
-    st.base = base;
-    st.seq = this.remote ? this.remote.seq : st.seq;
-    st.synced = this.now().toISOString();
-    this.saveState();
-  }
-
-  summary(started) {
-    return Object.assign({}, this.done, {
-      failed: this.failed, skipped: this.skipped || [], runs: this.runs, cost: this.cost, untidy: this.untidy || 0,
-      files: Object.keys(this.w.files).length, seconds: Math.round((this.now() - started) / 100) / 10,
+      const read = (pos, len) => { const b = Buffer.alloc(len); fs.readSync(fd, b, 0, len, pos); return b; };
+      entry = zipEntry(read, got.bytes, o.asset.exe);
+    } finally { fs.closeSync(fd); }
+    await new Promise((resolve, reject) => {
+      const src = fs.createReadStream(zip, { start: entry.offset, end: entry.offset + entry.packed - 1 });
+      const out = fs.createWriteStream(tmp, { mode: 0o755 });
+      const mid = entry.method === 8 ? o.zlib.createInflateRaw() : null;
+      for (const s of [src, mid, out]) if (s) s.on('error', reject);
+      out.on('finish', resolve);
+      (mid ? src.pipe(mid) : src).pipe(out);
     });
+    if (fs.statSync(tmp).size !== entry.size) throw new Error('the unpacked program has the wrong size');
+    fs.chmodSync(tmp, 0o755);
+    fs.renameSync(tmp, o.exe);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch (x) { /* nothing to remove */ }
+    throw syncProblem('disk', 'rclone was downloaded and checked, but could not be unpacked.', `The system said: ${(e && (e.code || e.message)) || e}.`,
+      `Check that there is room on the disk (about 100 MB) and that ${dir} can be written to, then try again.`);
+  } finally {
+    try { fs.rmSync(zip, { force: true }); } catch (x) { /* the next download writes over it */ }
   }
+  return o.exe;
+}
 
-  /* The whole sync, after prepare(): bring in, look again, send, write the manifest. */
-  async sync() {
-    const started = this.now();
-    if (!this.plan) await this.prepare();
-    if (this.remote && (this.remote.via || 'claude') !== this.via) throw new Error(driveOtherWay(this.remote.via || 'claude'));
-    await this.pull();
-    if (!this.state.folderId) { await this.locate(true); if (this.remote) throw new Error('A backup of this vault appeared in Google Drive just now. Run the sync again.'); }
-    this.w.folder = this.state.folderId;
-    this.scan();   // what is here now: the files brought in, and the conflict copies, which are sent like any new file
-    await this.push();
-    if (this.dirty || !this.remote || this.extraManifests.length || this.w.stale.length) await this.publish();
-    this.settle();
-    this.say({ stage: 'Done' });
-    return this.summary(started);
+/* ---------- Running rclone ---------- */
+
+/* A failure in plain words: what happened, the likely cause, what to do next. kind names it for the buttons
+   ('rclone', 'connect', 'client', 'network', 'busy', 'deletes', 'check', 'empty', 'resync', 'folder', 'quota',
+   'rate', 'disk', 'stopped', 'unknown'); tail is rclone's own last lines, shown only on request. */
+function syncProblem(kind, message, cause, next, tail) {
+  const e = new Error(message);
+  e.kind = kind; e.cause2 = cause || ''; e.next = next || ''; e.tail = tail || [];
+  return e;
+}
+
+/* The environment rclone is run with: the writer's, without any RCLONE_ setting (one of those could point rclone at
+   another config or change what a command does). */
+function rcloneEnv(env) {
+  const out = {};
+  for (const k of Object.keys(env || {})) if (!/^RCLONE_/i.test(k)) out[k] = env[k];
+  return out;
+}
+
+/* One line of rclone's log (--use-json-log): {level, msg, object, stats}. A line that is not JSON is kept as text. */
+function syncLogLine(line) {
+  const t = String(line || '').trim();
+  if (t.startsWith('{')) {
+    try {
+      const j = JSON.parse(t);
+      if (j && typeof j === 'object' && 'msg' in j) return { level: String(j.level || 'info'), msg: String(j.msg || '').trim(), object: j.object === undefined ? '' : String(j.object), stats: j.stats || null };
+    } catch (e) { /* text after all */ }
   }
+  return { level: 'text', msg: t, object: '', stats: null };
+}
 
-  /* The vaults backed up under the Drive folder: [{name, folderId, manifestId, manifest, files, bytes, updated,
-     device}], by name. */
-  async vaults() {
-    this.say({ stage: 'Looking for vaults in Google Drive' });
-    const rootId = await this.folderNamed(this.folder, 'root');
-    if (!rootId) return [];
-    const folders = (await this.find(`parentId = '${driveQuote(rootId)}' and mimeType = '${DRIVE_FOLDER_TYPE}'`)).filter(f => f.mimeType === DRIVE_FOLDER_TYPE && !f.trashed);
-    const found = [];
-    await this.each(folders.map(f => ({ title: f.title, id: f.id })), {
-      stage: 'Looking for vaults in Google Drive',
-      call: op => ({ tool: 'search_files', input: { query: this.manifestQuery(op.id), excludeContentSnippets: true, pageSize: 100 } }),
-      done: (op, data) => {
-        const m = (Array.isArray(data.files) ? data.files : []).filter(f => f && f.title === DRIVE_MANIFEST && !f.trashed && typeof f.id === 'string')
-          .sort((a, b) => String(a.createdTime) > String(b.createdTime) ? -1 : 1);
-        if (m.length) found.push({ name: op.title, folderId: op.id, rootId, manifestId: m[0].id });
-      },
+/* Runs rclone without a shell. o: {spawn, exe, args, env, onLine(parsed), signal, timeout, grace}. Resolves, never
+   rejects: {code, out (what it printed), lines (the last of its log, parsed), failed (it could not be started:
+   the system's error), stopped, timedOut}. A stop asks rclone to finish cleanly first (bisync saves its state on an
+   interrupt), and ends it after o.grace ms. */
+function rcloneExec(o) {
+  return new Promise(resolve => {
+    let child, done = false, out = '', rest = '', timer = null, killer = null, stopped = false, timedOut = false;
+    const lines = [];
+    const finish = r => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer); clearTimeout(killer);
+      if (o.signal) o.signal.removeEventListener('abort', stop);
+      if (rest.trim()) take(rest);
+      resolve(Object.assign({ code: null, out, lines, failed: null, stopped, timedOut }, r));
+    };
+    const take = line => {
+      if (!line.trim()) return;
+      const l = syncLogLine(line);
+      lines.push(l);
+      if (lines.length > 400) lines.splice(0, lines.length - 300);
+      if (o.onLine) { try { o.onLine(l); } catch (e) { /* a listener's trouble is not rclone's */ } }
+    };
+    const end = () => {
+      if (!child || done) return;
+      try { child.kill(process.platform === 'win32' ? undefined : 'SIGINT'); } catch (e) { /* already gone */ }
+      killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* already gone */ } }, o.grace === undefined ? 5000 : o.grace);
+    };
+    function stop() { stopped = true; end(); }
+    try {
+      child = o.spawn(o.exe, o.args, { env: rcloneEnv(o.env), windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) { finish({ failed: e }); return; }
+    child.on('error', e => finish({ failed: e }));
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', d => { if (out.length < 64 * 1024 * 1024) out += d; });
+    child.stderr.on('data', d => {
+      rest += d;
+      let i;
+      while ((i = rest.indexOf('\n')) >= 0) { take(rest.slice(0, i)); rest = rest.slice(i + 1); }
     });
-    const out = [];
-    await this.each(found.map(v => Object.assign({ title: v.name }, v)), {
-      stage: 'Reading the backups’ lists of files', call: op => ({ tool: 'download_file_content', input: { fileId: op.manifestId } }),
-      done: (op, data) => {
-        const m = driveManifest(data);
-        if (m instanceof Error) throw m;
-        const list = Object.values(m.files);
-        out.push({ name: op.name, folderId: op.folderId, rootId: op.rootId, manifestId: op.manifestId, manifest: m, files: list.length, via: m.via || 'claude',
-          bytes: list.reduce((n, f) => n + f.size, 0), updated: m.updated || null, device: m.device || null });
-      },
-    });
-    return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    child.on('close', (code, sig) => finish({ code: code === null ? (sig ? -1 : null) : code }));
+    if (o.timeout) timer = setTimeout(() => { timedOut = true; end(); }, o.timeout);
+    if (o.signal) { if (o.signal.aborted) stop(); else o.signal.addEventListener('abort', stop); }
+  });
+}
+
+/* ---------- Scriptorium's own rclone config ---------- */
+
+/* The config file is rclone's INI: [name] and "key = value" lines. Only what is needed is read. */
+function syncConfRead(fs, file) {
+  const out = {};
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return out; }
+  let at = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    const sec = /^\[(.+)\]$/.exec(line);
+    if (sec) { at = out[sec[1]] = {}; continue; }
+    const kv = /^([^=;#\s][^=]*?)\s*=\s*(.*)$/.exec(line);
+    if (at && kv) at[kv[1]] = kv[2];
   }
+  return out;
+}
 
-  /* Downloads the vault `entry` (one of vaults()) into this.dir, checking every file's SHA-256, and leaves the folder
-     ready to sync with that backup. Nothing is sent to Drive. */
-  async retrieve(entry) {
-    const started = this.now();
-    if ((entry.via || 'claude') !== this.via) throw new Error(driveOtherWay(entry.via || 'claude'));
-    Object.assign(this.state, { rootId: entry.rootId, folderId: entry.folderId, journal: null, base: {} });
-    this.remote = entry.manifest;
-    this.remoteId = entry.manifestId;
-    this.working();
-    this.scan();
-    await this.pull();
-    this.state.manifestId = entry.manifestId;
-    this.settle();
-    this.say({ stage: 'Done' });
-    return this.summary(started);
+/* Whether the sign-in is there: the remote exists and, for Google Drive, has a token. {connected, own (a client ID
+   of the writer's), client, type}. No token is returned. */
+function syncConnection(fs, file) {
+  const r = syncConfRead(fs, file)[RCLONE.remote];
+  if (!r) return { connected: false, own: false, client: '', type: '' };
+  return { connected: r.type !== 'drive' || Boolean(r.token && r.token.includes('{')), own: Boolean(r.client_id), client: r.client_id || '', type: r.type || '' };
+}
+
+/* Writes the remote into the config, without a token: rclone adds that when the writer has signed in. Every other
+   section of the file is kept. The file can be read by the writer alone. */
+function syncConfPrepare(fs, path, file, client) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { /* a new file */ }
+  const keep = [];
+  let skip = false;
+  for (const line of text.split(/\r?\n/)) {
+    const sec = /^\s*\[(.+)\]\s*$/.exec(line);
+    if (sec) skip = sec[1] === RCLONE.remote;
+    if (!skip) keep.push(line);
   }
-}
-
-/* ==========================================================
-   Google Drive, directly (preview)
-   ==========================================================
-   The same backup, with Scriptorium talking to Google Drive itself instead of asking Claude Code to: the writer signs
-   in to Google in their own browser, once, and no model is involved. How it works:
-     - Sign-in is OAuth 2.0 for installed apps with PKCE and a loopback redirect: Scriptorium listens on
-       http://127.0.0.1:<a free port>, opens Google's sign-in page in the system browser, receives the code there,
-       and exchanges it for tokens. Only the scope drive.file is asked for: Scriptorium can see and change the files
-       it stored itself and nothing else in the Drive. (So it cannot see a backup made through Claude Code, which
-       another app stored: see driveSync's `via`.)
-     - The refresh token is kept in one file per user of this computer, outside every vault (driveAuthFile), readable
-       by that user only and encrypted with the system keychain where Obsidian offers it. It is never in a vault, so
-       it is never backed up, synced or copied by "Set up another vault"; driveRule refuses a file of that name anyway.
-       "Disconnect" revokes it at Google and deletes it.
-     - A Google sign-in needs an OAuth client ID. DRIVE_DEFAULT_CLIENT is the one place for a client ID shared by
-       everyone who uses Scriptorium; while it is empty, each writer makes their own (five minutes, free; the README
-       and the dialog say how) and pastes it in.
-     - Files travel over the Drive REST API (v3) with Node's https: small ones in one request, large ones in resumable
-       sessions of 8 MB chunks that carry on after an interruption, even in a later run. A changed file is updated in
-       place (the same Drive file, a new revision). Downloads are streamed, resumed with Range, and hashed as they
-       arrive. 429, 5xx and rate-limit 403 answers are tried again with exponential backoff.
-   It needs Node (a loopback listener, files, https), so it works in Obsidian on a computer only; the modules are
-   loaded when it is used, never when the plugin loads. Tested under Node against a pretend Google
-   (plugins-tests/fake-google.js, drive-direct.test.js). */
-
-/* THE ONE PLACE for a Google OAuth client shared by all of Scriptorium's users: a client of type "Desktop app" in a
-   Google Cloud project with the Drive API on (README, "A Google sign-in of your own"). In this flow Google does not
-   treat a desktop client's secret as a secret, so it may be written here. While id is empty, the dialog asks each
-   writer for a client ID of their own. */
-const DRIVE_DEFAULT_CLIENT = { id: '', secret: '' };
-/* Which way a vault is backed up when the writer has not chosen: 'claude' (through Claude Code) or 'direct'. The
-   direct connection stays opt-in until it has been checked against the real Google Drive. */
-const DRIVE_DEFAULT_TRANSPORT = 'claude';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
-const DRIVE_AUTH_FILE = 'scriptorium-google-drive.json';
-const DRIVE_UPLOADS = '.obsidian/plugins/scriptorium/drive-uploads.json';
-const GOOGLE_ENDPOINTS = {
-  auth: 'https://accounts.google.com/o/oauth2/v2/auth', token: 'https://oauth2.googleapis.com/token', revoke: 'https://oauth2.googleapis.com/revoke',
-  api: 'https://www.googleapis.com/drive/v3', upload: 'https://www.googleapis.com/upload/drive/v3',
-};
-/* chunk: a resumable upload's chunk (Google wants multiples of 256 KiB); single: up to this size a file goes up in
-   one request; memory: a larger download is written to a file as it arrives. */
-const DRIVE_DIRECT = { chunk: 8 * 1024 * 1024, single: 4 * 1024 * 1024, memory: 8 * 1024 * 1024, tries: 6, baseMs: 500, maxMs: 32000, timeoutMs: 120000, signInMs: 10 * 60 * 1000 };
-const DRIVE_DIRECT_LIMITS = Object.assign({}, DRIVE_LIMITS, { fileBytes: Infinity, batchFiles: 10, batchBytes: 64 * 1000 * 1000, parallel: 3 });
-const DRIVE_FIELDS = 'id,name,parents,mimeType,createdTime,trashed,size,md5Checksum,sha256Checksum';
-const DRIVE_TYPES = {
-  md: 'text/markdown', txt: 'text/plain', json: 'application/json', canvas: 'application/json', css: 'text/css', csv: 'text/csv', html: 'text/html', htm: 'text/html',
-  xml: 'application/xml', yaml: 'application/yaml', yml: 'application/yaml', tex: 'application/x-tex', bib: 'application/x-bibtex', base: 'application/yaml',
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', avif: 'image/avif', bmp: 'image/bmp',
-  tif: 'image/tiff', tiff: 'image/tiff', ico: 'image/x-icon', heic: 'image/heic',
-  pdf: 'application/pdf', epub: 'application/epub+zip', zip: 'application/zip', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac', opus: 'audio/opus',
-  mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', ogv: 'video/ogg',
-  ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
-};
-/* The type a file is stored under by the direct connection: its real one, so that Drive shows a picture as a picture. */
-function driveRealMime(name) {
-  const dot = name.lastIndexOf('.'), ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
-  return (Object.prototype.hasOwnProperty.call(DRIVE_TYPES, ext) && DRIVE_TYPES[ext]) || 'application/octet-stream';
-}
-
-/* Where the requests go. SCRIPTORIUM_DRIVE_TEST_SERVER, for the tests, sends them to a pretend Google instead; only
-   an address on this computer (http://127.0.0.1:<port>) is honoured, and every dialog then says so. */
-function driveEndpoints(env) {
-  const t = String((env && env.SCRIPTORIUM_DRIVE_TEST_SERVER) || '');
-  if (/^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(t)) {
-    return { auth: `${t}/o/oauth2/v2/auth`, token: `${t}/token`, revoke: `${t}/revoke`, api: `${t}/drive/v3`, upload: `${t}/upload/drive/v3`, test: t };
-  }
-  return GOOGLE_ENDPOINTS;
-}
-
-/* Which way this vault is backed up: 'direct' or 'claude'. */
-function driveTransport(saved) {
-  const t = saved && saved.drive && saved.drive.transport;
-  return t === 'direct' || t === 'claude' ? t : DRIVE_DEFAULT_TRANSPORT;
-}
-
-/* The file that holds the sign-in, for the user of this computer: never inside a vault's folder by design.
-   path is Node's path (or path.win32 / path.posix in the tests). */
-function driveAuthFile(path, env, platform, home) {
-  env = env || {};
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Scriptorium', DRIVE_AUTH_FILE);
-  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'Scriptorium', DRIVE_AUTH_FILE);
-  return path.join(env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(home, '.config'), 'scriptorium', DRIVE_AUTH_FILE);
+  while (keep.length && !keep[keep.length - 1].trim()) keep.pop();
+  const clean = v => String(v || '').replace(/[\r\n]/g, '').trim();
+  const mine = [`[${RCLONE.remote}]`, 'type = drive', 'scope = drive'];
+  if (client && client.id) mine.push(`client_id = ${clean(client.id)}`, `client_secret = ${clean(client.secret)}`);
+  const all = (keep.length ? keep.join('\n') + '\n\n' : '') + mine.join('\n') + '\n';
+  fs.writeFileSync(file, all, { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch (e) { /* Windows keeps its own permissions: the folder is the user's */ }
 }
 
 /* A client ID and secret from what was pasted: the ID alone, or the whole JSON file Google offers for download
    ({"installed": {"client_id": ..., "client_secret": ...}}). {id, secret, problem}. */
-function driveParseClient(text, secret) {
+function syncParseClient(text, secret) {
   let id = String(text || '').trim();
   secret = String(secret || '').trim();
   if (id.startsWith('{')) {
@@ -3160,739 +2477,573 @@ function driveParseClient(text, secret) {
       return { id: '', secret: '', problem: 'That is not a client ID, and not the JSON file Google gives for one.' };
     }
   }
-  if (!id) return { id: '', secret: '', problem: '' };
+  if (!id) return { id: '', secret: '', problem: 'Paste the client ID (or the JSON file Google offers for download).' };
   if (!/^[0-9]+-[0-9a-z_]+\.apps\.googleusercontent\.com$/i.test(id)) {
     return { id: '', secret: '', problem: 'A Google client ID looks like 1234567890-abc…xyz.apps.googleusercontent.com. Copy it from Google Auth Platform → Clients.' };
   }
-  if (secret && /[\s"']/.test(secret)) return { id: '', secret: '', problem: 'The client secret has a space or a quotation mark in it: copy it again.' };
+  if (!secret) return { id: '', secret: '', problem: 'Paste the client secret too (it starts with GOCSPX-). Google shows it once, when the client is made; if it is lost, add a new secret to the client.' };
+  if (/[\s"']/.test(secret)) return { id: '', secret: '', problem: 'The client secret has a space or a quotation mark in it: copy it again.' };
   return { id, secret, problem: '' };
 }
 
-/* The OAuth client in use: the writer's own if they gave one, else the one built in. {id, secret, own} */
-function driveClient(saved) {
-  const own = driveParseClient(saved && saved.clientId, saved && saved.clientSecret);
-  if (own.id) return { id: own.id, secret: own.secret, own: true };
-  return { id: DRIVE_DEFAULT_CLIENT.id, secret: DRIVE_DEFAULT_CLIENT.secret, own: false };
-}
+/* ---------- What is synced ---------- */
 
-/* The sign-in file. seal is {enc(text) -> base64 or null, dec(base64) -> text or null} (the system keychain through
-   Electron's safeStorage), or null. load() never throws: {clientId, clientSecret, refresh, email, name, at, problem}. */
-function driveAuthStore(o) {
-  const { fs, path, file, seal } = o;
-  const load = () => {
-    let j = null;
-    try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') return { problem: `The saved Google sign-in could not be read (${e.code || e.message}).` }; }
-    if (!j || typeof j !== 'object') return {};
-    const out = { clientId: String(j.clientId || ''), clientSecret: String(j.clientSecret || ''), email: String(j.email || ''), name: String(j.name || ''), at: j.at || null, forClient: String(j.forClient || '') };
-    const t = typeof j.token === 'string' ? j.token : '';
-    if (t.startsWith('plain:')) out.refresh = t.slice(6);
-    else if (t.startsWith('safe:')) {
-      let v = null;
-      try { v = seal ? seal.dec(t.slice(5)) : null; } catch (e) { v = null; }
-      if (v) out.refresh = v; else out.problem = 'The saved Google sign-in could not be unlocked with this computer’s keychain. Connect again.';
-    }
-    return out;
-  };
-  const save = patch => {
-    const now = Object.assign(load(), patch);
-    const j = { v: 1, clientId: now.clientId || '', clientSecret: now.clientSecret || '', email: now.email || '', name: now.name || '', at: now.at || null, forClient: now.forClient || '' };
-    if (now.refresh) {
-      let sealed = null;
-      try { sealed = seal ? seal.enc(now.refresh) : null; } catch (e) { sealed = null; }
-      j.token = sealed ? `safe:${sealed}` : `plain:${now.refresh}`;
-    }
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const tmp = `${file}.scriptorium-tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(j), { mode: 0o600 });
-    try { fs.chmodSync(tmp, 0o600); } catch (e) { /* Windows keeps the user's own permissions */ }
-    fs.renameSync(tmp, file);
-  };
-  /* Forgets the sign-in; the client ID the writer typed is kept. */
-  const signOut = () => save({ refresh: '', email: '', name: '', at: null, forClient: '' });
-  return { file, load, save, signOut };
-}
-
-function driveAbort() {
-  const e = new Error('Stopped.');
-  e.name = 'AbortError';
-  return e;
-}
-
-/* An error the dialog shows as it is, with what to do. kind: 'signin' (connect again), 'client' (the client ID is
-   wrong), 'network', 'google'. */
-function driveProblem(message, kind, steps) {
-  const e = new Error(message);
-  e.kind = kind || 'google';
-  if (steps) e.steps = steps;
-  return e;
-}
-
-/* One HTTP request with Node's http or https: request({method, url, headers, body, sink, signal, timeoutMs}) ->
-   {status, headers, body}. With sink, the bytes of a 2xx answer are passed to sink(chunk) as they arrive instead.
-   A GET that is sent elsewhere (301, 302, 303, 307) is followed, up to five times; the sign-in is not carried to
-   another host. (308 is not followed: in a resumable upload it means "carry on".) */
-function driveHttp(mods, defaults) {
-  const once = driveHttpOnce(mods, defaults);
-  return async req => {
-    let r = req;
-    for (let hop = 0; ; hop++) {
-      const res = await once(r);
-      const to = res.headers && res.headers.location;
-      if ((r.method && r.method !== 'GET') || ![301, 302, 303, 307].includes(res.status) || !to || hop >= 5) return res;
-      let next;
-      try { next = new URL(to, r.url); } catch (e) { return res; }
-      if (!/^https?:$/.test(next.protocol) || (new URL(r.url).protocol === 'https:' && next.protocol !== 'https:')) return res;
-      const headers = Object.assign({}, r.headers);
-      if (next.host !== new URL(r.url).host) delete headers.Authorization;
-      r = Object.assign({}, r, { url: next.href, headers });
-    }
-  };
-}
-
-function driveHttpOnce(mods, defaults) {
-  return req => new Promise((resolve, reject) => {
-    if (req.signal && req.signal.aborted) { reject(driveAbort()); return; }
-    let u;
-    try { u = new URL(req.url); } catch (e) { reject(new Error(`Not an address: ${String(req.url).slice(0, 80)}`)); return; }
-    const lib = u.protocol === 'http:' ? mods.http : mods.https;
-    const headers = Object.assign({}, req.headers);
-    const body = req.body ? (Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body), 'utf8')) : null;
-    if (body || (req.method && req.method !== 'GET')) headers['Content-Length'] = body ? body.length : 0;
-    let settled = false, r = null;
-    const onAbort = () => { if (r) r.destroy(driveAbort()); };
-    const done = (f, v) => { if (settled) return; settled = true; if (req.signal) req.signal.removeEventListener('abort', onAbort); f(v); };
-    try {
-      r = lib.request(u, { method: req.method || 'GET', headers }, res => {
-        const direct = req.sink && res.statusCode >= 200 && res.statusCode < 300;
-        const parts = [];
-        res.on('data', c => { try { if (direct) req.sink(c); else parts.push(c); } catch (e) { r.destroy(e); } });
-        res.on('end', () => (res.complete ? done(resolve, { status: res.statusCode, headers: res.headers, body: Buffer.concat(parts) })
-          : done(reject, Object.assign(new Error('the connection closed before the answer was whole'), { code: 'ECONNRESET' }))));
-        res.on('error', e => done(reject, e));
-        res.on('close', () => done(reject, Object.assign(new Error('the connection closed before the answer was whole'), { code: 'ECONNRESET' })));
-      });
-    } catch (e) { reject(e); return; }
-    r.setTimeout(req.timeoutMs || (defaults && defaults.timeoutMs) || DRIVE_DIRECT.timeoutMs, () => r.destroy(Object.assign(new Error('no answer in time'), { code: 'ETIMEDOUT' })));
-    r.on('error', e => done(reject, e));
-    if (req.signal) req.signal.addEventListener('abort', onAbort, { once: true });
-    r.end(body || undefined);
-  });
-}
-
-/* What went wrong with the network, said plainly. */
-function driveNetProblem(e, what) {
-  const code = (e && e.code) || '';
-  const why = code === 'ENOTFOUND' || code === 'EAI_AGAIN' ? 'this computer could not find Google’s servers (is it online?)'
-    : code === 'ETIMEDOUT' ? 'Google did not answer in time'
-    : /CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code) ? `the secure connection to Google was refused (${code}): a proxy or an antivirus that opens encrypted connections may be in the way`
-    : code === 'ECONNREFUSED' ? 'the connection was refused'
-    : `the connection failed (${code || (e && e.message) || 'unknown'})`;
-  return driveProblem(`${what || 'Google Drive could not be reached'}: ${why}.`, 'network');
-}
-
-/* The error in a Drive API answer: {status, reason, message}. */
-function driveErrorOf(res) {
-  let j = null;
-  try { j = JSON.parse(res.body.toString('utf8')); } catch (e) { /* not JSON */ }
-  const err = j && j.error;
-  if (err && typeof err === 'object') {
-    const first = Array.isArray(err.errors) && err.errors[0] ? err.errors[0] : {};
-    const detail = Array.isArray(err.details) ? err.details.find(d => d && d.reason) : null;
-    return { status: res.status, reason: String(first.reason || (detail && detail.reason) || err.status || ''), message: String(err.message || '') };
+/* rclone's filter rules for a vault; the first rule that matches a file decides. Every computer that syncs the
+   same Drive folder must use the same rules, so they depend only on settings that are synced themselves. */
+function syncFilters(s) {
+  const lines = [
+    '# Written by Scriptorium. Changes made here are written over.',
+    '# Litter of the system and of programs',
+    '- .DS_Store', '- Thumbs.db', '- desktop.ini', '- *.scriptorium-tmp', '- *.partial', '- .~lock.*', '- ~$*',
+    '# What the older Google Drive backup of Scriptorium left behind',
+    '- /scriptorium-manifest.json', '- /_trash/**', '- scriptorium-google-drive.json',
+    '# Obsidian’s bin, and the copies that setting up a vault keeps',
+    '- /.trash/**', '- scriptorium-backup-*/**',
+  ];
+  if (s && s.obsidian === false) lines.push('# Obsidian’s settings are not synced (Settings → Scriptorium)', '- /.obsidian/**');
+  else {
+    lines.push(
+      '# Obsidian’s settings, plugins, themes and snippets are synced, but not the layout of its windows, caches,',
+      '# or Lagrange’s settings, which hold API keys',
+      '- /.obsidian/workspace*', '- /.obsidian/cache/**', '- /.obsidian/plugins/lagrange/data.json', '- /.obsidian/plugins/*/node_modules/**',
+      '- /.obsidian/plugins/scriptorium/drive-sync.json', '- /.obsidian/plugins/scriptorium/drive-uploads.json',
+      '+ /.obsidian/**');
   }
-  if (typeof err === 'string') return { status: res.status, reason: err, message: String((j && j.error_description) || '') };
-  return { status: res.status, reason: '', message: res.body.toString('utf8').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) };
+  lines.push('# Other hidden folders (.git and the like)', '- .*/**', '- node_modules/**');
+  return lines.join('\n') + '\n';
 }
 
-/* Whether a request is worth making again after a wait (Google's guidance: 429, 5xx, and 403 for a rate limit). */
-function driveRetryable(res) {
-  if (res.status === 429 || res.status === 408 || (res.status >= 500 && res.status <= 599)) return true;
-  if (res.status !== 403) return false;
-  return /^(?:rateLimitExceeded|userRateLimitExceeded|RATE_LIMIT_EXCEEDED)$/.test(driveErrorOf(res).reason);
+/* The Drive folder as rclone is told it: {fs: 'scriptorium-drive:Folder/Sub', flags}. */
+function syncTarget(link) {
+  const flags = link.root === 'shared' ? ['--drive-shared-with-me'] : link.root === 'drive' && link.driveId ? ['--drive-team-drive', String(link.driveId)] : [];
+  return { fs: `${RCLONE.remote}:${String(link.path || '').replace(/^\/+|\/+$/g, '')}`, flags };
 }
 
-function driveRetryableError(e) {
-  return Boolean(e && e.name !== 'AbortError' && /^(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNABORTED|ERR_SOCKET_CONNECTION_TIMEOUT)$/.test(e.code || ''));
+/* Where the folder is, in words: "My Drive › Notes › Vault". */
+function syncWhere(link) {
+  const root = link.root === 'shared' ? 'Shared with me' : link.root === 'drive' ? (link.driveName || 'Shared drive') : 'My Drive';
+  return [root].concat(String(link.path || '').split('/').filter(Boolean)).join(' › ');
 }
 
-/* How long to wait before try number n + 1 (n from 0): a doubling wait with jitter, or what Retry-After asks. */
-function driveDelay(n, res, limits, random) {
-  const l = limits || DRIVE_DIRECT;
-  const asked = res && res.headers && Number(res.headers['retry-after']);
-  if (asked > 0) return Math.min(asked * 1000, l.maxMs);
-  return Math.min(l.maxMs, l.baseMs * Math.pow(2, n) + Math.round((random ? random() : Math.random()) * l.baseMs));
+/* Why a name cannot be a new Drive folder, or ''. */
+function syncFolderName(name) {
+  const n = String(name || '').trim();
+  if (!n) return 'Give the folder a name.';
+  if (/[\\/]/.test(n)) return 'A folder’s name cannot have / or \\ in it.';
+  if (n === '.' || n === '..' || /[\u0000-\u001f]/.test(n)) return 'That name cannot be used.';
+  if (n.length > 200) return 'That name is too long.';
+  return '';
 }
 
-/* A refused Drive call, in words: what a writer can do something about is said in full. */
-function driveExplain(res) {
-  const e = driveErrorOf(res), all = `${e.reason} ${e.message}`;
-  if (res.status === 404) return 'not found in Google Drive (404)';
-  if (/accessNotConfigured|SERVICE_DISABLED|has not been used in project|is disabled/i.test(all)) {
-    return 'the Google Drive API is not turned on in the Google Cloud project of your client ID. Turn it on (APIs & Services → Library → Google Drive API → Enable), wait a minute, and try again';
+/* The folders in rclone's `lsjson` answer: [{name, id}] in the order a reader expects. */
+function syncParseDirs(text) {
+  let j;
+  try { j = JSON.parse(String(text || '').trim() || '[]'); } catch (e) { return null; }
+  if (!Array.isArray(j)) return null;
+  return j.filter(x => x && x.IsDir && typeof x.Name === 'string' && x.Name)
+    .map(x => ({ name: x.Name, id: x.ID || '' }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+/* What `rclone check --combined -` says about the two sides, file by file: "= same", "+ only on this computer",
+   "- only in Drive", "* differs", "! could not be compared". */
+function syncParseCheck(text) {
+  const r = { same: [], local: [], drive: [], differ: [], unread: [] };
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^([=+\-*!]) (.+)$/.exec(line);
+    if (!m || m[2] === SYNC_SENTINEL) continue;
+    r[{ '=': 'same', '+': 'local', '-': 'drive', '*': 'differ', '!': 'unread' }[m[1]]].push(m[2]);
   }
-  if (/storageQuotaExceeded/i.test(all)) return 'your Google Drive is full';
-  if (/appNotAuthorizedToFile|insufficientFilePermissions|insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(all)) {
-    return 'this connection is not allowed to touch that file: it can only reach files Scriptorium stored through it';
+  return r;
+}
+
+/* A name for the copy that is kept beside a file: "a/note.md" -> "a/note.conflict1.md", the first number not in
+   `taken` (a Set of paths, added to). The same shape as the names rclone gives. */
+function syncConflictName(rel, taken) {
+  const slash = rel.lastIndexOf('/'), dir = rel.slice(0, slash + 1), name = rel.slice(slash + 1);
+  const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+  for (let n = 1; ; n++) {
+    const c = `${dir}${stem}.conflict${n}${ext}`;
+    if (!taken.has(c)) { taken.add(c); return c; }
   }
-  if (res.status === 401) return 'Google did not accept the sign-in (401)';
-  if (driveRetryable(res)) return `Google Drive is busy or limiting requests (${res.status}${e.reason ? ` ${e.reason}` : ''}); it was tried several times`;
-  return `Google Drive refused it (${res.status}${e.reason ? ` ${e.reason}` : ''}${e.message ? `: ${e.message.slice(0, 200)}` : ''})`;
 }
 
-function driveForm(fields) {
-  return Object.keys(fields).filter(k => fields[k] !== undefined && fields[k] !== '').map(k => `${encodeURIComponent(k)}=${encodeURIComponent(fields[k])}`).join('&');
+/* The arguments of the sync itself. o: {local, link, paths (syncPaths), id, settings, resync, mode ('newer',
+   'path1', 'path2'), force, stamp (a date for the folder of replaced files), dryRun}. */
+function syncBisyncArgs(o) {
+  const t = syncTarget(o.link), path = o.path;
+  const a = ['bisync', o.local, t.fs].concat(t.flags, [
+    '--workdir', path.join(o.paths.work, o.id),
+    '--filters-file', path.join(o.paths.filters, `${o.id}.txt`),
+    '--check-access', '--check-filename', SYNC_SENTINEL,
+    '--resilient', '--recover', '--max-lock', '2m',
+    '--conflict-resolve', 'newer', '--conflict-loser', 'num', '--conflict-suffix', 'conflict', '--suffix-keep-extension',
+    '--max-delete', String(o.settings.maxDelete),
+    '--backup-dir1', path.join(o.paths.kept, o.id, o.stamp),
+    '--create-empty-src-dirs', '--drive-skip-gdocs', '--skip-links',
+    '--stats', '2s', '-v',
+  ]);
+  if (o.resync) a.push('--resync', '--resync-mode', o.mode || 'newer');
+  if (o.force) a.push('--force');
+  if (o.dryRun) a.push('--dry-run');
+  return a;
 }
 
-/* A refused sign-in or refresh at Google's token address, in words. */
-function driveTokenProblem(res, client) {
-  const e = driveErrorOf(res), all = `${e.reason} ${e.message}`;
-  if (/invalid_grant/.test(all)) {
-    return driveProblem('Google no longer accepts this sign-in: it was withdrawn (in your Google account, or by Disconnect on another computer), has not been used for six months, or has expired ' +
-      '(a sign-in through a Google Cloud app left in “Testing” lasts seven days). Connect again.', 'signin');
+/* What a run did, from its log: {copied, replaced, deleted, conflicts: [names], ok}. */
+function syncSummary(lines) {
+  const s = { copied: 0, replaced: 0, deleted: 0, conflicts: [], ok: false, nothing: false };
+  for (const l of lines || []) {
+    if (/^Copied \(new\)/.test(l.msg)) s.copied++;
+    else if (/^Copied \(replaced existing\)/.test(l.msg) || /^Copied \(server-side copy\)/.test(l.msg)) s.replaced++;
+    else if (l.msg === 'Deleted') s.deleted++;
+    else if (/Bisync successful/.test(l.msg)) s.ok = true;
+    else if (/No changes found/.test(l.msg)) s.nothing = true;
+    const c = /New or changed in both paths\s+- (.+)$/.exec(l.msg);
+    if (c && !s.conflicts.includes(c[1])) s.conflicts.push(c[1]);
   }
-  if (/invalid_client|unauthorized_client/.test(all)) {
-    return driveProblem(`Google does not know this client ID, or its secret is not right (${e.reason}${e.message ? `: ${e.message}` : ''}). ` +
-      (client && client.own ? 'Copy both again from Google Auth Platform → Clients; the client must be of type “Desktop app”.' : 'The client ID built into Scriptorium was refused: use one of your own (Settings → Scriptorium).'), 'client');
-  }
-  if (/redirect_uri_mismatch/.test(all)) return driveProblem('Google refused the address Scriptorium listens on. The OAuth client must be of type “Desktop app” (a “Web application” client does not allow it).', 'client');
-  return driveProblem(`Google refused the sign-in (${res.status} ${e.reason}${e.message ? `: ${e.message.slice(0, 200)}` : ''}).`, 'google');
+  // a file moved into the folder of replaced files is logged as deleted or replaced as well: nothing to add
+  return s;
 }
 
-/* Access tokens, from the refresh token in the store: get(force) -> a token good for at least a minute. The access
-   token lives in memory only. */
-function driveTokens(o) {
-  const { http, store, endpoints } = o, now = o.now || (() => Date.now());
-  let access = '', expires = 0, flying = null;
-  const fresh = async () => {
-    const s = store.load(), client = driveClient(s);
-    if (s.problem) throw driveProblem(s.problem, 'signin');
-    if (!s.refresh) throw driveProblem('Scriptorium is not connected to Google Drive on this computer. Connect first.', 'signin');
-    if (!client.id) throw driveProblem('There is no Google client ID to sign in with. Give one in Settings → Scriptorium.', 'client');
-    let res, last;
-    for (let n = 0; n < 4; n++) {
-      try {
-        res = await http({ method: 'POST', url: endpoints.token, headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: driveForm({ grant_type: 'refresh_token', refresh_token: s.refresh, client_id: client.id, client_secret: client.secret }), signal: o.signal });
-      } catch (e) { if (e.name === 'AbortError') throw e; last = e; res = null; }
-      if (res && !driveRetryable(res)) break;
-      if (n < 3) await (o.sleep || driveSleep)(driveDelay(n, res, o.limits, o.random), o.signal);
-    }
-    if (!res) throw driveNetProblem(last, 'Google’s sign-in service could not be reached');
-    let j = null;
-    try { j = JSON.parse(res.body.toString('utf8')); } catch (e) { /* not JSON */ }
-    if (res.status !== 200 || !j || typeof j.access_token !== 'string') {
-      const p = driveTokenProblem(res, client);
-      if (p.kind === 'signin') { try { store.signOut(); } catch (e) { /* it is useless either way */ } }
-      throw p;
-    }
-    access = j.access_token;
-    expires = now() + (Number(j.expires_in) || 3600) * 1000;
-    if (typeof j.refresh_token === 'string' && j.refresh_token && j.refresh_token !== s.refresh) store.save({ refresh: j.refresh_token });
-    return access;
-  };
-  return {
-    get(force) {
-      if (!force && access && expires - 60000 > now()) return Promise.resolve(access);
-      if (!flying) flying = fresh().finally(() => { flying = null; });
-      return flying;
-    },
-    set(token, seconds) { access = token; expires = now() + (Number(seconds) || 3600) * 1000; },
-    forget() { access = ''; expires = 0; },
-  };
-}
-
-function driveSleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal && signal.aborted) { reject(driveAbort()); return; }
-    const onAbort = () => { clearTimeout(t); reject(driveAbort()); };
-    const t = setTimeout(() => { if (signal) signal.removeEventListener('abort', onAbort); resolve(); }, ms);
-    if (signal) signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-/* Drive API calls, signed and tried again as Google asks: call(req, {signal, once}) -> the answer, whatever its
-   status. req may be a function of the try's number, for a request that changes when it is made again. A 401 is
-   answered by one fresh token. Network failures that outlast the tries are thrown, said plainly. log(entry) hears
-   of every request: {method, what, status, ms, tries}, with no name and no id in it. */
-function driveApi(o) {
-  const { http, tokens } = o, limits = o.limits || DRIVE_DIRECT, sleep = o.sleep || driveSleep;
-  return async (req, hooks = {}) => {
-    const started = Date.now();
-    let renewed = false, res = null, err = null, n = 0;
-    for (; ; n++) {
-      if (hooks.signal && hooks.signal.aborted) throw driveAbort();
-      const r = typeof req === 'function' ? req(n) : req;
-      res = null; err = null;
-      try {
-        const token = await tokens.get(false);
-        res = await http(Object.assign({}, r, { headers: Object.assign({}, r.headers, { Authorization: `Bearer ${token}` }), signal: hooks.signal }));
-      } catch (e) {
-        if (e.name === 'AbortError' || e.kind) throw e;
-        err = e;
-      }
-      if (res && res.status === 401 && !renewed) { renewed = true; tokens.forget(); n--; continue; }
-      const again = err ? driveRetryableError(err) : driveRetryable(res);
-      if (!again || hooks.once || n >= limits.tries - 1) break;
-      await sleep(driveDelay(n, res, limits, o.random), hooks.signal);
-    }
-    if (o.log) o.log({ method: (typeof req === 'function' ? req(n) : req).method || 'GET', what: hooks.what || '', status: res ? res.status : (err && err.code) || 'error', ms: Date.now() - started, tries: n + 1 });
-    if (err) { if (hooks.once) throw err; throw driveNetProblem(err); }
-    if (res.status === 401) throw driveProblem('Google did not accept the sign-in. Connect again.', 'signin');
-    return res;
-  };
-}
-
-/* PKCE: a verifier of 43 characters and its S256 challenge. */
-function drivePkce(crypto) {
-  const b64 = b => b.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  const verifier = b64(crypto.randomBytes(32));
-  return { verifier, challenge: b64(crypto.createHash('sha256').update(verifier).digest()), state: b64(crypto.randomBytes(16)) };
-}
-
-function driveAuthUrl(endpoints, client, redirect, pkce) {
-  return `${endpoints.auth}?${driveForm({ client_id: client.id, redirect_uri: redirect, response_type: 'code', scope: DRIVE_SCOPE,
-    code_challenge: pkce.challenge, code_challenge_method: 'S256', state: pkce.state, access_type: 'offline', prompt: 'consent' })}`;
-}
-
-function drivePage(title, text) {
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(title)}</title><meta name="viewport" content="width=device-width, initial-scale=1">` +
-    '<style>body{font:18px/1.5 Georgia,serif;max-width:32em;margin:18vh auto;padding:0 1.5em;color:#2b2622;background:#f6f1e7}h1{font-size:1.5em;font-weight:normal}</style></head>' +
-    `<body><h1>${esc(title)}</h1><p>${esc(text)}</p></body></html>`;
-}
-
-/* Signs in: listens on 127.0.0.1, opens Google's page with o.open(url), waits for the code, exchanges it, and asks
-   Drive whose account it is. o: {http, server (Node's http), crypto, client, endpoints, open, signal, limits,
-   onUrl}. Returns {refresh, access, expiresIn, email, name}. Nothing is saved here. */
-async function driveSignIn(o) {
-  const { http, crypto, client, endpoints } = o, limits = o.limits || DRIVE_DIRECT;
-  if (!client || !client.id) throw driveProblem('There is no Google client ID to sign in with.', 'client');
-  const pkce = drivePkce(crypto);
-  let server = null, redirect = '';
-  const code = await new Promise((resolve, reject) => {
-    let timer = null;
-    const finish = (f, v) => {
-      clearTimeout(timer);
-      if (o.signal) o.signal.removeEventListener('abort', onAbort);
-      // The page just sent must reach the browser before the listener goes.
-      setTimeout(() => { try { server.close(); if (server.closeAllConnections) server.closeAllConnections(); } catch (e) { /* closed */ } }, 300);
-      f(v);
-    };
-    const onAbort = () => finish(reject, driveAbort());
-    server = o.server.createServer((req, res) => {
-      const send = (status, title, text) => { res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'close' }); res.end(drivePage(title, text)); };
-      let u;
-      try { u = new URL(req.url, redirect); } catch (e) { send(400, 'Scriptorium', 'Not a sign-in.'); return; }
-      const q = u.searchParams;
-      if (req.method !== 'GET' || u.pathname !== '/' || !(q.has('code') || q.has('error'))) { send(404, 'Scriptorium', 'Nothing here. This address only finishes a Google sign-in started in Obsidian.'); return; }
-      if (q.get('state') !== pkce.state) { send(400, 'Not this sign-in', 'This did not come from the sign-in that Scriptorium started. Go back to Obsidian and start again.'); return; }
-      if (q.has('error')) {
-        const why = q.get('error');
-        send(200, 'Not connected', 'Google did not grant access. You can close this tab and go back to Obsidian.');
-        finish(reject, driveProblem(why === 'access_denied' ? 'You did not allow it on Google’s page (or Google blocked it: with a Google Cloud app in “Testing”, only the accounts listed as test users may sign in).'
-          : `Google answered the sign-in with an error: ${String(why).slice(0, 80)}.`, 'google'));
-        return;
-      }
-      send(200, 'Connected to Google Drive', 'Scriptorium is finishing in Obsidian. You can close this tab.');
-      finish(resolve, q.get('code'));
-    });
-    server.on('error', e => finish(reject, driveProblem(`Scriptorium could not listen on this computer for Google’s answer (${e.code || e.message}). A firewall or security program may forbid a program to listen on 127.0.0.1.`, 'network')));
-    server.listen(0, '127.0.0.1', () => {
-      redirect = `http://127.0.0.1:${server.address().port}`;
-      const url = driveAuthUrl(endpoints, client, redirect, pkce);
-      if (o.onUrl) o.onUrl(url);
-      timer = setTimeout(() => finish(reject, driveProblem('No answer came back from the browser in ten minutes. If Google showed an error page there, what it said is the reason; otherwise try again.', 'google')), limits.signInMs);
-      Promise.resolve().then(() => o.open(url)).catch(() => { /* the dialog offers the link to copy */ });
-    });
-    if (o.signal) { if (o.signal.aborted) onAbort(); else o.signal.addEventListener('abort', onAbort, { once: true }); }
-  });
-  let res;
-  try {
-    res = await http({ method: 'POST', url: endpoints.token, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal: o.signal,
-      body: driveForm({ grant_type: 'authorization_code', code, code_verifier: pkce.verifier, client_id: client.id, client_secret: client.secret, redirect_uri: redirect }) });
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    throw driveNetProblem(e, 'Google’s sign-in service could not be reached');
-  }
-  let j = null;
-  try { j = JSON.parse(res.body.toString('utf8')); } catch (e) { /* not JSON */ }
-  if (res.status !== 200 || !j || typeof j.access_token !== 'string') {
-    const p = driveTokenProblem(res, client);
-    if (p.kind === 'signin') throw driveProblem('Google refused the code the browser brought back (it can be used once, within a few minutes). Try again.', 'google');
-    throw p;
-  }
-  if (!String(j.scope || '').split(/\s+/).includes(DRIVE_SCOPE)) {
-    throw driveProblem('Google signed you in, but without permission for the files Scriptorium stores (on Google’s page, the box for Google Drive was left unticked). Connect again and allow it.', 'google');
-  }
-  if (typeof j.refresh_token !== 'string' || !j.refresh_token) throw driveProblem('Google signed you in but gave nothing to stay signed in with. Try again.', 'google');
-  const out = { refresh: j.refresh_token, access: j.access_token, expiresIn: Number(j.expires_in) || 3600, email: '', name: '' };
-  try {
-    const who = await http({ method: 'GET', url: `${endpoints.api}/about?fields=${encodeURIComponent('user(displayName,emailAddress)')}`, headers: { Authorization: `Bearer ${out.access}` }, signal: o.signal });
-    if (who.status === 200) {
-      const user = (JSON.parse(who.body.toString('utf8')).user) || {};
-      out.email = String(user.emailAddress || '');
-      out.name = String(user.displayName || '');
-    } else if (who.status === 403 && /accessNotConfigured|SERVICE_DISABLED|has not been used|is disabled/i.test(who.body.toString('utf8'))) {
-      out.apiOff = true;
-    }
-  } catch (e) { if (e.name === 'AbortError') throw e; /* whose account it is, is only shown */ }
-  return out;
-}
-
-/* Tells Google to forget the sign-in, then forgets it here. {revoked: true} or {revoked: false, why}: it is forgotten
-   here either way. */
-async function driveDisconnect(o) {
-  const s = o.store.load();
-  let out = { revoked: false, why: 'there was no sign-in' };
-  if (s.refresh) {
-    try {
-      const res = await o.http({ method: 'POST', url: `${o.endpoints.revoke}?${driveForm({ token: s.refresh })}`, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeoutMs: 20000 });
-      // 400 invalid_token: Google had already forgotten it.
-      out = res.status === 200 || res.status === 400 ? { revoked: true } : { revoked: false, why: `Google answered ${res.status}` };
-    } catch (e) {
-      out = { revoked: false, why: driveNetProblem(e).message };
-    }
-  }
-  o.store.signOut();
-  if (o.tokens) o.tokens.forget();
-  return out;
-}
-
-/* The engine's search, in Drive's own words: "title = 'a' and parentId = 'b'" -> "name = 'a' and 'b' in parents and
-   trashed = false". */
-function driveQuery(query) {
+function syncSummaryText(s) {
   const parts = [];
-  for (const m of String(query).matchAll(/(title|parentId|mimeType) = '((?:[^'\\]|\\.)*)'/g)) {
-    parts.push(m[1] === 'title' ? `name = '${m[2]}'` : m[1] === 'parentId' ? `'${m[2]}' in parents` : `mimeType = '${m[2]}'`);
-  }
-  parts.push('trashed = false');
-  return parts.join(' and ');
+  if (s.copied) parts.push(`${driveCount(s.copied, 'new file')} copied`);
+  if (s.replaced) parts.push(`${driveCount(s.replaced, 'file')} updated`);
+  if (s.deleted) parts.push(`${driveCount(s.deleted, 'file')} removed`);
+  if (s.conflicts.length) parts.push(`${driveCount(s.conflicts.length, 'file')} changed on both sides (both versions kept)`);
+  return parts.length ? parts.join(', ') : 'nothing had changed';
 }
 
-/* Remembers the addresses of resumable uploads that were begun, in a file (not backed up), so that a large upload
-   stopped part-way carries on in a later run. An address is good for a week. */
-function driveSessions(fs, file, now) {
-  const read = () => { try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); return j && typeof j === 'object' ? j : {}; } catch (e) { return {}; } };
-  const write = j => {
-    try {
-      if (!Object.keys(j).length) { try { fs.unlinkSync(file); } catch (e) { /* none */ } return; }
-      fs.writeFileSync(`${file}.scriptorium-tmp`, JSON.stringify(j), { mode: 0o600 });
-      fs.renameSync(`${file}.scriptorium-tmp`, file);
-    } catch (e) { /* a resumed upload is a convenience */ }
-  };
-  const clock = now || (() => Date.now());
-  return {
-    get(key) { const e = read()[key]; return e && typeof e.uri === 'string' && clock() - e.at < 6 * 24 * 3600 * 1000 ? e.uri : null; },
-    set(key, uri) { const j = read(); for (const k of Object.keys(j)) if (clock() - j[k].at > 7 * 24 * 3600 * 1000) delete j[k]; j[key] = { uri, at: clock() }; write(j); },
-    delete(key) { const j = read(); if (j[key]) { delete j[key]; write(j); } },
-  };
+/* ---------- Failures, in plain words ---------- */
+
+/* Makes a problem out of a run of rclone that failed. r is rcloneExec's result; what says what was being done
+   ('sign-in', 'list', 'sync', 'first', 'copy', 'check', 'version'). Never returns rclone's own words as the
+   message: those go in tail. */
+function syncExplain(r, what) {
+  const tail = (r.lines || []).filter(l => l.level !== 'info' && l.level !== 'debug' || /error|fail|abort/i.test(l.msg)).slice(-12).map(l => l.msg);
+  const text = (r.lines || []).map(l => l.msg).join('\n') + '\n' + (what === 'version' ? r.out || '' : '');
+  const has = re => re.test(text);
+  const P = (kind, message, cause, next) => syncProblem(kind, message, cause, next, tail);
+  if (r.failed) {
+    const code = r.failed.code || '';
+    if (code === 'ENOENT') return P('rclone', 'rclone is not where Scriptorium expected it.', 'It was moved or removed since it was found.', 'Open Settings → Scriptorium → Google Drive sync and choose “Find or download rclone”.');
+    if (code === 'EACCES' || code === 'EPERM') return P('rclone', 'This computer would not let rclone run.', 'The file is not marked as a program, or security software (or macOS Gatekeeper, or a company’s policy) refused it.', 'On macOS: System Settings → Privacy & Security → allow rclone. Otherwise install rclone yourself (rclone.org/downloads) and give its path in Settings → Scriptorium.');
+    if (code === 'EBADARCH' || code === 'ENOEXEC' || /bad cpu|exec format/i.test(String(r.failed.message))) return P('rclone', 'That rclone is built for another kind of computer.', 'It is for a different processor or system than this one.', 'Remove the path in Settings → Scriptorium and let Scriptorium download the right one.');
+    return P('rclone', 'rclone could not be started.', 'The system refused to run it.', 'Install rclone yourself (rclone.org/downloads) and give its path in Settings → Scriptorium, or copy the diagnostic report and ask for help.');
+  }
+  if (r.stopped) return P('stopped', what === 'sign-in' ? 'The sign-in was stopped.' : 'Stopped.', '', what === 'sign-in' ? 'Nothing was connected. Run it again when you like.' : 'What was done so far is kept on both sides. The next sync carries on from there.');
+  if (r.timedOut) {
+    if (what === 'sign-in') return P('connect', 'Google’s answer did not arrive in ten minutes, so the sign-in was given up.', 'The page in the browser was closed or never finished, or Google refused the sign-in (see what the page said).', 'Try again and finish the page in the browser. If Google’s page said “Access blocked” or “deleted_client”, use a client ID of your own.');
+    return P('network', 'Google Drive took too long to answer.', 'The connection is slow or was lost.', 'Check the internet connection. The next sync tries again by itself.');
+  }
+  if (has(/address already in use|bind: (?:An attempt|Only one usage)/i)) return P('busy', 'Another sign-in is already waiting on this computer.', `rclone listens on port ${RCLONE.port} for Google’s answer, and something else (most likely another rclone, or a second Obsidian window) is using it.`, 'Finish or close the other sign-in, wait a few seconds, and try again.');
+  if (has(/didn't find section in config file|empty token found|couldn't find token|failed to create oauth client|token.*not found/i)) return P('connect', 'This computer is not signed in to Google Drive.', 'The sign-in was never finished here, or it was removed.', 'Choose “Connect to Google Drive” and sign in.');
+  if (has(/invalid_grant|token has been expired or revoked|invalid_token|unauthorized: 401|error 401/i)) return P('connect', 'Google no longer accepts this computer’s sign-in.', 'The sign-in ran out or was withdrawn (a changed password, access removed in your Google account, or a client ID left in “Testing”, which Google signs out after seven days).', 'Choose “Connect to Google Drive” and sign in again. Your files and the choice of folder are kept.');
+  if (has(/deleted_client|invalid_client|unauthorized_client|disabled_client|org_internal/i)) return P('client', 'Google refused the app that asked to sign in.', 'With rclone’s shared sign-in: rclone’s authors are retiring it during 2026. With a client ID of your own: the ID or the secret is wrong, or the client was deleted.', 'Choose “Connect to Google Drive” → “Use a client ID of my own” and follow the steps there.');
+  if (has(/access_denied/i)) return P('connect', 'Google did not give access.', 'The sign-in page was cancelled, or the Google app is in “Testing” and this account is not one of its test users.', 'Sign in again and choose Allow. With a client ID of your own: publish the app (Audience → Publish app) or add the account as a test user.');
+  if (has(/accessNotConfigured|has not been used in project|API .* is disabled|SERVICE_DISABLED/i)) return P('client', 'The Google Drive API is not turned on for your client ID’s project.', 'Step 2 of making a client ID was skipped.', 'Open console.cloud.google.com/apis/library/drive.googleapis.com, choose the project, click Enable, wait a minute and try again.');
+  if (has(/storageQuotaExceeded|storage quota has been exceeded|quota.*storage/i)) return P('quota', 'Your Google Drive is full.', 'There is no room left in the Google account for the files that need to go up.', 'Free some room in Drive (or its trash), then choose “Sync now”. Nothing was lost: the files are still on this computer.');
+  if (has(/userRateLimitExceeded|rateLimitExceeded|rate limit exceeded|quota exceeded|too many requests|error 429/i)) return P('rate', 'Google asked rclone to slow down.', 'Too many requests were made in a short time. rclone’s shared sign-in is rationed among everyone who uses it.', 'Wait a few minutes: the next sync tries again by itself. If it keeps happening, connect with a client ID of your own.');
+  if (has(/no such host|dial tcp|i\/o timeout|connection refused|connection reset|network is unreachable|tls handshake|no route to host|temporary failure in name resolution|context deadline exceeded|unexpected eof|server misbehaving|proxyconnect/i)) return P('network', 'Google Drive could not be reached.', 'This computer is offline, or a firewall or proxy is in the way.', 'Check the internet connection. Nothing was changed; the next sync tries again by itself.');
+  const many = /too many deletes \(>(\d+)%, (\d+) of (\d+)\) on Path([12])/.exec(text);
+  if (many) {
+    const side = many[4] === '1' ? 'on this computer' : 'in the Drive folder';
+    const e = P('deletes', `${many[2]} of the ${many[3]} files and folders that are synced disappeared ${side} since the last sync, which is more than the safety limit (${many[1]}%), so nothing was changed.`,
+      `A folder was deleted, moved or renamed ${side}. If that was you, it is fine to go on; if not, look before you do.`,
+      `Choose “Sync anyway” to remove the same files on the other side (they go to ${many[4] === '1' ? 'Drive’s trash' : 'Scriptorium’s folder of replaced files, for thirty days'}), or put the files back and sync again.`);
+    e.deleted = Number(many[2]); e.side = many[4] === '1' ? 'local' : 'drive';
+    return e;
+  }
+  const access = /Access test failed: Path1 count (\d+), Path2 count (\d+)/.exec(text);
+  if (access || has(/check file check failed|Access test failed/)) {
+    const side = access && Number(access[1]) === 0 ? 'in this vault' : access && Number(access[2]) === 0 ? 'in the Drive folder' : 'on one side';
+    return P('check', `The file that proves both sides are there (${SYNC_SENTINEL}) is missing ${side}, so nothing was changed.`,
+      'The Drive folder was emptied, replaced or moved, the vault’s folder is not the one that was synced, or that one file was deleted.',
+      'Look at both sides. If they are as you expect, choose “Set up the sync again”: it compares the two sides and shows you what it will do first.');
+  }
+  const empty = /Empty current Path([12]) listing/.exec(text);
+  if (empty) {
+    return P('empty', `${empty[1] === '1' ? 'This vault’s folder' : 'The Drive folder'} looks empty or cannot be read, so nothing was changed.`,
+      empty[1] === '1' ? 'The disk the vault is on is not connected, or its files were moved.' : 'The Drive folder was deleted, moved, renamed or emptied, or a different Google account is signed in.',
+      'Nothing was deleted on the other side. Put the folder back, or choose “Set up the sync again” to pick the folder and compare the two sides.');
+  }
+  if (has(/directory not found|couldn't find root directory|error reading source root directory|error reading destination root directory/i)) return P('folder', 'The Drive folder was not found.', 'It was deleted, moved or renamed in Google Drive, or a different Google account is signed in.', 'Choose “Set up the sync again” and pick the folder. Nothing was deleted on this computer.');
+  if (has(/prior lock file found|lock file found/i)) return P('busy', 'Another sync of this vault is still running, or one was cut off a moment ago.', 'A second Obsidian window, or a run that was interrupted. The lock clears by itself after two minutes.', 'Wait two minutes and choose “Sync now”.');
+  if (has(/must run --resync|requires? --resync|run --resync to recover|cannot find prior Path|filters file (?:has changed|md5)|safety abort.*filters/i)) return P('resync', 'The sync lost its record of the last run, so it stopped rather than guess.', 'A run was cut off at a bad moment, the record was deleted, or the list of what is synced changed.', 'Choose “Set up the sync again”: it compares the two sides, shows you what it will do, and keeps both versions of anything that differs.');
+  if (has(/no space left on device|not enough space|disk full|There is not enough space/i)) return P('disk', 'This computer’s disk is full.', 'There was no room for the files coming from Drive.', 'Free some room, then choose “Sync now”.');
+  if (has(/permission denied|access is denied|operation not permitted|being used by another process/i)) return P('disk', 'A file on this computer could not be read or written.', 'It is open in another program, or the vault’s folder does not allow it.', 'Close programs that have the vault’s files open and choose “Sync now”. The details below name the file.');
+  if (has(/file name too long|path too long|filename too long/i)) return P('disk', 'A file’s name or path is too long for this computer.', 'A name that fits in Drive can be too long for a folder deep in this computer.', 'Shorten the name (the details below show which) on the side where it is, and sync again.');
+  if (has(/unknown flag|unknown command|unknown shorthand flag|invalid argument/i)) return P('rclone', 'This rclone does not understand what Scriptorium asked of it.', `It is older or newer than the version Scriptorium was written for (${RCLONE.version}).`, 'In Settings → Scriptorium, clear the path to rclone and let Scriptorium download its own.');
+  if (what === 'sign-in') return P('connect', 'The sign-in did not finish.', 'Google’s page was closed, or Google refused (see what the page in the browser said).', 'Try again. If Google’s page said “Access blocked” or “deleted_client”, use a client ID of your own.');
+  if (what === 'version') return P('rclone', 'That file does not behave like rclone.', 'It did not answer the question “which version are you?”.', 'Give the path to rclone itself (rclone.exe on Windows) in Settings → Scriptorium, or clear it and let Scriptorium download rclone.');
+  return P('unknown', what === 'list' ? 'The folders in Google Drive could not be listed.' : what === 'copy' ? 'The vault could not be copied from Google Drive.' : 'The sync stopped before it finished.',
+    'rclone reported a problem that Scriptorium does not recognise.', 'Choose “Sync now” to try again: an interrupted sync is picked up where it stopped. If it happens again, copy the diagnostic report (it has rclone’s own words, without your sign-in) and ask for help.');
 }
 
-/* Makes Drive calls over the REST API: returns run(calls, hooks) -> {results, extra, cost}, the same shape as
-   driveRunner, so DriveSync does not care which it has. o: {fs, path, crypto, api (driveApi), endpoints, work,
-   sessions, limits}. run.caps says what this way can do that the other cannot. */
-function driveDirect(o) {
-  const { fs, path, crypto, api, endpoints } = o, limits = o.limits || DRIVE_DIRECT, sleep = o.sleep || driveSleep;
-  const sessions = o.sessions || new Map();
-  const fields = `fields=${encodeURIComponent(DRIVE_FIELDS)}`;
-  const json = res => { try { return JSON.parse(res.body.toString('utf8')); } catch (e) { return null; } };
-  const meta = f => ({ id: f.id, title: f.name, parentId: Array.isArray(f.parents) ? f.parents[0] : undefined, mimeType: f.mimeType, createdTime: f.createdTime, trashed: Boolean(f.trashed), fileSize: f.size, md5: f.md5Checksum, sha256: f.sha256Checksum });
-  const refused = res => ({ ok: false, error: driveExplain(res), status: res.status });
-  const answer = res => {
-    if (res.status < 200 || res.status > 299) return refused(res);
-    const f = json(res);
-    return f && typeof f.id === 'string' ? { ok: true, data: meta(f) } : { ok: false, error: 'Google Drive answered with something that is not a file' };
+/* ---------- The calls Scriptorium makes ---------- */
+
+/* rclone, ready to be asked things. o: {spawn, fs, path, exe, paths (syncPaths), env, log(run)}. Every method
+   throws a problem in plain words (syncExplain) when rclone fails. */
+function rcloneApi(o) {
+  const { fs, path, paths } = o;
+  const base = ['--config', paths.conf, '--color', 'NEVER', '--use-json-log'];
+  const call = async (what, args, more) => {
+    const began = Date.now();
+    const r = await rcloneExec(Object.assign({ spawn: o.spawn, exe: o.exe, args: base.concat(args), env: o.env, timeout: SYNC_TIMES.call }, more));
+    if (o.log) o.log({ what, ms: Date.now() - began, code: r.code, failed: r.failed ? (r.failed.code || 'error') : '', stopped: r.stopped, timedOut: r.timedOut, lines: r.lines });
+    return r;
   };
-  const send = (method, url, body, signal, what) => api({ method, url, headers: body ? { 'Content-Type': 'application/json; charset=UTF-8' } : {}, body: body ? JSON.stringify(body) : null }, { signal, what });
-  const id = s => encodeURIComponent(String(s));
-
-  /* The file a reference names, checked: {file, sha256, size} or {error}. */
-  const refOf = ref => {
-    const m = /^sha256:([0-9a-f]{64}):([\s\S]+)$/.exec(String(ref || ''));
-    if (!m) return { error: 'no file was named' };
-    try { return { file: m[2], sha256: m[1], size: fs.statSync(m[2]).size }; } catch (e) { return { error: `the file could not be read (${e.code || e.message})` }; }
+  const must = async (what, args, more) => {
+    const r = await call(what, args, more);
+    if (r.failed || r.stopped || r.timedOut || r.code !== 0) throw syncExplain(r, what);
+    return r;
   };
-  const hashFile = (file, algorithm) => {
-    const h = crypto.createHash(algorithm), fd = fs.openSync(file, 'r'), buf = Buffer.alloc(1024 * 1024);
-    try { for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n)); } finally { fs.closeSync(fd); }
-    return h.digest('hex');
-  };
-  /* Whether what Drive now holds is the file that was meant: by Drive's own SHA-256 where it gives one, else MD5. */
-  const arrived = (f, ref) => {
-    if (!f || typeof f.id !== 'string') return false;
-    if (f.size !== undefined && String(f.size) !== String(ref.size)) return false;
-    if (typeof f.sha256Checksum === 'string') return f.sha256Checksum.toLowerCase() === ref.sha256;
-    if (typeof f.md5Checksum === 'string') return f.md5Checksum.toLowerCase() === hashFile(ref.file, 'md5');
-    return true;
-  };
-
-  const startUrl = (fileId, type) => `${endpoints.upload}/files${fileId ? `/${id(fileId)}` : ''}?uploadType=${type}&${fields}`;
-
-  async function uploadSingle(ref, about, fileId, signal) {
-    const bytes = fs.readFileSync(ref.file);
-    if (crypto.createHash('sha256').update(bytes).digest('hex') !== ref.sha256) return { ok: false, error: 'the file changed while it was being sent; it goes with the next backup' };
-    const boundary = `scriptorium${crypto.randomBytes(12).toString('hex')}`;
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(about)}\r\n--${boundary}\r\nContent-Type: ${about.mimeType}\r\n\r\n`, 'utf8'),
-      bytes, Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'),
-    ]);
-    const res = await api({ method: fileId ? 'PATCH' : 'POST', url: startUrl(fileId, 'multipart'), headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body }, { signal, what: fileId ? 'update a file' : 'upload a file' });
-    return { res, file: res.status >= 200 && res.status <= 299 ? json(res) : null };
-  }
-
-  /* Where a resumable upload stands: {done: file} | {offset} | {gone: true}. */
-  async function standing(uri, size, signal) {
-    const res = await api({ method: 'PUT', url: uri, headers: { 'Content-Range': `bytes */${size}` } }, { signal, what: 'ask where an upload stands' });
-    if (res.status === 200 || res.status === 201) return { done: json(res) };
-    if (res.status === 308) { const m = /bytes=0-(\d+)/.exec(String(res.headers.range || '')); return { offset: m ? Number(m[1]) + 1 : 0 }; }
-    return { gone: true, res };
-  }
-
-  async function uploadResumable(ref, about, fileId, signal) {
-    const key = `${ref.sha256}:${fileId || `${about.parents[0]}/${about.name}`}`;
-    let last = null;
-    for (let round = 0; round < 2; round++) {   // a session that Google has dropped is begun again, once
-      let uri = sessions.get(key), offset = 0;
-      if (uri) {
-        const st = await standing(uri, ref.size, signal);
-        if (st.done) { sessions.delete(key); return { res: { status: 200 }, file: st.done }; }
-        if (st.gone) { sessions.delete(key); uri = null; } else offset = st.offset;
+  const api = {
+    exe: o.exe,
+    /* [1, 76, 0], or throws: the file is not rclone, or is too old. */
+    async version() {
+      const r = await call('version', ['version'], { timeout: 20000 });
+      const v = r.failed ? null : rcloneVersion(r.out);
+      if (!v) throw syncExplain(r.failed ? r : Object.assign(r, { code: 1 }), 'version');
+      if (!rcloneOldEnough(v)) {
+        throw syncProblem('rclone', `The rclone on this computer is version ${v.join('.')}, which is too old to sync in both directions safely.`,
+          `Scriptorium needs rclone ${RCLONE.min.join('.')} or newer (it was written for ${RCLONE.version}).`, 'Update rclone, or clear its path in Settings → Scriptorium and let Scriptorium download its own copy.');
       }
-      if (!uri) {
-        const begin = await api({ method: fileId ? 'PATCH' : 'POST', url: startUrl(fileId, 'resumable'),
-          headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': about.mimeType, 'X-Upload-Content-Length': String(ref.size) }, body: JSON.stringify(about) }, { signal, what: 'begin a large upload' });
-        if (begin.status !== 200 || !begin.headers.location) return { res: begin, file: null };
-        uri = String(begin.headers.location);
-        sessions.set(key, uri);
+      return v;
+    },
+    connection() { return syncConnection(fs, paths.conf); },
+    /* The sign-in. client is {id, secret} or null (rclone's shared one). onLink(url) is given the address of the
+       sign-in page, in case the browser did not open by itself. */
+    async connect(client, onLink, signal) {
+      syncConfPrepare(fs, path, paths.conf, client);
+      const r = await call('sign-in', ['config', 'update', RCLONE.remote, 'scope=drive'], {
+        signal, timeout: SYNC_TIMES.signIn, grace: 1500,
+        onLine: l => { const m = /(http:\/\/127\.0\.0\.1:\d+\/auth\S*)/.exec(l.msg); if (m && onLink) onLink(m[1]); },
+      });
+      if (r.failed || r.stopped || r.timedOut || r.code !== 0 || !api.connection().connected) {
+        throw syncExplain(r.code === 0 ? Object.assign(r, { code: 1 }) : r, 'sign-in');
       }
-      const fd = fs.openSync(ref.file, 'r');
-      let stuck = 0, gone = false;
+      await api.dirs({ root: 'my', path: '' });   // the sign-in is good only if Drive answers with it
+    },
+    /* Withdraws the sign-in at Google where rclone can, and removes it from the config. */
+    async disconnect() {
+      await call('disconnect', ['config', 'disconnect', `${RCLONE.remote}:`], { timeout: 30000 });
+      await call('delete', ['config', 'delete', RCLONE.remote], { timeout: 30000 });
+      const left = syncConfRead(fs, paths.conf);
+      if (left[RCLONE.remote]) throw syncProblem('disk', 'The sign-in could not be removed from this computer.', `The file ${paths.conf} could not be changed.`, 'Delete that file by hand: it holds nothing else.');
+    },
+    /* The folders inside a Drive folder: [{name, id}]. */
+    async dirs(link, signal) {
+      const t = syncTarget(link);
+      const r = await must('list', ['lsjson', t.fs].concat(t.flags, ['--dirs-only', '--no-modtime', '--no-mimetype', '--drive-skip-gdocs']), { signal });
+      const dirs = syncParseDirs(r.out);
+      if (!dirs) throw syncExplain(Object.assign(r, { code: 1 }), 'list');
+      return dirs;
+    },
+    /* The shared drives of the account: [{name, id}]; none where there are none or rclone cannot say. */
+    async drives(signal) {
+      const r = await call('drives', ['backend', 'drives', `${RCLONE.remote}:`], { signal, timeout: 60000 });
+      if (r.code !== 0) return [];
+      try { return JSON.parse(r.out).filter(d => d && d.id && d.name).map(d => ({ name: String(d.name), id: String(d.id) })); } catch (e) { return []; }
+    },
+    async mkdir(link, signal) {
+      const t = syncTarget(link);
+      await must('list', ['mkdir', t.fs].concat(t.flags), { signal });
+    },
+    /* {count, bytes} of what would be synced on one side. where is a local folder or a link. */
+    async size(where, filters, signal) {
+      const t = typeof where === 'string' ? { fs: where, flags: [] } : syncTarget(where);
+      const r = await must('check', ['size', t.fs, '--json', '--filter-from', filters, '--drive-skip-gdocs', '--skip-links'].concat(t.flags), { signal, timeout: 30 * 60 * 1000 });
+      try { const j = JSON.parse(r.out); return { count: Number(j.count) || 0, bytes: Number(j.bytes) || 0 }; } catch (e) { throw syncExplain(Object.assign(r, { code: 1 }), 'check'); }
+    },
+    /* How the two sides compare, file by file (syncParseCheck). rclone ends with 1 when they differ: not a failure. */
+    async compare(local, link, filters, signal) {
+      const t = syncTarget(link);
+      const r = await call('check', ['check', local, t.fs, '--combined', '-', '--filter-from', filters, '--drive-skip-gdocs', '--skip-links'].concat(t.flags), { signal, timeout: 60 * 60 * 1000 });
+      if (r.failed || r.stopped || r.timedOut || (r.code !== 0 && r.code !== 1) || (r.code === 1 && !r.out.trim())) throw syncExplain(r, 'check');
+      return syncParseCheck(r.out);
+    },
+    /* Puts the check file on the Drive side. */
+    async sentinel(local, link, signal) {
+      const t = syncTarget(link);
+      await must('check', ['copyto', path.join(local, SYNC_SENTINEL), `${t.fs}/${SYNC_SENTINEL}`.replace(/:\//, ':')].concat(t.flags), { signal });
+    },
+    /* Copies a Drive folder into a local folder (retrieving a vault). onStats({bytes, totalBytes, transfers, totalTransfers}). */
+    async copy(link, local, filters, onStats, signal) {
+      const t = syncTarget(link);
+      await must('copy', ['copy', t.fs, local, '--filter-from', filters, '--drive-skip-gdocs', '--create-empty-src-dirs', '--stats', '1s', '-v'].concat(t.flags), {
+        signal, timeout: 0, onLine: l => { if (l.stats && onStats) onStats(l.stats); },
+      });
+    },
+    /* One run of the sync; resolves rcloneExec's result with .summary, or throws a problem. */
+    async bisync(args, onLine, signal) {
+      const r = await call(args.includes('--resync') ? 'first' : 'sync', args, { signal, timeout: 0, grace: 75000, onLine });
+      if (r.failed || r.stopped || r.timedOut || r.code !== 0) throw syncExplain(r, 'sync');
+      r.summary = syncSummary(r.lines);
+      return r;
+    },
+  };
+  return api;
+}
+
+/* ---------- One run at a time ---------- */
+
+/* Takes the lock for a vault: true if it is ours now. The lock is a file holding who has it and since when; one
+   left by a program that is gone, or older than six hours, is taken over. alive(pid) says whether a process runs. */
+function syncLock(fs, path, file, pid, now, alive) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  for (let tries = 0; tries < 2; tries++) {
+    try { fs.writeFileSync(file, JSON.stringify({ pid, at: now }), { flag: 'wx' }); return true; } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let held = null;
+      try { held = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (x) { /* half written, or gone: try again */ }
+      if (held && alive(held.pid) && now - held.at < SYNC_TIMES.lockStale) return false;
+      try { fs.unlinkSync(file); } catch (x) { /* someone else removed it */ }
+    }
+  }
+  return false;
+}
+function syncUnlock(fs, file, pid) {
+  try { if (JSON.parse(fs.readFileSync(file, 'utf8')).pid === pid) fs.unlinkSync(file); } catch (e) { /* not ours, or gone */ }
+}
+
+/* rclone keeps a lock of its own beside its record of the sync, and leaves it behind when it is cut off (a crash,
+   the computer going to sleep for good); it would then refuse to run for two minutes. Whoever holds Scriptorium's
+   lock may remove one whose rclone is gone. */
+function syncClearStale(fs, path, workdir, alive) {
+  let names = [];
+  try { names = fs.readdirSync(workdir); } catch (e) { return 0; }
+  let n = 0;
+  for (const name of names) {
+    if (!name.endsWith('.lck')) continue;
+    let pid = 0;
+    try { pid = Number(JSON.parse(fs.readFileSync(path.join(workdir, name), 'utf8')).PID) || 0; } catch (e) { /* half written: its writer is gone */ }
+    if (pid && alive(pid)) continue;
+    try { fs.unlinkSync(path.join(workdir, name)); n++; } catch (e) { /* rclone says so if it is in the way */ }
+  }
+  return n;
+}
+
+/* Removes what past syncs replaced on this computer once it is older than `days` (folders named by date). */
+function syncPrune(fs, path, dir, days, now) {
+  let removed = 0;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (e) { return 0; }
+  for (const name of names) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(name);
+    if (!m) continue;
+    if (now - new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() > (days + 1) * 86400000) {
+      try { fs.rmSync(path.join(dir, name), { recursive: true, force: true }); removed++; } catch (e) { /* next time */ }
+    }
+  }
+  return removed;
+}
+
+/* One sync of a linked vault. o: {api, fs, path, crypto, paths, id, dir (the vault), link, settings, force, now,
+   pid, alive, onLine, signal}. Resolves {summary, skipped} ('busy': another run has the lock); throws a problem.
+   Before rclone is run: the vault's folder and its check file must be there (a vault whose disk is missing, or a
+   folder that was swapped, never reaches rclone). */
+async function syncOnce(o) {
+  const { fs, path, paths, id } = o;
+  const link = o.link;
+  if (!link) throw syncProblem('setup', 'This vault is not set up to sync with Google Drive yet.', '', 'Run “Scriptorium: Sync this vault with Google Drive”.');
+  if (!link.first) throw syncProblem('setup', 'The first sync of this vault was not finished.', 'The window was closed before it ran.', 'Run “Scriptorium: Sync this vault with Google Drive” and confirm the first sync.');
+  let there = false;
+  try { there = fs.statSync(o.dir).isDirectory(); } catch (e) { /* not there */ }
+  if (!there) throw syncProblem('empty', 'This vault’s folder cannot be found, so nothing was changed.', 'The disk it is on is not connected, or the folder was moved.', 'Nothing was deleted in Drive. Reconnect the disk, or open the vault from where it is now and set up the sync again.');
+  if (!fs.existsSync(path.join(o.dir, SYNC_SENTINEL))) {
+    throw syncProblem('check', `The file that proves both sides are there (${SYNC_SENTINEL}) is missing in this vault, so nothing was changed.`,
+      'It was deleted, or this folder is not the one that was synced.', 'Look at both sides. If they are as you expect, choose “Set up the sync again”: it compares the two sides and shows you what it will do first.');
+  }
+  const lock = path.join(paths.locks, `${id}.lock`);
+  if (!syncLock(fs, path, lock, o.pid, o.now(), o.alive)) return { skipped: 'busy' };
+  try {
+    const filters = path.join(paths.filters, `${id}.txt`), text = syncFilters(o.settings);
+    const stamp = syncStamp(new Date(o.now()));
+    const args = more => syncBisyncArgs(Object.assign({ path, local: o.dir, link, paths, id, settings: o.settings, stamp }, more));
+    syncClearStale(fs, path, path.join(paths.work, id), o.alive);
+    let old = null;
+    try { old = fs.readFileSync(filters, 'utf8'); } catch (e) { /* written below */ }
+    let r;
+    if (old !== text) {
+      // What is synced has changed (a setting, or a newer Scriptorium). What is waiting is synced under the old rules
+      // first, so that a deletion is not undone; then both sides are matched up again under the new ones.
+      if (old !== null) await o.api.bisync(args({ force: o.force }), o.onLine, o.signal);
+      fs.mkdirSync(paths.filters, { recursive: true });
+      fs.writeFileSync(filters, text);
+      r = await o.api.bisync(args({ resync: true, mode: 'newer' }), o.onLine, o.signal);
+    } else {
+      r = await o.api.bisync(args({ force: o.force }), o.onLine, o.signal);
+    }
+    syncPrune(fs, path, path.join(paths.kept, id), o.settings.keepDays, o.now());
+    return { summary: r.summary };
+  } finally {
+    syncUnlock(fs, lock, o.pid);
+  }
+}
+
+function syncStamp(d) {
+  const two = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+}
+
+/* What the first sync would do. Resolves {local: {count, bytes}, drive: {count, bytes}, same, onlyLocal, onlyDrive,
+   differ: [names], unread: [names]}. Writes the filter rules (they are needed to look). */
+async function syncPreview(o) {
+  const { fs, path, paths, id } = o;
+  fs.mkdirSync(paths.filters, { recursive: true });
+  const filters = path.join(paths.filters, `${id}.preview.txt`);
+  fs.writeFileSync(filters, syncFilters(o.settings));
+  try {
+    const local = await o.api.size(o.dir, filters, o.signal), drive = await o.api.size(o.link, filters, o.signal);
+    const cmp = await o.api.compare(o.dir, o.link, filters, o.signal);
+    const both = cmp.same.length + cmp.differ.length + cmp.unread.length;   // the check file is not counted
+    return { local: { count: both + cmp.local.length, bytes: local.bytes }, drive: { count: both + cmp.drive.length, bytes: drive.bytes },
+      same: cmp.same.length, onlyLocal: cmp.local.length, onlyDrive: cmp.drive.length, differ: cmp.differ, unread: cmp.unread };
+  } finally {
+    try { fs.unlinkSync(filters); } catch (e) { /* written again next time */ }
+  }
+}
+
+/* The first sync of a vault with its Drive folder (and a fresh start after trouble). o: as syncOnce, plus differ
+   (names that differ, from syncPreview) and keep: 'both' (the default: this computer's version is renamed
+   "name.conflict1.md" and both end up on both sides), 'local' or 'drive' (that side's version replaces the other;
+   what is replaced here goes to the folder of replaced files, what is replaced in Drive stays in Drive's version
+   history). Files that are on one side only are always copied to the other: a first sync deletes nothing.
+   Resolves {summary, renamed: [[from, to]]}. */
+async function syncFirst(o) {
+  const { fs, path, paths, id } = o;
+  const lock = path.join(paths.locks, `${id}.lock`);
+  if (!syncLock(fs, path, lock, o.pid, o.now(), o.alive)) throw syncProblem('busy', 'Another sync of this vault is running.', 'A second window, or a run that has not finished.', 'Wait for it to finish and try again.');
+  try {
+    const renamed = [];
+    if ((o.keep || 'both') === 'both' && o.differ && o.differ.length) {
+      const taken = new Set(o.taken || []);
+      for (const rel of o.differ) {
+        const from = path.join(o.dir, ...rel.split('/'));
+        if (!fs.existsSync(from)) continue;
+        let to;
+        do { to = syncConflictName(rel, taken); } while (fs.existsSync(path.join(o.dir, ...to.split('/'))));
+        fs.renameSync(from, path.join(o.dir, ...to.split('/')));
+        renamed.push([rel, to]);
+      }
+    }
+    const mark = path.join(o.dir, SYNC_SENTINEL);
+    if (!fs.existsSync(mark)) fs.writeFileSync(mark, SYNC_SENTINEL_TEXT);
+    await o.api.sentinel(o.dir, o.link, o.signal);
+    fs.mkdirSync(paths.filters, { recursive: true });
+    fs.writeFileSync(path.join(paths.filters, `${id}.txt`), syncFilters(o.settings));
+    // A record of an earlier link of this vault would mislead rclone: the first sync starts from nothing.
+    try { fs.rmSync(path.join(paths.work, id), { recursive: true, force: true }); } catch (e) { /* rclone says so if it is in the way */ }
+    const mode = o.keep === 'local' ? 'path1' : o.keep === 'drive' ? 'path2' : 'newer';
+    const args = syncBisyncArgs({ path, local: o.dir, link: o.link, paths, id, settings: o.settings, stamp: syncStamp(new Date(o.now())), resync: true, mode });
+    const r = await o.api.bisync(args, o.onLine, o.signal);
+    return { summary: r.summary, renamed };
+  } finally {
+    syncUnlock(fs, lock, o.pid);
+  }
+}
+
+/* ---------- When to sync ---------- */
+
+/* Decides when the sync runs: after Obsidian starts, every so many minutes, a little after the last change to a
+   note, and when asked. Never two runs at once: a request made during a run is kept and run after it. A failure
+   that needs the writer (a sign-in, a safety stop) pauses the timer until they act; any other is tried again,
+   more slowly each time. o: {run(reason, opts) -> Promise<{summary, skipped}>, settings() -> syncSettings,
+   linked() -> bool, onState(state), timers: {set, clear}, now}. */
+class SyncEngine {
+  constructor(o) {
+    this.o = o;
+    this.timers = o.timers || { set: (f, ms) => setTimeout(f, ms), clear: t => clearTimeout(t) };
+    this.now = o.now || (() => Date.now());
+    this.state = { status: 'off', last: 0, summary: null, problem: null, reason: '', since: 0 };
+    this.tick = null;      // the timer of the next regular run
+    this.soon = null;      // the timer of a run that follows a change, or a request made during a run
+    this.running = null; this.again = null; this.fails = 0; this.quiet = 0; this.stopped = true;
+  }
+  set(patch) {
+    Object.assign(this.state, patch);
+    if (this.o.onState) { try { this.o.onState(this.state); } catch (e) { /* the status bar's trouble */ } }
+  }
+  static needsWriter(p) {
+    return Boolean(p) && ['connect', 'client', 'deletes', 'check', 'empty', 'resync', 'folder', 'rclone', 'setup', 'quota'].includes(p.kind);
+  }
+  paused() { return this.state.status === 'problem' && SyncEngine.needsWriter(this.state.problem); }
+  /* Starts (or restarts, after a setting changed or a run ended) the regular timer. first: Obsidian has just
+     started, so the first run comes soon. */
+  start(first) {
+    this.stopped = false;
+    this.cancel();
+    if (!this.o.linked()) { this.set({ status: 'off', problem: null }); return; }
+    if (this.state.status === 'off') this.set({ status: 'idle' });
+    const s = this.o.settings();
+    if (!s.auto || this.paused() || this.running) return;
+    const ms = first ? SYNC_TIMES.onStart : s.minutes * 60000 * Math.min(12, Math.pow(2, this.fails));
+    this.tick = this.timers.set(() => { this.tick = null; void this.run(first ? 'start' : 'timer'); }, ms);
+  }
+  stop() { this.stopped = true; this.cancel(); }
+  cancel() {
+    if (this.tick !== null) { this.timers.clear(this.tick); this.tick = null; }
+    if (this.soon !== null) { this.timers.clear(this.soon); this.soon = null; }
+  }
+  /* A note changed: a run follows the last change by a little. The regular timer is left as it is, so that a long
+     spell of writing is still synced on time. The sync's own writes (during a run and just after) do not count. */
+  touch() {
+    if (this.stopped || this.running || this.now() < this.quiet || !this.o.linked() || !this.o.settings().auto || this.paused()) return;
+    if (this.soon !== null) this.timers.clear(this.soon);
+    this.soon = this.timers.set(() => { this.soon = null; void this.run('change'); }, SYNC_TIMES.onChange);
+  }
+  /* Whether a change is waiting to be synced, or a run is going. */
+  pending() { return this.soon !== null || Boolean(this.running); }
+  /* Runs now. While a run is going, the request waits for it, and one more run follows if it was asked for by the
+     writer or by a change. */
+  run(reason, opts) {
+    if (this.running) {
+      if (reason !== 'timer' && reason !== 'start') this.again = { reason, opts };
+      return this.running;
+    }
+    if (!this.o.linked()) return Promise.resolve({ skipped: 'off' });
+    this.cancel();
+    this.set({ status: 'syncing', reason: reason || 'manual', since: this.now() });
+    const p = (async () => {
+      let result = null;
       try {
-        while (offset < ref.size) {
-          if (fs.fstatSync(fd).size !== ref.size) { sessions.delete(key); return { error: 'the file changed while it was being sent; it goes with the next backup' }; }
-          const n = Math.min(limits.chunk, ref.size - offset), buf = Buffer.alloc(n);
-          fs.readSync(fd, buf, 0, n, offset);
-          let res = null;
-          try {
-            res = await api({ method: 'PUT', url: uri, headers: { 'Content-Range': `bytes ${offset}-${offset + n - 1}/${ref.size}` }, body: buf }, { signal, once: true, what: 'send a part of a large file' });
-          } catch (e) { if (e.name === 'AbortError' || e.kind) throw e; res = null; last = e; }
-          if (res && (res.status === 200 || res.status === 201)) { sessions.delete(key); return { res, file: json(res) }; }
-          if (res && res.status === 308) {
-            const m = /bytes=0-(\d+)/.exec(String(res.headers.range || ''));
-            const next = m ? Number(m[1]) + 1 : 0;
-            stuck = next > offset ? 0 : stuck + 1;
-            offset = next;
-          } else if (res && !driveRetryable(res)) {
-            // Google: any 4xx during a resumable upload means begin again.
-            sessions.delete(key);
-            if (res.status === 404 || res.status === 410) { gone = true; break; }
-            return { res, file: null };
-          } else {
-            // Interrupted: wait, then ask Google how much arrived and carry on from there.
-            if (++stuck >= limits.tries) { if (res) return { res, file: null }; throw driveNetProblem(last); }
-            await sleep(driveDelay(stuck - 1, res, limits, o.random), signal);
-            const st = await standing(uri, ref.size, signal);
-            if (st.done) { sessions.delete(key); return { res: { status: 200 }, file: st.done }; }
-            if (st.gone) { sessions.delete(key); gone = true; break; }
-            offset = st.offset;
-          }
-          if (stuck >= limits.tries) return { error: 'Google Drive kept answering without taking any more of the file' };
-        }
-      } finally {
-        fs.closeSync(fd);
+        result = await this.o.run(reason, opts || {});
+        if (result && result.skipped) this.set({ status: this.state.problem ? 'problem' : 'idle' });
+        else { this.fails = 0; this.set({ status: 'idle', last: this.now(), summary: result && result.summary, problem: null }); }
+      } catch (e) {
+        const problem = e && e.kind ? e : syncProblem('unknown', 'The sync stopped before it finished.', 'Scriptorium itself tripped over something.', 'Choose “Sync now” to try again. If it happens again, copy the diagnostic report and ask for help.', [String((e && e.message) || e)]);
+        if (problem.kind === 'stopped') this.set({ status: this.state.problem ? 'problem' : 'idle' });
+        else { this.fails++; this.set({ status: 'problem', problem }); }
+        result = { problem };
       }
-      if (!gone) return { error: 'the upload ended without an answer from Google Drive' };
-    }
-    return { error: 'Google Drive dropped the upload twice' };
-  }
-
-  /* Sends the file a reference names, as a new file or (fileId) as the new content of one that is there. */
-  async function upload(a, fileId, signal) {
-    const ref = refOf(a.base64Content);
-    if (ref.error) return { ok: false, error: ref.error };
-    const about = fileId ? { mimeType: a.contentMimeType } : { name: a.title, parents: [a.parentId], mimeType: a.contentMimeType };
-    if (fileId && a.title) about.name = a.title;
-    let out = ref.size <= limits.single ? await uploadSingle(ref, about, fileId, signal) : await uploadResumable(ref, about, fileId, signal);
-    // The file to replace is gone from Drive (or was never this connection's): it is sent as a new one.
-    if (fileId && out.res && out.res.status === 404 && a.parentId) return upload(Object.assign({}, a, { title: a.title }), null, signal);
-    if (out.ok === false) return out;
-    if (out.error) return { ok: false, error: out.error };
-    if (!out.file) return refused(out.res);
-    if (!arrived(out.file, ref)) {
-      // Not what was sent. A new file is put in Drive's trash; a replaced one is said to be wrong, and is sent again.
-      if (!fileId) { try { await send('PATCH', `${endpoints.api}/files/${id(out.file.id)}?${fields}`, { trashed: true }, signal, 'trash a bad upload'); } catch (e) { if (e.name === 'AbortError') throw e; } }
-      return { ok: false, error: 'what arrived in Google Drive is not the file that was sent' };
-    }
-    const data = meta(out.file);
-    data.fileSize = String(ref.size);
-    data.mimeType = a.contentMimeType;
-    data.title = data.title === undefined ? a.title : data.title;
-    if (data.parentId === undefined) data.parentId = a.parentId;
-    return { ok: true, data };
-  }
-
-  /* Downloads a file: into memory, or, once it is larger than limits.memory, into a file in the work folder. Broken
-     off, it carries on with Range from the byte it had reached. {id, bytes | file, sha256, size} */
-  async function download(fileId, signal) {
-    const hash = crypto.createHash('sha256');
-    let parts = [], got = 0, fd = null, file = null, stuck = 0, res = null;
-    const reset = () => { parts = []; got = 0; if (fd !== null) fs.ftruncateSync(fd, 0); };
-    let h = hash;
-    const sink = c => {
-      h.update(c);
-      got += c.length;
-      if (fd === null && got > limits.memory) {
-        file = path.join(o.work, `download-${crypto.randomBytes(8).toString('hex')}.scriptorium-tmp`);
-        fd = fs.openSync(file, 'w');
-        let at = 0;
-        for (const p of parts) { fs.writeSync(fd, p, 0, p.length, at); at += p.length; }
-        parts = [];
+      this.quiet = this.now() + 5000;
+      this.running = null;
+      const again = this.again;
+      this.again = null;
+      if (!this.stopped) {
+        this.start(false);
+        if (again && !this.paused()) this.soon = this.timers.set(() => { this.soon = null; void this.run(again.reason, again.opts); }, SYNC_TIMES.again);
       }
-      if (fd !== null) fs.writeSync(fd, c, 0, c.length, got - c.length); else parts.push(c);
-    };
-    try {
-      for (;;) {
-        const from = got;
-        let err = null;
-        try {
-          res = await api({ method: 'GET', url: `${endpoints.api}/files/${id(fileId)}?alt=media`, headers: from ? { Range: `bytes=${from}-` } : {},
-            sink }, { signal, once: true, what: 'download a file' });
-        } catch (e) {
-          if (e.name === 'AbortError' || e.kind) throw e;
-          if (!driveRetryableError(e)) return { ok: false, error: `it could not be saved on this computer (${e.code || e.message})` };
-          err = e;
-        }
-        if (res && !err) {
-          if (res.status === 206 || (res.status === 200 && !from)) break;
-          if (res.status === 200 && from) {
-            // Google sent the whole file again instead of the rest: what came is the file from its first byte, after
-            // the part already held. Begin again, without Range.
-            h = crypto.createHash('sha256'); reset(); stuck++;
-            if (stuck >= limits.tries) return { ok: false, error: 'the download kept breaking off' };
-            continue;
-          }
-          if (res.status === 416 && from) { h = crypto.createHash('sha256'); reset(); continue; }
-          if (!driveRetryable(res)) return refused(res);
-        }
-        stuck = got > from ? 0 : stuck + 1;
-        if (stuck >= limits.tries) { if (err) throw driveNetProblem(err, 'A download kept breaking off'); return refused(res); }
-        await sleep(driveDelay(stuck, res, limits, o.random), signal);
-      }
-      const data = { id: fileId, sha256: h.digest('hex'), size: got };
-      if (fd !== null) { fs.closeSync(fd); fd = null; data.file = file; file = null; } else data.bytes = Buffer.concat(parts);
-      return { ok: true, data };
-    } finally {
-      if (fd !== null) { try { fs.closeSync(fd); } catch (e) { /* closed */ } }
-      if (file) { try { fs.unlinkSync(file); } catch (e) { /* gone */ } }
-    }
-  }
-
-  async function one(call, signal) {
-    const a = call.input || {};
-    if (call.tool === 'search_files') {
-      const res = await api({ method: 'GET', url: `${endpoints.api}/files?${driveForm({ q: driveQuery(a.query), fields: `nextPageToken,files(${DRIVE_FIELDS})`, pageSize: a.pageSize || 100, pageToken: a.pageToken, spaces: 'drive', orderBy: 'createdTime' })}` }, { signal, what: 'list files' });
-      if (res.status !== 200) return refused(res);
-      const j = json(res) || {};
-      return { ok: true, data: { files: (Array.isArray(j.files) ? j.files : []).map(meta), nextPageToken: j.nextPageToken || undefined } };
-    }
-    if (call.tool === 'create_file' && a.contentMimeType === DRIVE_FOLDER_TYPE) {
-      return answer(await send('POST', `${endpoints.api}/files?${fields}`, { name: a.title, parents: [a.parentId], mimeType: DRIVE_FOLDER_TYPE }, signal, 'make a folder'));
-    }
-    if (call.tool === 'create_file') return upload(a, null, signal);
-    if (call.tool === 'update_content') return upload(a, a.fileId, signal);
-    if (call.tool === 'get_file_metadata') return answer(await send('GET', `${endpoints.api}/files/${id(a.fileId)}?${fields}`, null, signal, 'look at a file'));
-    if (call.tool === 'trash_file') return answer(await send('PATCH', `${endpoints.api}/files/${id(a.fileId)}?${fields}`, { trashed: true }, signal, 'trash a file'));
-    if (call.tool === 'update_file') {
-      const now = await send('GET', `${endpoints.api}/files/${id(a.fileId)}?fields=parents`, null, signal, 'look at a file');
-      if (now.status !== 200) return refused(now);
-      const from = ((json(now) || {}).parents || []).filter(p => p !== a.parentId);
-      return answer(await send('PATCH', `${endpoints.api}/files/${id(a.fileId)}?${driveForm({ addParents: a.parentId, removeParents: from.join(',') })}&${fields}`, {}, signal, 'move a file'));
-    }
-    if (call.tool === 'download_file_content') return download(a.fileId, signal);
-    return { ok: false, error: `Scriptorium asked for something the direct connection cannot do (${call.tool}).` };
-  }
-
-  const run = async (calls, hooks = {}) => {
-    const results = [];
-    try {
-      for (const call of calls) {
-        if (hooks.signal && hooks.signal.aborted) throw driveAbort();
-        results.push(await one(call, hooks.signal));
-        if (hooks.onStep) hooks.onStep(results.length);
-      }
-    } catch (e) {
-      // Stopped, signed out or offline part-way: what was answered still counts.
-      e.partial = results.concat(calls.slice(results.length).map(() => ({ ok: false, error: e.message })));
-      throw e;
-    }
-    return { results, extra: [], cost: 0 };
-  };
-  run.caps = { via: 'direct', update: true, mime: driveRealMime };
-  return run;
-}
-
-/* Everything the direct connection needs, from Node's modules: {endpoints, store, http, tokens, client(), connected(),
-   signIn(hooks), disconnect(), runner(o)}. o: {fs, path, os, crypto, http, https, env, platform, seal, log, file}. */
-function driveKit(o) {
-  const endpoints = o.endpoints || driveEndpoints(o.env);
-  const file = o.file || driveAuthFile(o.path, o.env, o.platform, o.os.homedir());
-  const store = driveAuthStore({ fs: o.fs, path: o.path, file, seal: o.seal });
-  const http = driveHttp({ http: o.http, https: o.https });
-  const tokens = driveTokens({ http, store, endpoints, sleep: o.sleep, random: o.random });
-  const api = driveApi({ http, tokens, log: o.log, sleep: o.sleep, random: o.random, limits: o.direct });
-  return {
-    endpoints, store, http, tokens, api,
-    client: () => driveClient(store.load()),
-    /* {connected, email, name, problem}: connected means a sign-in is saved for the client ID now in use. */
-    status() {
-      const s = store.load(), c = driveClient(s);
-      return { connected: Boolean(s.refresh) && Boolean(c.id) && (!s.forClient || s.forClient === c.id), email: s.email || '', name: s.name || '', problem: s.problem || '', client: c, encrypted: Boolean(o.seal) };
-    },
-    async signIn(hooks) {
-      const client = driveClient(store.load());
-      const got = await driveSignIn(Object.assign({ http, server: o.http, crypto: o.crypto, client, endpoints }, hooks));
-      store.save({ refresh: got.refresh, email: got.email, name: got.name, at: new Date().toISOString(), forClient: client.id });
-      tokens.set(got.access, got.expiresIn);
-      return got;
-    },
-    disconnect: () => driveDisconnect({ http, store, endpoints, tokens }),
-    runner: more => driveDirect(Object.assign({ fs: o.fs, path: o.path, crypto: o.crypto, api, endpoints, sleep: o.sleep, random: o.random, limits: o.direct }, more)),
-  };
-}
-
-/* The system keychain, through Electron's safeStorage: {enc, dec}, or null where there is none. */
-function driveSeal() {
-  try {
-    const electron = require('electron');
-    const remote = electron.remote || require('@electron/remote');
-    const safe = remote && remote.safeStorage;
-    if (!safe || !safe.isEncryptionAvailable()) return null;
-    const seal = { enc: text => Buffer.from(safe.encryptString(String(text))).toString('base64'), dec: b64 => safe.decryptString(Buffer.from(b64, 'base64')) };
-    // Used only if it gives back what it was given: a sign-in that cannot be unlocked again is worse than one kept plainly.
-    return seal.dec(seal.enc('scriptorium')) === 'scriptorium' ? seal : null;
-  } catch (e) {
-    return null;
+      return result;
+    })();
+    this.running = p;
+    return p;
   }
 }
 
-/* Opens the folder as a vault in a new Obsidian window, the way Obsidian's own vault chooser does. False if it
-   could not be asked. */
-function openVaultWindow(dir) {
-  try {
-    return require('electron').ipcRenderer.sendSync('vault-open', dir, false) === true;
-  } catch (e) {
-    return false;
+/* What the status bar says: {text, title}. */
+function syncStatusText(state, now) {
+  const hhmm = t => { const d = new Date(t); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  if (state.status === 'syncing') return { text: 'Drive: syncing…', title: 'Syncing this vault with Google Drive' };
+  if (state.status === 'problem') return { text: 'Drive: needs a look', title: `${state.problem ? state.problem.message : 'The last sync did not finish.'} Click for what to do.` };
+  if (state.status === 'idle') {
+    if (!state.last) return { text: 'Drive: ready', title: 'This vault syncs with Google Drive. Click to sync now or to see more.' };
+    const sameDay = new Date(state.last).toDateString() === new Date(now).toDateString();
+    return { text: `Drive: synced ${sameDay ? hhmm(state.last) : new Date(state.last).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`,
+      title: `Last synced ${new Date(state.last).toLocaleString()}${state.summary ? `: ${syncSummaryText(state.summary)}` : ''}. Click to sync now or to see more.` };
   }
-}
-
-function driveWhen(iso) {
-  const d = iso ? new Date(iso) : null;
-  if (!d || isNaN(d)) return 'at an unknown time';
-  return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-
-function driveCount(n, one, many) {
-  return `${n} ${n === 1 ? one : (many || `${one}s`)}`;
+  return { text: '', title: '' };
 }
 
 /* ---------- A report of what happened, for the writer to paste ---------- */
@@ -3904,608 +3055,42 @@ function driveRedact(text, home) {
   for (const h of [home, home && home.split('\\').join('/'), home && home.split('\\').join('\\\\')].filter(Boolean)) t = t.split(h).join('~');
   return t
     .replace(/\b(ya29\.|1\/\/|4\/|GOCSPX-)[\w\-./+=%]{6,}/g, '$1[hidden]')
-    .replace(/\b(Bearer|refresh_token|access_token|client_secret|code|code_verifier|token)(["']?\s*[:=]\s*["']?|\s+)[\w\-./+=%]{12,}/gi, '$1$2[hidden]')
+    .replace(/\b(Bearer|refresh_token|access_token|client_secret|code|code_verifier|token|state)(["']?\s*[:=]\s*["']?|\s+)[\w\-./+=%]{12,}/gi, '$1$2[hidden]')
     .replace(/\b(\d{4})\d*-[0-9a-z_]{8,}\.apps\.googleusercontent\.com/gi, '$1…apps.googleusercontent.com')
     .replace(/\b([\w.+-])[\w.+-]*@([\w-]+(?:\.[\w-]+)+)/g, '$1…@$2')
     .replace(/\b[A-Za-z0-9_\-+/=]{48,}\b/g, '[hidden]');
 }
 
-/* Collects what a run of the backup does. Nothing is collected about what a note says or is called: a failure is
-   recorded by its reason, with any name in it taken out. */
-function driveDiagnostics(info) {
-  const began = Date.now();
-  const d = { info: Object.assign({}, info), events: [], requests: new Map(), began };
-  d.note = (step, detail) => { if (d.events.length < 400) d.events.push({ at: Date.now() - began, step: String(step), detail: detail === undefined ? '' : String(detail) }); };
-  d.set = more => Object.assign(d.info, more);
-  d.request = e => {
-    const key = `${e.method} ${e.what || 'request'} → ${e.status}`;
-    const r = d.requests.get(key) || { n: 0, ms: 0, tries: 0 };
-    r.n++; r.ms += e.ms || 0; r.tries += (e.tries || 1) - 1;
-    d.requests.set(key, r);
-  };
-  return d;
+/* A line of rclone's log with the names of files and folders taken out, as far as they can be recognised. */
+function syncNameless(msg, hide) {
+  let m = String(msg || '').split('\n')[0];
+  for (const h of (hide || []).filter(x => x && x.length > 2).sort((a, b) => b.length - a.length)) m = m.split(h).join('[folder]');
+  return m.replace(/\[folder\](?:[\\/][^:"\n]*)?/g, '[a file]').replace(/(\s-\s)(?!Path[12]\b)\S.*$/, '$1[a file]').replace(/"[^"\n]{1,400}"/g, '"…"').replace(/“[^”]*”/g, '“…”');
 }
 
-/* A reason with the names of files and folders taken out of it: what stands between curly quotes or after "path". */
-function driveNameless(why) {
-  return String(why || '').replace(/“[^”]*”/g, '“…”').replace(/'[^'\n]{1,300}'/g, '‘…’')
-    .replace(/((?:open|stat|rename|mkdir|unlink|copyfile|scandir|lstat|utime|rmdir|write|read|access)\s+)\S.*$/i, '$1[a path]');
-}
-
-function driveReport(d, home) {
-  const i = d.info, out = [];
-  const clock = ms => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${(ms % 60000 / 1000).toFixed(1).padStart(4, '0')}`;
-  out.push('Scriptorium: Google Drive diagnostic report');
-  out.push('(No text of any note, no name of any file or vault, no password, token or key. Paths in your home folder start at ~.)');
+/* info: {version, obsidian, platform, arch, release, rclone: {kind, version}, connected, own, linked, where (root
+   kind and depth), settings, state}; runs: what rcloneApi logged, newest last. */
+function syncReport(info, runs, home, hide) {
+  const out = [];
+  out.push('Scriptorium: Google Drive sync diagnostic report');
+  out.push('(No password, token or key. Names of files and folders are left out where Scriptorium recognises them; paths in your home folder start at ~. Read it over before you post it.)');
   out.push('');
-  out.push(`Scriptorium ${i.version || '?'} · Obsidian ${i.obsidian || '?'} · ${i.platform || '?'} ${i.arch || ''} ${i.release || ''}`.trim());
-  out.push(`Command: ${i.mode || '?'} · Connection: ${i.way === 'direct' ? 'Google sign-in, directly' : i.way === 'claude' ? 'through Claude Code' : '?'}${i.test ? ' · PRETEND GOOGLE (test server)' : ''}`);
-  if (i.way === 'direct') {
-    out.push(`Client ID: ${i.client || 'none'} · Signed in: ${i.connected ? 'yes' : 'no'}${i.since ? ` (since ${i.since})` : ''} · Account: ${i.email || 'unknown'} · Keychain: ${i.encrypted ? 'yes' : 'no'}`);
-  } else if (i.way === 'claude') {
-    out.push(`Lagrange plugin: ${i.lagrange || '?'} · Claude Code: ${i.exe || 'not found'}${i.custom ? ' (path set in Lagrange’s settings)' : ''}`);
-    out.push(`Claude Code sign-in: ${i.auth || 'unknown'} · Google Drive connector: ${i.connector || 'not looked for'}`);
-  }
-  if (i.folder !== undefined) out.push(`Drive folder is the default: ${i.folder ? 'yes' : 'no'} · Vaults found: ${i.vaults === undefined ? 'not looked for' : i.vaults}${i.otherWay ? ` (${i.otherWay} made the other way)` : ''}`);
-  if (i.target) out.push(`Folder chosen: ${i.target}`);
+  out.push(`Scriptorium ${info.version || '?'} · Obsidian ${info.obsidian || '?'} · ${info.platform || '?'} ${info.arch || ''} ${info.release || ''}`.trim());
+  const rc = info.rclone || {};
+  out.push(`rclone: ${rc.version ? `v${rc.version}` : 'not found'}${rc.kind ? ` (${{ custom: 'the path in the settings', downloaded: 'downloaded by Scriptorium', path: 'found on PATH', usual: 'found in a usual place' }[rc.kind] || rc.kind})` : ''} · written for v${RCLONE.version}`);
+  out.push(`Signed in: ${info.connected ? 'yes' : 'no'} · Google app: ${info.own ? 'a client ID of the writer’s own' : 'rclone’s shared one'}${info.type && info.type !== 'drive' ? ` · NOT GOOGLE DRIVE (the remote is of type ${info.type}: a test)` : ''}`);
+  out.push(`This vault: ${info.linked ? `linked (${info.where || '?'})` : 'not linked'}${info.first ? '' : info.linked ? ', first sync not done' : ''}`);
+  if (info.settings) out.push(`Settings: automatic ${info.settings.auto ? `every ${info.settings.minutes} min` : 'off'} · Obsidian’s settings synced: ${info.settings.obsidian ? 'yes' : 'no'} · delete limit ${info.settings.maxDelete}%`);
+  if (info.state) out.push(`Now: ${info.state.status}${info.state.problem ? ` (${info.state.problem.kind}: ${info.state.problem.message})` : ''}`);
   out.push('');
-  out.push('What happened:');
-  for (const e of d.events) out.push(`  ${clock(e.at)}  ${e.step}${e.detail ? `: ${e.detail}` : ''}`);
-  if (d.requests.size) {
-    out.push('');
-    out.push('Requests to Google:');
-    for (const [key, r] of d.requests) out.push(`  ${r.n} × ${key} (${Math.round(r.ms / r.n)} ms each${r.tries ? `, ${r.tries} tried again` : ''})`);
+  out.push('The last things rclone was asked to do (newest last, times in UTC):');
+  if (!runs || !runs.length) out.push('  nothing yet since Obsidian started');
+  for (const r of (runs || []).slice(-12)) {
+    out.push(`  ${r.at || ''} ${r.what}: ${r.failed ? `could not start (${r.failed})` : r.stopped ? 'stopped' : r.timedOut ? 'timed out' : `ended with ${r.code}`} after ${((r.ms || 0) / 1000).toFixed(1)} s`);
+    const bad = (r.lines || []).filter(l => l.level !== 'info' && l.level !== 'debug' && !l.stats);
+    if (r.code !== 0 || r.failed) for (const l of bad.slice(-8)) out.push(`      ${l.level}: ${syncNameless(l.msg, hide)}`);
   }
   return driveRedact(out.join('\n'), home) + '\n';
-}
-
-const DRIVE_TITLES = {
-  backup: 'Back up this vault to Google Drive', sync: 'Sync now with Google Drive', retrieve: 'Retrieve a vault from Google Drive', connect: 'Connect to Google Drive',
-};
-const DRIVE_WAYS = { claude: 'Through Claude Code', direct: 'Google sign-in, directly (preview)' };
-const DRIVE_PRIVACY = 'Your files go only to your own Google Drive, through your Claude account’s Google Drive connector, ' +
-  'run by Claude Code on this computer. The model that makes the calls is given the names of your files and folders ' +
-  '(with the vault’s path on this computer) and their Drive ids; it is not given what is in them: Claude Code sends ' +
-  'and receives the contents itself. ' +
-  'Each batch of about ten files is one short run of Claude Code and uses a little of your subscription’s usage.';
-const DRIVE_PRIVACY_DIRECT = 'Your files go from this computer straight to your own Google Drive, over Google’s Drive API. No model and no server of ours ' +
-  'is involved. Scriptorium asked Google only for the files it stores itself (the permission drive.file): it cannot see or change anything else in your Drive. ' +
-  'The backup is as private as your Google account; Scriptorium does not encrypt it.';
-const DRIVE_MOBILE = 'Backing up to Google Drive works only in Obsidian on a computer. Signing in to Google needs a program that can listen on the computer for ' +
-  'Google’s answer and read and write files outside the vault, and running Claude Code needs a computer too; a phone or tablet allows neither. ' +
-  'Open this vault on a computer to back it up or to retrieve one.';
-/* How to make a Google client ID: [text, link]. Checked against Google's pages in November 2026 (README). */
-const DRIVE_CLIENT_STEPS = [
-  ['Make a Google Cloud project: open the page below, sign in with any Google account (it need not be the one you back up to), name it (say “Scriptorium backup”) and click Create.', 'https://console.cloud.google.com/projectcreate'],
-  ['Turn on the Drive API for it: Menu → APIs & Services → Library → Google Drive API → Enable.', 'https://console.cloud.google.com/apis/library/drive.googleapis.com'],
-  ['Menu → Google Auth Platform → Get started. App name: Scriptorium. Support email: yours. Audience: External. Contact: your email. Agree, then Create.', 'https://console.cloud.google.com/auth/overview'],
-  ['Data Access → Add or remove scopes → tick the one ending in /auth/drive.file → Update → Save.', 'https://console.cloud.google.com/auth/scopes'],
-  ['Audience → Publish app → Confirm. (Left in “Testing”, Google signs you out after seven days, and only the accounts you list under Test users may sign in.)', 'https://console.cloud.google.com/auth/audience'],
-  ['Clients → Create client → Application type: Desktop app → Create. Copy the client ID and the client secret now (Google shows the secret only once), or download the JSON.', 'https://console.cloud.google.com/auth/clients'],
-  ['Paste them below.', ''],
-];
-
-class DriveModal extends Modal {
-  /* mode: 'backup', 'sync' (the same work under another name: bring in, then send), 'retrieve', or 'connect' (sign in
-     to Google and stop). way: 'direct' or 'claude' to use that way whatever the settings say. */
-  constructor(plugin, mode, way) {
-    super(plugin.app);
-    this.plugin = plugin;
-    this.mode = mode;
-    this.way = way || null;
-  }
-
-  onOpen() {
-    this.modalEl.addClass('scriptorium-setup');
-    this.modalEl.addClass('scriptorium-drive');
-    this.titleEl.setText(DRIVE_TITLES[this.mode]);
-    this.tag = this.titleEl.createSpan({ cls: 'scriptorium-drive-tag', text: 'experimental' });
-    this.stop = new AbortController();
-    this.start().catch(e => this.fail(e));
-  }
-
-  onClose() {
-    if (this.stop) this.stop.abort();
-    if (this.work) { try { this.fs.rmSync(this.work, { recursive: true, force: true }); } catch (e) { /* the system clears its temporary folder */ } }
-    this.contentEl.empty();
-  }
-
-  buttons() {
-    return this.contentEl.createDiv({ cls: 'modal-button-container' });
-  }
-
-  closeButton(row, cta) {
-    (row || this.buttons()).createEl('button', { cls: cta === false ? '' : 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
-  }
-
-  /* "Copy diagnostic report": what was tried and what answered, with no secret and nothing of the notes. */
-  reportButton(row) {
-    if (!this.diag) return;
-    (row || this.buttons()).createEl('button', { cls: 'scriptorium-drive-report', text: 'Copy diagnostic report' }).addEventListener('click', () => this.plugin.copyDriveReport(this.diag));
-  }
-
-  note(step, detail) {
-    if (this.diag) this.diag.note(step, detail);
-  }
-
-  wait(text) {
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    el.createEl('p', { cls: 'scriptorium-drive-wait', text });
-    this.buttons().createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
-  }
-
-  /* Said at the top of every page when the requests go to the tests' pretend Google instead of Google. */
-  banner() {
-    if (this.kit && this.kit.endpoints.test) this.contentEl.createEl('p', { cls: 'scriptorium-setup-problem', text: `TEST: talking to a pretend Google at ${this.kit.endpoints.test}, not to Google.` });
-  }
-
-  /* The other way of reaching Drive, offered where this one is stuck. */
-  switchButton(row, text) {
-    const other = this.way === 'direct' ? 'claude' : 'direct';
-    row.createEl('button', { text: text || (other === 'direct' ? 'Use a Google sign-in instead (preview)' : 'Use Claude Code instead') }).addEventListener('click', () => {
-      this.note('switched', other);
-      this.way = other;
-      this.start().catch(e => this.fail(e));
-    });
-  }
-
-  fail(e) {
-    if (!this.contentEl.isConnected) return;
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    const stopped = e && e.name === 'AbortError';
-    if (this.kit) { try { this.facts(this.kit.status()); } catch (x) { /* the report keeps what it had */ } }
-    this.note(stopped ? 'stopped' : 'failed', stopped ? '' : driveNameless((e && e.message) || String(e)));
-    if (stopped) el.createEl('p', { text: 'Stopped. What was done so far is kept, here and in Google Drive: run it again to carry on from there.' });
-    else el.createEl('p', { cls: 'scriptorium-setup-problem', text: (e && e.message) || String(e) });
-    if (e && e.steps && e.steps.length) this.steps(e.steps);
-    const row = this.buttons();
-    if (e && e.kind === 'signin' && this.kit) row.createEl('button', { cls: 'mod-cta', text: 'Connect again' }).addEventListener('click', () => this.askConnect(''));
-    if (e && e.kind === 'client' && this.kit) row.createEl('button', { cls: 'mod-cta', text: 'Change the client ID' }).addEventListener('click', () => this.askClient(''));
-    if (!stopped) this.reportButton(row);
-    this.closeButton(row, !(e && (e.kind === 'signin' || e.kind === 'client')));
-  }
-
-  steps(steps) {
-    const el = this.contentEl;
-    el.createEl('p', { text: 'What to do:' });
-    const ol = el.createEl('ol', { cls: 'scriptorium-drive-steps' });
-    for (const s of steps) ol.createEl('li', { text: s });
-  }
-
-  problem(text, steps, offerOther) {
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    this.note('could not start', driveNameless(text));
-    el.createEl('p', { cls: 'scriptorium-setup-problem', text });
-    if (steps && steps.length) this.steps(steps);
-    if (offerOther) el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Or do without Claude Code: sign in to Google yourself, in your browser, and Scriptorium talks to Google Drive directly (a preview; it needs a Google client ID, which the next page explains). A vault backed up through Claude Code cannot be seen that way, though: it has to be backed up again with the Google sign-in.' });
-    const row = this.buttons();
-    if (offerOther) this.switchButton(row);
-    this.reportButton(row);
-    this.closeButton(row);
-  }
-
-  async start() {
-    const p = this.plugin;
-    if (!p.onDesktop()) { this.problem(DRIVE_MOBILE, []); return; }
-    this.fs = require('fs');
-    this.path = require('path');
-    const os = require('os');
-    if (!this.work) this.work = this.fs.mkdtempSync(this.path.join(os.tmpdir(), 'scriptorium-drive-'));
-    this.settings = driveSettings(p.settings, os.hostname());
-    this.vaultDir = p.app.vault.adapter.basePath;
-    this.way = this.way || (this.mode === 'connect' ? 'direct' : driveTransport(p.settings));
-    this.tag.setText(this.way === 'direct' ? 'preview' : 'experimental');
-    if (!this.diag) this.diag = p.driveDiag = driveDiagnostics(p.driveFacts());
-    this.diag.set({ mode: this.mode, way: this.way, folder: this.settings.folder === DRIVE_ROOT });
-    this.note('started', `${this.mode}, ${this.way}`);
-    this.kit = null;
-    if (this.way === 'direct') await this.startDirect(); else await this.startClaude();
-  }
-
-  async startClaude() {
-    const tools = this.plugin.driveTools();
-    this.diag.set({ lagrange: tools.problem ? 'off or out of date' : 'on', custom: Boolean(tools.custom) });
-    if (tools.problem) { this.problem(tools.problem, [], true); return; }
-    this.wait('Checking Claude Code and its Google Drive connector…');
-    const seen = {};
-    const check = await driveCheck(tools.cli, tools.custom, seen);
-    this.diag.set({ exe: seen.exe || '', auth: seen.auth || '', connector: seen.connector || '' });
-    if (this.stop.signal.aborted) return;
-    if (!check.ok) { this.problem(check.problem, check.steps, true); return; }
-    this.note('Claude Code and its Google Drive connector are ready');
-    this.make = (dir, vault) => new DriveSync({
-      fs: this.fs, path: this.path, crypto: require('crypto'), dir, work: this.work, vault, folder: this.settings.folder, device: this.settings.device,
-      signal: this.stop.signal, say: p => this.progress(p),
-      run: driveRunner({ cli: tools.cli, fs: this.fs, path: this.path, exe: check.exe, model: this.settings.model, dirs: [dir], work: this.work }),
-    });
-    await this.ready();
-  }
-
-  async startDirect() {
-    this.kit = this.plugin.driveKit(e => this.diag.request(e));
-    const st = this.kit.status();
-    this.facts(st);
-    if (!st.client.id) { this.askClient(''); return; }
-    if (!st.connected) { this.askConnect(st.problem); return; }
-    this.make = (dir, vault) => new DriveSync({
-      fs: this.fs, path: this.path, crypto: require('crypto'), dir, work: this.work, vault, folder: this.settings.folder, device: this.settings.device,
-      signal: this.stop.signal, say: p => this.progress(p), limits: DRIVE_DIRECT_LIMITS,
-      run: this.kit.runner({ work: this.work, sessions: driveSessions(this.fs, this.path.join(dir, DRIVE_UPLOADS)) }),
-    });
-    await this.ready();
-  }
-
-  facts(st) {
-    this.diag.set({ client: st.client.id ? `${st.client.own ? 'your own' : 'built in'} (${st.client.id})` : 'none', connected: st.connected, email: st.email, encrypted: st.encrypted, test: this.kit.endpoints.test || '' });
-  }
-
-  async ready() {
-    if (this.mode === 'retrieve') await this.chooseVault();
-    else if (this.mode === 'connect') this.showConnected();
-    else await this.showPlan();
-  }
-
-  /* ---- The Google sign-in ---- */
-
-  /* Asks for a Google client ID, with how to make one. */
-  askClient(problem) {
-    const el = this.contentEl, store = this.kit.store, saved = store.load();
-    el.empty();
-    this.banner();
-    this.note('asked for a client ID');
-    if (problem) el.createEl('p', { cls: 'scriptorium-setup-problem', text: problem });
-    el.createEl('p', { text: 'To let you sign in to Google, Scriptorium needs a Google “client ID”: the name by which Google knows the program that is asking. ' +
-      'This copy of Scriptorium has none built in yet, so you make one of your own, once. It is free and takes about five minutes:' });
-    const ol = el.createEl('ol', { cls: 'scriptorium-drive-steps scriptorium-drive-guide' });
-    for (const [text, link] of DRIVE_CLIENT_STEPS) {
-      const li = ol.createEl('li', { text });
-      if (link) { li.createEl('br'); li.createEl('a', { text: link.replace('https://', ''), href: link, attr: { target: '_blank', rel: 'noopener' } }); }
-    }
-    const id = el.createEl('textarea', { cls: 'scriptorium-drive-client', attr: { rows: '2', spellcheck: 'false', placeholder: 'Client ID (…apps.googleusercontent.com), or the whole JSON file Google gave you', 'aria-label': 'Google client ID' } });
-    id.value = saved.clientId || '';
-    const secret = el.createEl('input', { type: 'password', cls: 'scriptorium-drive-secret', attr: { spellcheck: 'false', placeholder: 'Client secret (GOCSPX-…)', 'aria-label': 'Google client secret', autocomplete: 'off' } });
-    secret.value = saved.clientSecret || '';
-    const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: '' });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Both are kept on this computer only, outside your vaults, and are never backed up. Google does not treat a desktop program’s “client secret” as a secret, but it is yours: do not post it. Keep a copy of both (a password manager will do): to retrieve a vault on another computer you sign in with the same client ID, because Google shows a sign-in only the files stored under its own client ID.' });
-    const row = this.buttons();
-    const go = row.createEl('button', { cls: 'mod-cta', text: 'Save and connect' });
-    this.switchButton(row);
-    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
-    go.addEventListener('click', () => {
-      const c = driveParseClient(id.value, secret.value);
-      if (!c.id) { said.setText(c.problem || 'Paste the client ID first.'); id.focus(); return; }
-      if (!c.secret) { said.setText('Paste the client secret too: Google asks a Desktop app client for it when it signs in.'); secret.focus(); return; }
-      try { store.save({ clientId: c.id, clientSecret: c.secret }); } catch (e) { said.setText(`It could not be saved (${e.message}).`); return; }
-      this.note('client ID saved');
-      this.facts(this.kit.status());
-      this.askConnect('');
-    });
-  }
-
-  /* Says what signing in will do, and waits for the button. */
-  askConnect(problem) {
-    const el = this.contentEl, st = this.kit.status();
-    el.empty();
-    this.banner();
-    this.note('asked to connect');
-    if (problem) el.createEl('p', { cls: 'scriptorium-setup-problem', text: problem });
-    el.createEl('p', { text: 'Scriptorium is not connected to Google Drive on this computer yet. Connecting opens Google’s sign-in page in your browser: choose the Google account to back up to, and allow Scriptorium to ' +
-      '“see, edit, create and delete only the specific Google Drive files you use with this app”. That is the only thing it asks for: it cannot see the rest of your Drive.' });
-    const notes = el.createEl('ul', { cls: 'scriptorium-drive-plan' });
-    notes.createEl('li', { text: st.client.own
-      ? 'Because the client ID is your own, Google may first say “Google hasn’t verified this app”: choose Advanced (or Continue), then “Go to Scriptorium”. You are the app’s maker here.'
-      : 'Google may first say that it has not verified this app: choose Advanced, then “Go to Scriptorium”.' });
-    notes.createEl('li', { text: 'You stay signed in on this computer until you choose Disconnect in Settings → Scriptorium. The sign-in is kept outside your vaults and is never backed up.' });
-    const row = this.buttons();
-    const go = row.createEl('button', { cls: 'mod-cta scriptorium-drive-connect', text: 'Connect to Google Drive' });
-    if (st.client.own || !DRIVE_DEFAULT_CLIENT.id) row.createEl('button', { text: 'Change the client ID' }).addEventListener('click', () => this.askClient(''));
-    if (this.mode !== 'connect') this.switchButton(row);
-    if (problem) this.reportButton(row);
-    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
-    go.addEventListener('click', () => this.connect().catch(e => this.fail(e)));
-  }
-
-  async connect() {
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    el.createEl('p', { cls: 'scriptorium-drive-wait', text: 'Waiting for you to finish in your browser…' });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Sign in on Google’s page and allow access; this window carries on by itself. If Google shows an error page instead, come back here and choose Cancel: the commonest are listed below.' });
-    const help = el.createEl('ul', { cls: 'scriptorium-drive-plan scriptorium-setup-note' });
-    help.createEl('li', { text: '“Access blocked… has not completed the Google verification process” or “Error 403: access_denied”: the Google Cloud app is in “Testing” and this account is not among its test users. Publish the app, or add the account (Google Auth Platform → Audience).' });
-    help.createEl('li', { text: '“Error 400: redirect_uri_mismatch”: the client is not of type “Desktop app”. Make a new client of that type.' });
-    help.createEl('li', { text: '“Error 401: invalid_client” or “deleted_client”: the client ID is mistyped, or the client was deleted.' });
-    const row = this.buttons();
-    let link = '';
-    const copy = row.createEl('button', { text: 'Copy the sign-in link' });
-    copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(link); new Notice('Copied. Paste it into a browser on this computer.'); } catch (e) { new Notice('Could not copy the link.'); }
-    });
-    const stop = new AbortController();
-    const outer = () => stop.abort();
-    this.stop.signal.addEventListener('abort', outer, { once: true });
-    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => stop.abort());
-    this.note('sign-in started, browser asked to open');
-    let got;
-    try {
-      got = await this.kit.signIn({ signal: stop.signal, onUrl: url => { link = url; }, open: url => this.plugin.openInBrowser(url) });
-    } catch (e) {
-      this.stop.signal.removeEventListener('abort', outer);
-      if (this.stop.signal.aborted) return;
-      if (e.name === 'AbortError') { this.note('sign-in cancelled'); this.askConnect(''); return; }
-      this.note('sign-in failed', e.message);
-      if (e.kind === 'client') this.askClient(e.message); else this.askConnect(e.message);
-      return;
-    }
-    this.stop.signal.removeEventListener('abort', outer);
-    this.note('signed in', got.apiOff ? 'but the Drive API is off in the project' : '');
-    this.facts(this.kit.status());
-    if (got.apiOff) {
-      const e = driveProblem('You are signed in, but the Google Drive API is not turned on in the Google Cloud project of your client ID, so nothing can be stored yet.', 'google',
-        ['In the Google Cloud console, with that project chosen: Menu → APIs & Services → Library → Google Drive API → Enable.', 'Wait a minute, then run this command again. You need not sign in again.']);
-      this.fail(e);
-      return;
-    }
-    new Notice(`Scriptorium is connected to Google Drive${got.email ? ` as ${got.email}` : ''}.`);
-    await this.startDirect();
-  }
-
-  showConnected() {
-    const el = this.contentEl, st = this.kit.status();
-    el.empty();
-    this.banner();
-    el.createEl('p', { text: `Connected to Google Drive${st.email ? ` as ${st.email}` : ''}.` });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: DRIVE_PRIVACY_DIRECT });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: `The sign-in is kept in ${driveRedact(this.kit.store.file, require('os').homedir())}${st.encrypted ? ', locked with this computer’s keychain' : ''}. Disconnect in Settings → Scriptorium withdraws it at Google and deletes it.` });
-    this.closeButton();
-  }
-
-  /* ---- Back up, Sync now ---- */
-
-  async showPlan() {
-    const name = driveLinked(this.fs, this.path, this.vaultDir, this.settings.folder) || this.plugin.app.vault.getName();
-    this.wait(`Looking at ${this.settings.folder}/${name} in Google Drive…`);
-    const sync = this.make(this.vaultDir, name);
-    const info = await sync.prepare();
-    if (this.stop.signal.aborted) return;
-    const el = this.contentEl, p = info.plan;
-    this.note('looked at both sides', `${p.upload.length} to upload, ${p.download.length} to download, ${p.conflicts.length} conflicts, ${p.deleteLocal.length}+${p.deleteRemote.length} deletions, ${p.same} the same, ${info.skipped.length} left out${info.first ? ', no backup yet' : ''}`);
-    el.empty();
-    this.banner();
-    el.createEl('p', { cls: 'scriptorium-setup-where', text: `Google Drive: ${this.settings.folder}/${name}` });
-    if (info.remote && (info.remote.via || 'claude') !== sync.via) { this.fail(new Error(driveOtherWay(info.remote.via || 'claude'))); return; }
-    if (info.nothing) {
-      el.createEl('p', { text: `Everything is backed up: ${driveCount(p.same, 'file')}, last sent ${driveWhen(info.remote.updated)}${info.remote.device ? ` from ${info.remote.device}` : ''}.` });
-      this.skippedList(info.skipped);
-      this.closeButton();
-      return;
-    }
-    const lines = [];
-    if (info.first) lines.push('There is no backup of this vault in Google Drive yet: this makes one.');
-    else lines.push(`The backup has ${driveCount(Object.keys(info.remote.files).length, 'file')}, last sent ${driveWhen(info.remote.updated)}${info.remote.device ? ` from ${info.remote.device}` : ''}.`);
-    if (info.resumed) lines.push('An earlier run was stopped part-way: this carries on from where it stopped.');
-    el.createEl('p', { text: lines.join(' ') });
-    if (sync.switched && info.first) {
-      el.createEl('p', { cls: 'scriptorium-setup-note scriptorium-drive-switched', text: sync.via === 'direct'
-        ? `This vault was backed up through Claude Code before. The Google sign-in cannot see that backup (Google lets it see only the files it stored itself), so this makes a new, complete one. Afterwards Google Drive shows two folders named “${this.settings.folder}”: the older one is the earlier backup, and you may delete it there once this one is done.`
-        : 'This vault was backed up with the direct Google sign-in before. Through Claude Code a separate, complete backup is made.' });
-    }
-    const list = el.createEl('ul', { cls: 'scriptorium-drive-plan' });
-    const item = text => list.createEl('li', { text });
-    const pulls = p.download.length + p.conflicts.length + p.deleteLocal.length;
-    if (pulls) item(`First, what changed in Google Drive is brought in: ${driveCount(p.download.length + p.conflicts.length, 'file')} to download (${driveBytes(info.downBytes)})` +
-      `${p.deleteLocal.length ? `, and ${driveCount(p.deleteLocal.length, 'file')} deleted on another device to move to this vault’s .trash folder` : ''}.`);
-    if (p.conflicts.length) item(`${driveCount(p.conflicts.length, 'file was', 'files were')} changed both here and in Google Drive. Both are kept: yours is renamed “name (conflict ${this.settings.device} date)”, and backed up too.`);
-    if (p.upload.length) item(`${driveCount(p.upload.length, 'file')} to upload (${driveBytes(info.upBytes)}).`);
-    if (p.deleteRemote.length) item(`${driveCount(p.deleteRemote.length, 'file')} deleted here: the copy in Google Drive is moved to the backup’s _trash folder, not deleted.`);
-    if (p.same) item(`${driveCount(p.same, 'file is', 'files are')} the same on both sides.`);
-    if (this.way === 'claude') {
-      const runs = Math.ceil((p.upload.length + p.download.length + p.conflicts.length * 2) / DRIVE_LIMITS.batchFiles) + 4;
-      el.createEl('p', { cls: 'scriptorium-setup-note', text: `About ${driveCount(runs, 'run')} of Claude Code (${this.settings.model}), roughly ${Math.max(1, Math.round(runs * 13 / 60))} min.` });
-    }
-    this.skippedList(info.skipped);
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: this.way === 'direct' ? DRIVE_PRIVACY_DIRECT : DRIVE_PRIVACY });
-    const row = this.buttons();
-    const go = row.createEl('button', { cls: 'mod-cta', text: this.mode === 'sync' ? 'Sync' : 'Back up' });
-    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
-    go.addEventListener('click', () => {
-      this.showProgress();
-      this.note('began');
-      sync.sync().then(s => this.showDone(s, null), e => this.fail(e));
-    });
-  }
-
-  skippedList(skipped) {
-    if (!skipped || !skipped.length) return;
-    const d = this.contentEl.createEl('details', { cls: 'scriptorium-drive-skipped' });
-    d.createEl('summary', { text: `${driveCount(skipped.length, 'file is', 'files are')} not backed up` });
-    d.createEl('pre', { cls: 'scriptorium-setup-plan', text: skipped.map(s => `${s.path}: ${s.why}`).join('\n'), attr: { tabindex: '0' } });
-  }
-
-  showProgress() {
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    this.stage = el.createEl('p', { cls: 'scriptorium-drive-stage', text: 'Starting…' });
-    this.bar = el.createEl('progress', { cls: 'scriptorium-drive-bar', attr: { max: '1', value: '0' } });
-    this.counts = el.createEl('p', { cls: 'scriptorium-setup-note', text: '' });
-    this.log = el.createEl('p', { cls: 'scriptorium-setup-note scriptorium-drive-log', text: '' });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'You can keep writing. Stopping is safe: what is done is kept, and running it again carries on.' });
-    const stop = this.buttons().createEl('button', { text: 'Stop' });
-    stop.addEventListener('click', () => { stop.disabled = true; stop.setText('Stopping…'); this.stop.abort(); });
-    this.finished = new Map();
-    this.began = Date.now();
-    const tick = window.setInterval(() => {
-      if (!this.log.isConnected) { window.clearInterval(tick); return; }
-      const t = Math.round((Date.now() - this.began) / 1000);
-      this.log.setText(t < 60 ? `${t} s` : `${Math.floor(t / 60)} min ${t % 60} s`);
-    }, 1000);
-  }
-
-  progress(p) {
-    if (!this.stage || !this.stage.isConnected) return;
-    const total = p.total || 0, done = p.done || 0;
-    if (total) this.finished.set(p.stage, `${p.stage.toLowerCase()} ${done} of ${total}`);
-    this.stage.setText(total ? `${p.stage}: ${done} of ${total}` : `${p.stage}…`);
-    if (total) { this.bar.max = total; this.bar.value = done; } else this.bar.removeAttribute('value');
-    this.counts.setText([...this.finished].filter(([stage]) => stage !== p.stage).map(([, text]) => text).join(' · ').replace(/^./, c => c.toUpperCase()));
-  }
-
-  showDone(s, extra) {
-    if (!this.contentEl.isConnected) return;
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    this.note('finished', `${s.downloaded} downloaded, ${s.uploaded} uploaded, ${s.conflicts.length} conflicts, ${s.failed.length} failed, ${s.seconds} s`);
-    for (const f of s.failed.slice(0, 40)) this.note('  a file failed', driveNameless(f.why));
-    const took = s.seconds >= 90 ? `${Math.round(s.seconds / 60)} min` : `${Math.round(s.seconds)} s`;
-    const parts = [];
-    if (s.downloaded) parts.push(`${driveCount(s.downloaded, 'file')} downloaded and checked against the backup’s SHA-256 (${driveBytes(s.bytesDown)})`);
-    if (s.uploaded) parts.push(`${driveCount(s.uploaded, 'file')} uploaded (${driveBytes(s.bytesUp)})`);
-    if (s.deletedThere) parts.push(`${driveCount(s.deletedThere, 'deleted file')} moved to _trash in Google Drive`);
-    if (s.deletedHere) parts.push(`${driveCount(s.deletedHere, 'file')} deleted on another device moved to this vault’s .trash`);
-    el.createEl('p', { text: `${s.failed.length ? 'Finished, with problems' : 'Done'} in ${took}${parts.length ? `: ${parts.join('; ')}.` : ': nothing had to move.'}` });
-    if (!extra) el.createEl('p', { text: `The backup now has ${driveCount(s.files, 'file')}.` });
-    if (s.conflicts.length) {
-      el.createEl('p', { text: `${driveCount(s.conflicts.length, 'file was', 'files were')} changed in both places. Both versions are kept; compare them and delete the one you do not want:` });
-      el.createEl('pre', { cls: 'scriptorium-setup-plan', text: s.conflicts.map(c => `${c.path}\n    yours is now: ${c.kept}`).join('\n'), attr: { tabindex: '0' } });
-    }
-    if (s.failed.length) {
-      el.createEl('p', { cls: 'scriptorium-setup-problem', text: `${driveCount(s.failed.length, 'file')} could not be done. Nothing was lost; run it again to try them again:` });
-      el.createEl('pre', { cls: 'scriptorium-setup-plan', text: s.failed.map(f => `${f.path}: ${f.why}`).join('\n'), attr: { tabindex: '0' } });
-    }
-    this.skippedList(s.skipped);
-    if (this.way === 'claude') el.createEl('p', { cls: 'scriptorium-setup-note', text: `Claude Code was run ${driveCount(s.runs, 'time')}${s.cost ? ` (about $${s.cost.toFixed(2)} at API prices; on a subscription it counts toward your usage instead)` : ''}.` });
-    if (extra) extra(el);
-    else { const row = this.buttons(); if (s.failed.length) this.reportButton(row); this.closeButton(row); }
-  }
-
-  /* ---- Retrieve ---- */
-
-  async chooseVault() {
-    const st = this.kit ? this.kit.status() : null;
-    const whose = st ? (st.email ? `${st.email}’s Google Drive` : 'the Google Drive you signed in to') : 'the Google Drive of the Google account connected to Claude';
-    this.wait(`Looking for vaults in the folder ${this.settings.folder} of ${whose}…`);
-    const lister = this.make(this.work, '');
-    lister.say = () => {};
-    const vaults = await lister.vaults();
-    if (this.stop.signal.aborted) return;
-    const usable = vaults.filter(v => v.via === lister.via), other = vaults.length - usable.length;
-    this.diag.set({ vaults: vaults.length, otherWay: other });
-    this.note('looked for vaults', `${vaults.length} found${lister.failed.length ? `, ${lister.failed.length} unreadable` : ''}`);
-    for (const f of lister.failed.slice(0, 10)) this.note('  a backup could not be read', driveNameless(f.why));
-    const el = this.contentEl;
-    el.empty();
-    this.banner();
-    if (!usable.length) {
-      el.createEl('p', { cls: 'scriptorium-setup-problem', text: this.way === 'direct'
-        ? `No backed-up vault that this sign-in can see was found in the folder “${this.settings.folder}” of ${whose}.`
-        : other ? `The vaults in the folder “${this.settings.folder}” of ${whose} were backed up with the direct Google sign-in, which is how they have to be retrieved.`
-          : `No backed-up vault was found in the folder “${this.settings.folder}” of ${whose}.` });
-      el.createEl('p', { text: 'The likely reasons:' });
-      const why = el.createEl('ul', { cls: 'scriptorium-drive-plan' });
-      if (this.way === 'direct') {
-        why.createEl('li', { text: 'The vault was backed up through Claude Code (the only way in Scriptorium 1.2.0). It is in your Drive, but Google lets this sign-in see only the files it stored itself. Either retrieve it through Claude Code (the button below), or, on the computer that has the vault, choose “Google sign-in, directly” in Settings → Scriptorium and back it up again; then it can be retrieved here this way.' });
-        why.createEl('li', { text: `It was backed up to another Google account. You are signed in ${st && st.email ? `as ${st.email}` : 'to one account'}; to change, choose Disconnect in Settings → Scriptorium and connect again.` });
-        why.createEl('li', { text: 'It was backed up with another client ID (for instance one of your own made on another computer). A sign-in sees only what was stored under the same client ID: use the same one here.' });
-      } else {
-        if (other) why.createEl('li', { text: 'Use the button below to retrieve with the Google sign-in.' });
-        why.createEl('li', { text: 'It was backed up to another Google account than the one connected to your Claude account (claude.ai → Settings → Connectors → Google Drive shows which).' });
-        why.createEl('li', { text: 'Claude Code on this computer is signed in to another Claude account than the one you backed up with.' });
-      }
-      why.createEl('li', { text: `The folder’s name is different: this looks in “${this.settings.folder}” (Settings → Scriptorium → Folder in Google Drive), directly in My Drive.` });
-      why.createEl('li', { text: 'No backup was finished: a vault gets there with “Scriptorium: Back up this vault to Google Drive”, run in that vault on a computer.' });
-      const row = this.buttons();
-      this.switchButton(row, this.way === 'direct' ? 'Look through Claude Code instead' : 'Look with a Google sign-in instead (preview)');
-      this.reportButton(row);
-      this.closeButton(row);
-      return;
-    }
-    el.createEl('p', { text: 'Choose a vault. It is downloaded into a new folder, every file is checked against the backup’s SHA-256, and Scriptorium is set up in it.' });
-    const list = el.createDiv({ cls: 'scriptorium-drive-vaults', attr: { role: 'radiogroup', 'aria-label': 'Vaults in Google Drive' } });
-    let chosen = usable[0];
-    const parent = this.path.dirname(this.vaultDir);
-    const suggest = v => {
-      // A name is made fit for a folder on this computer; the vault keeps its own name in the backup.
-      const safe = v.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').replace(/[. ]+$/, '').trim() || 'Vault';
-      let dir = this.path.join(parent, safe);
-      try { for (let n = 2; this.fs.existsSync(dir) && this.fs.readdirSync(dir).length; n++) dir = this.path.join(parent, `${safe} ${n}`); } catch (e) { /* cannot be read: said when it is chosen */ }
-      return dir;
-    };
-    usable.forEach((v, i) => {
-      const label = list.createEl('label', { cls: 'scriptorium-drive-vault' });
-      const radio = label.createEl('input', { type: 'radio', attr: { name: 'scriptorium-drive-vault' } });
-      radio.checked = i === 0;
-      const text = label.createDiv();
-      text.createDiv({ cls: 'scriptorium-drive-vault-name', text: v.name });
-      text.createDiv({ cls: 'scriptorium-setup-note', text: `${driveCount(v.files, 'file')}, ${driveBytes(v.bytes)} · last backed up ${driveWhen(v.updated)}${v.device ? ` from ${v.device}` : ''}` });
-      radio.addEventListener('change', () => { if (radio.checked) { chosen = v; if (!input.dataset.typed) input.value = suggest(v); } });
-    });
-    if (other) el.createEl('p', { cls: 'scriptorium-setup-note', text: `${driveCount(other, 'more vault was', 'more vaults were')} backed up ${this.way === 'direct' ? 'through Claude Code' : 'with the direct Google sign-in'} and can only be retrieved that way (Settings → Scriptorium → Connection).` });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Where to put it on this computer (a new or empty folder):' });
-    const row = el.createDiv({ cls: 'scriptorium-setup-row' });
-    const input = row.createEl('input', { type: 'text', cls: 'scriptorium-setup-path', attr: { placeholder: 'The new vault’s folder', 'aria-label': 'The new vault’s folder', spellcheck: 'false' } });
-    input.value = suggest(chosen);
-    input.addEventListener('input', () => { input.dataset.typed = '1'; said.setText(''); });
-    const dialog = setupDialog();
-    if (dialog) {
-      row.createEl('button', { text: 'Browse…' }).addEventListener('click', async () => {
-        try {
-          const r = await dialog.showOpenDialog({ title: 'Choose a new or empty folder for the vault', defaultPath: parent, properties: ['openDirectory', 'createDirectory', 'promptToCreate'] });
-          if (r && !r.canceled && r.filePaths && r.filePaths[0]) { input.value = r.filePaths[0]; input.dataset.typed = '1'; said.setText(''); input.focus(); }
-        } catch (e) { this.note('the folder chooser failed', e.message); new Notice('Could not open the folder chooser: type the folder’s path instead.'); }
-      });
-    } else this.note('no folder chooser on this computer');
-    const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: '' });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: this.way === 'direct' ? DRIVE_PRIVACY_DIRECT : DRIVE_PRIVACY });
-    const buttons = this.buttons();
-    const go = buttons.createEl('button', { cls: 'mod-cta', text: 'Retrieve' });
-    buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
-    go.addEventListener('click', () => {
-      const dir = setupFolder(this.path, input.value);
-      const why = dir ? driveTargetProblem(this.fs, this.path, dir, chosen.bytes) : `Give the folder’s full path, from the ${process.platform === 'win32' ? 'drive letter (for example C:\\Users\\you\\Documents\\My vault)' : 'first / (for example /Users/you/Documents/My vault)'}.`;
-      if (why) { this.note('the folder was refused', driveNameless(why)); said.setText(why); input.focus(); return; }
-      this.diag.set({ target: `${dir.length} characters, ${dir.split(/[\\/]/).length - 1} folders deep` });
-      this.retrieve(chosen, dir).catch(e => this.fail(e));
-    });
-  }
-
-  async retrieve(entry, dir) {
-    this.showProgress();
-    this.note('retrieving', `${entry.files} files, ${driveBytes(entry.bytes)}`);
-    this.fs.mkdirSync(dir, { recursive: true });
-    const s = await this.make(dir, entry.name).retrieve(entry);
-    // The vault is made a Scriptorium vault with the same code as "Set up another vault".
-    let setup = '';
-    try {
-      const plan = planVaultSetup(this.fs, this.path, setupPackage(this.fs, this.path, this.vaultDir), dir);
-      applyVaultSetup(this.fs, this.path, dir, plan);
-      setup = 'Scriptorium’s theme, snippet and plugins are set up in it.';
-      this.note('Scriptorium set up in it');
-    } catch (e) {
-      setup = `Scriptorium could not be set up in it (${e.message}); run “Scriptorium: Set up another vault” on it.`;
-      this.note('setting up failed', driveNameless(e.message));
-    }
-    this.showDone(s, el => {
-      el.createEl('p', { cls: 'scriptorium-setup-where', text: dir });
-      el.createEl('p', { text: `${setup} When Obsidian asks, choose “Trust author and enable plugins”. To keep it backed up, run “Scriptorium: Sync now with Google Drive” in it.` });
-      const row = el.createDiv({ cls: 'modal-button-container scriptorium-drive-open' });
-      const open = row.createEl('button', { cls: 'mod-cta', text: 'Open the vault' });
-      open.addEventListener('click', () => {
-        if (openVaultWindow(dir)) { this.note('opened the vault'); this.close(); }
-        else { this.note('the vault could not be opened from here'); new Notice('Could not open it from here: in the vault switcher, choose “Open folder as vault” and pick that folder.', 10000); }
-      });
-      row.createEl('button', { text: 'Show the folder' }).addEventListener('click', () => { try { require('electron').shell.openPath(dir); } catch (e) { new Notice(dir, 10000); } });
-      if (s.failed.length) this.reportButton(row);
-      this.closeButton(row, false);
-    });
-  }
 }
 
 /* Why the folder cannot take a retrieved vault of `bytes` bytes, or ''. */
@@ -4522,7 +3107,7 @@ function driveTargetProblem(fs, path, dir, bytes) {
       fs.writeFileSync(probe, '');
       fs.unlinkSync(probe);
     } catch (e) {
-      return `Nothing can be written in ${at} (${e.code || e.message}). Choose a folder of your own, such as one in Documents.`;
+      return `Nothing can be written in ${at}. Choose a folder of your own, such as one in Documents.`;
     }
     try {
       const st = fs.statfsSync ? fs.statfsSync(at) : null;
@@ -4530,9 +3115,625 @@ function driveTargetProblem(fs, path, dir, bytes) {
       if (free < bytes * 1.05 + 20e6) return `There is not enough room on that disk: the vault is ${driveBytes(bytes)} and ${driveBytes(free)} are free.`;
     } catch (e) { /* the room is not known: the download says so if it runs out */ }
   } catch (e) {
-    return `That folder cannot be used: ${e.message}`;
+    return 'That folder cannot be used. Choose another, such as a new folder in Documents.';
   }
   return '';
+}
+
+/* Opens a folder as a vault in a new Obsidian window: true if Obsidian took it. */
+function openVaultWindow(dir) {
+  try {
+    return require('electron').ipcRenderer.sendSync('vault-open', dir, false) === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ---------- Choosing the Drive folder ---------- */
+
+/* The little browser over the writer's Drive: where it is, what is there, going in and out, making a folder.
+   api is rcloneApi's (dirs, drives, mkdir). The place is {root: 'my' | 'shared' | 'drive', driveId, driveName,
+   parts: [names]}. Kept apart from the window so that it can be tested. */
+class SyncBrowser {
+  constructor(api, at) {
+    this.api = api;
+    this.at = Object.assign({ root: 'my', driveId: '', driveName: '', parts: [] }, at || {});
+    this.cache = new Map();
+  }
+  link(parts) {
+    return { root: this.at.root, driveId: this.at.driveId, driveName: this.at.driveName, path: (parts || this.at.parts).join('/') };
+  }
+  key() { return `${this.at.root}:${this.at.driveId}:${this.at.parts.join('/')}`; }
+  /* The folders here: [{name, id}]. */
+  async list(signal, fresh) {
+    const k = this.key();
+    if (!fresh && this.cache.has(k)) return this.cache.get(k);
+    const dirs = await this.api.dirs(this.link(), signal);
+    this.cache.set(k, dirs);
+    return dirs;
+  }
+  enter(name) { this.at.parts = this.at.parts.concat([name]); }
+  up() { if (this.at.parts.length) this.at.parts = this.at.parts.slice(0, -1); }
+  /* Goes to the n-th part of the path (0: the root). */
+  jump(n) { this.at.parts = this.at.parts.slice(0, n); }
+  setRoot(root, drive) { this.at = { root, driveId: drive ? drive.id : '', driveName: drive ? drive.name : '', parts: [] }; }
+  /* The roots there are: My Drive, Shared with me, and each shared drive. */
+  async roots(signal) {
+    if (!this.drives) this.drives = await this.api.drives(signal);
+    return [{ root: 'my', name: 'My Drive' }, { root: 'shared', name: 'Shared with me' }].concat(this.drives.map(d => ({ root: 'drive', name: d.name, drive: d })));
+  }
+  /* Makes a folder here and goes into it. Throws a problem if the name will not do or is taken. */
+  async create(name, signal) {
+    const why = syncFolderName(name);
+    if (why) throw syncProblem('name', why, '', '');
+    const n = String(name).trim();
+    if (this.at.root === 'shared' && !this.at.parts.length) throw syncProblem('name', 'A folder cannot be made among the things shared with you.', '', 'Go into a folder first, or make it in My Drive.');
+    const here = await this.list(signal);
+    if (here.some(d => d.name.toLowerCase() === n.toLowerCase())) throw syncProblem('name', 'There is already a folder of that name here.', '', 'Open it, or choose another name.');
+    await this.api.mkdir(this.link(this.at.parts.concat([n])), signal);
+    this.cache.delete(this.key());
+    this.enter(n);
+  }
+  /* Whether this place can be the vault's folder: the top of a Drive cannot (the whole Drive would come down). */
+  canChoose() { return this.at.parts.length > 0; }
+  where() { return syncWhere(this.link()); }
+}
+
+/* ---------- The windows ---------- */
+
+const SYNC_TITLES = { setup: 'Sync this vault with Google Drive', retrieve: 'Retrieve a vault from Google Drive', status: 'Google Drive sync', connect: 'Connect to Google Drive' };
+const SYNC_UNVERIFIED = 'New: the sign-in follows rclone’s documentation, but has not yet been checked against the real Google on our side. If it fails, “Copy diagnostic report” tells us why.';
+const SYNC_MOVED = 'Scriptorium now syncs with Google Drive through rclone, with a Google sign-in of your own and a folder you pick yourself; the older backup (through Claude Code, or the direct preview) is gone. ' +
+  'A backup made through Claude Code can be carried on: pick its folder (Scriptorium › the vault’s name) as the Drive folder. Its list of files (scriptorium-manifest.json) and its _trash folder are left alone and not synced. ' +
+  'A backup made with the direct preview can only be seen by the Google app that made it; download that folder from drive.google.com if you need it.';
+
+class SyncModal extends Modal {
+  /* mode: 'setup' (link this vault and sync it), 'retrieve' (bring a vault down from Drive), 'status' (what the
+     sync is doing, its conflicts, and the buttons), 'connect' (sign in and stop). */
+  constructor(plugin, mode, opts) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.mode = mode;
+    this.opts = opts || {};
+  }
+
+  onOpen() {
+    this.modalEl.addClass('scriptorium-setup');
+    this.modalEl.addClass('scriptorium-drive');
+    this.titleEl.setText(SYNC_TITLES[this.mode]);
+    this.titleEl.createSpan({ cls: 'scriptorium-drive-tag', text: 'new' });
+    this.stop = new AbortController();
+    this.start().catch(e => this.fail(e));
+  }
+
+  onClose() {
+    if (this.stop) this.stop.abort();
+    this.contentEl.empty();
+    if (this.opts.onClose) this.opts.onClose();
+  }
+
+  buttons(el) { return (el || this.contentEl).createDiv({ cls: 'modal-button-container' }); }
+  closeButton(row, text) { row.createEl('button', { text: text || 'Close' }).addEventListener('click', () => this.close()); }
+  reportButton(row) { row.createEl('button', { cls: 'scriptorium-drive-report', text: 'Copy diagnostic report' }).addEventListener('click', () => this.plugin.copyDriveReport()); }
+  alive() { return this.contentEl.isConnected && !this.stop.signal.aborted; }
+  go(f) { Promise.resolve().then(f).catch(e => this.fail(e)); }
+
+  page(text) {
+    const el = this.contentEl;
+    el.empty();
+    if (this.kit && this.kit.test) el.createEl('p', { cls: 'scriptorium-setup-problem', text: 'TEST: the “Drive” here is a folder on this computer, not Google Drive.' });
+    if (text) el.createEl('p', { text });
+    return el;
+  }
+
+  wait(text, cancel) {
+    const el = this.page();
+    el.createEl('p', { cls: 'scriptorium-drive-wait', text });
+    if (cancel !== false) this.buttons().createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    return el;
+  }
+
+  /* A failure: what happened, the likely cause, what to do, and the buttons that do it. rclone's own words are
+     folded away below. */
+  fail(e) {
+    if (!this.contentEl.isConnected) return;
+    if (!e || !e.kind) e = syncProblem('unknown', 'Something went wrong inside Scriptorium.', 'This is a fault in Scriptorium, not something you did.', 'Close this window and try again. If it happens again, copy the diagnostic report and ask for help.', [String((e && e.message) || e)]);
+    this.plugin.syncNote(`window: ${e.kind}`, e.tail);
+    const el = this.page();
+    el.createEl('p', { cls: e.kind === 'stopped' ? '' : 'scriptorium-setup-problem', text: e.message });
+    if (e.cause2) { const p = el.createEl('p'); p.createEl('strong', { text: 'Likely cause: ' }); p.appendText(e.cause2); }
+    if (e.next) { const p = el.createEl('p'); p.createEl('strong', { text: 'What to do: ' }); p.appendText(e.next); }
+    if (e.tail && e.tail.length && e.kind !== 'stopped' && e.kind !== 'name') {
+      const d = el.createEl('details', { cls: 'scriptorium-drive-skipped' });
+      d.createEl('summary', { text: 'Details (rclone’s own words)' });
+      d.createEl('pre', { cls: 'scriptorium-setup-plan', text: driveRedact(e.tail.join('\n'), this.kit ? this.kit.home : '') });
+    }
+    const row = this.buttons();
+    const cta = (text, f) => row.createEl('button', { cls: 'mod-cta', text }).addEventListener('click', () => this.go(f));
+    if (e.kind === 'connect') cta('Connect to Google Drive', () => this.askConnect());
+    else if (e.kind === 'client') cta('Use a client ID of my own', () => this.askConnect('own'));
+    else if (e.kind === 'rclone') cta('Find or download rclone', () => this.askRclone());
+    else if (e.kind === 'deletes') {
+      cta('Sync anyway', () => this.syncNow({ force: true }));
+    } else if (['check', 'empty', 'resync', 'folder', 'setup'].includes(e.kind)) cta('Set up the sync again', () => this.setupAgain());
+    else if (e.kind === 'stopped') cta('Start again', () => this.start());
+    else if (e.kind !== 'name') cta('Try again', () => this.start());
+    if (e.kind !== 'stopped') this.reportButton(row);
+    this.closeButton(row);
+  }
+
+  async start() {
+    if (!this.plugin.onDesktop()) { this.page(SYNC_MOBILE); this.closeButton(this.buttons()); return; }
+    this.kit = this.plugin.syncKit();
+    this.wait('Looking for rclone…');
+    try { this.api = await this.plugin.syncApi(); } catch (e) {
+      if (e.kind === 'rclone' && e.missing) { this.askRclone(); return; }
+      throw e;
+    }
+    if (!this.alive()) return;
+    if (this.mode === 'status' && this.plugin.syncLink()) { this.showStatus(); return; }
+    if (!this.api.connection().connected) { this.askConnect(); return; }
+    this.connected();
+  }
+
+  /* What comes after the sign-in. */
+  connected() {
+    if (this.mode === 'connect') {
+      this.page('This computer is signed in to Google Drive.');
+      const row = this.buttons();
+      row.createEl('button', { cls: 'mod-cta', text: 'Sync this vault…' }).addEventListener('click', () => { this.mode = 'setup'; this.titleEl.setText(SYNC_TITLES.setup); this.go(() => this.connected()); });
+      this.closeButton(row);
+      return;
+    }
+    const link = this.plugin.syncLink();
+    if (this.mode === 'retrieve') { this.browse(); return; }
+    if (link && link.first && !this.again) { this.showStatus(); return; }
+    if (link && !this.again) { this.link = link; this.go(() => this.preview()); return; }
+    this.browse(link);
+  }
+
+  setupAgain() {
+    this.again = true;
+    this.mode = 'setup';
+    this.titleEl.setText(SYNC_TITLES.setup);
+    return this.start();
+  }
+
+  /* ----- rclone ----- */
+
+  askRclone(problem) {
+    const k = this.kit, el = this.page();
+    const asset = rcloneAsset(k.platform, k.arch);
+    el.createEl('p', { text: 'Scriptorium syncs with Google Drive by running rclone, a free program (MIT licence) made for exactly this. It is not on this computer yet, or not where Scriptorium looked.' });
+    if (problem) el.createEl('p', { cls: 'scriptorium-setup-problem', text: problem });
+    if (asset) {
+      el.createEl('p', { text: `Scriptorium can download it for you: rclone ${RCLONE.version} for ${{ win32: 'Windows', darwin: 'macOS', linux: 'Linux' }[k.platform] || k.platform} (${k.arch}), ${driveBytes(asset.bytes)}, from downloads.rclone.org. ` +
+        'The file is checked against the SHA-256 that rclone published for this version before anything is run; if it differs it is deleted. It is unpacked here, outside every vault:' });
+      el.createEl('p', { cls: 'scriptorium-setup-where', text: this.kit.path.dirname(k.paths.exe) });
+      const d = el.createEl('details', { cls: 'scriptorium-drive-skipped' });
+      d.createEl('summary', { text: 'The file and its SHA-256' });
+      d.createEl('pre', { cls: 'scriptorium-setup-plan', text: `${asset.urls[0]}\nSHA-256 ${asset.sha256}\nLicence: MIT (https://rclone.org/licence/)` });
+    } else {
+      el.createEl('p', { text: `There is no ready-made rclone for this kind of computer (${k.platform} ${k.arch}) that Scriptorium knows of. Install it from rclone.org/downloads and give its path below.` });
+    }
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Or, if rclone is already installed somewhere else, give the path to the program:' });
+    const rowIn = el.createDiv({ cls: 'scriptorium-setup-row' });
+    const input = rowIn.createEl('input', { type: 'text', cls: 'scriptorium-setup-path', attr: { placeholder: k.platform === 'win32' ? 'C:\\…\\rclone.exe' : '/…/rclone', 'aria-label': 'Path to rclone', spellcheck: 'false' } });
+    input.value = k.device().rclone || '';
+    const dialog = setupDialog();
+    if (dialog) {
+      rowIn.createEl('button', { text: 'Browse…' }).addEventListener('click', async () => {
+        try {
+          const r = await dialog.showOpenDialog({ title: 'Choose the rclone program', properties: ['openFile'] });
+          if (r && !r.canceled && r.filePaths && r.filePaths[0]) { input.value = r.filePaths[0]; input.focus(); }
+        } catch (e) { new Notice('Could not open the file chooser: type the path instead.'); }
+      });
+    }
+    const row = this.buttons();
+    if (asset) row.createEl('button', { cls: 'mod-cta', text: `Download rclone (${driveBytes(asset.bytes)})` }).addEventListener('click', () => this.go(() => this.download(asset)));
+    row.createEl('button', { cls: asset ? '' : 'mod-cta', text: 'Use the path above' }).addEventListener('click', () => this.go(async () => {
+      const v = input.value.trim();
+      if (!v) { input.focus(); return; }
+      k.setDevice({ rclone: v });
+      try { this.api = await this.plugin.syncApi(true); } catch (e) {
+        k.setDevice({ rclone: '' });
+        this.askRclone(`${e.message} ${e.next || ''}`.trim());
+        return;
+      }
+      await this.start();
+    }));
+    this.closeButton(row, 'Cancel');
+  }
+
+  async download(asset) {
+    const k = this.kit, el = this.page();
+    const stage = el.createEl('p', { cls: 'scriptorium-drive-stage', text: 'Downloading rclone…' });
+    const bar = el.createEl('progress', { cls: 'scriptorium-drive-bar', attr: { max: String(asset.bytes), value: '0' } });
+    this.buttons().createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    let shown = 0;
+    await rcloneInstall({ fs: k.fs, path: k.path, crypto: k.crypto, zlib: k.zlib, https: k.https, asset, exe: k.paths.exe, signal: this.stop.signal,
+      onProgress: (n, of) => { if (n - shown > 256 * 1024 || n === of) { shown = n; bar.value = n; stage.setText(`Downloading rclone… ${driveBytes(n)} of ${driveBytes(of)}`); } } });
+    if (!this.alive()) return;
+    k.setDevice({ rclone: '' });
+    this.plugin.syncNote('rclone downloaded and checked');
+    await this.start();
+  }
+
+  /* ----- The sign-in ----- */
+
+  askConnect(way) {
+    const el = this.page(), conn = this.api.connection();
+    el.createEl('p', { text: 'Sign in to Google in your browser, once. After that you pick the folder in your Drive that this vault is kept in.' });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: SYNC_PRIVACY });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: SYNC_UNVERIFIED });
+    const pick = el.createDiv({ cls: 'scriptorium-drive-vaults' });
+    const choice = (value, title, text) => {
+      const label = pick.createEl('label', { cls: 'scriptorium-drive-vault' });
+      const radio = label.createEl('input', { type: 'radio', attr: { name: 'scriptorium-sync-client', value } });
+      const t = label.createDiv();
+      t.createDiv({ cls: 'scriptorium-drive-vault-name', text: title });
+      t.createDiv({ cls: 'scriptorium-setup-note', text });
+      return radio;
+    };
+    const shared = choice('shared', 'The quick way: rclone’s own sign-in', SYNC_SHARED_CLIENT);
+    const own = choice('own', 'A client ID of my own (what rclone recommends)', 'You make a small Google “app” that only you use. Ten minutes, once; it does not cost anything. Steps below.');
+    const guide = el.createDiv({ cls: 'scriptorium-drive-guide' });
+    const ol = guide.createEl('ol', { cls: 'scriptorium-drive-steps' });
+    for (const [text, href] of SYNC_CLIENT_STEPS) {
+      const li = ol.createEl('li', { text });
+      if (href) { li.createEl('br'); li.createEl('a', { text: href, href }); }
+    }
+    const id = guide.createEl('textarea', { cls: 'scriptorium-drive-client', attr: { rows: '2', placeholder: 'Client ID (…apps.googleusercontent.com), or the whole JSON file', 'aria-label': 'Client ID', spellcheck: 'false' } });
+    const secret = guide.createEl('input', { type: 'password', cls: 'scriptorium-drive-secret', attr: { placeholder: 'Client secret (GOCSPX-…)', 'aria-label': 'Client secret', spellcheck: 'false', autocomplete: 'off' } });
+    if (conn.own) id.value = conn.client;
+    const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: '' });
+    const show = () => { guide.style.display = own.checked ? '' : 'none'; said.setText(''); };
+    (way === 'own' || conn.own ? own : shared).checked = true;
+    shared.addEventListener('change', show); own.addEventListener('change', show);
+    show();
+    const row = this.buttons();
+    row.createEl('button', { cls: 'mod-cta', text: 'Sign in with Google' }).addEventListener('click', () => {
+      let client = null;
+      if (own.checked) {
+        const c = syncParseClient(id.value, secret.value);
+        if (c.problem) { said.setText(c.problem); return; }
+        client = { id: c.id, secret: c.secret };
+      }
+      this.go(() => this.connect(client));
+    });
+    this.closeButton(row, 'Cancel');
+  }
+
+  async connect(client) {
+    const el = this.page();
+    el.createEl('p', { cls: 'scriptorium-drive-wait', text: 'Your browser is opening Google’s sign-in page. Choose the account, allow access, and come back: this window carries on by itself.' });
+    const linkRow = el.createDiv({ cls: 'scriptorium-setup-row' });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: client ? 'If Google says it has not verified this app: it is your own, so choose Advanced → Go to (its name).'
+      : 'If Google’s page says “Access blocked”, “deleted_client” or “This app is blocked”, rclone’s shared sign-in has been retired: cancel, and choose “A client ID of my own”.' });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: `The browser may end on a page at 127.0.0.1:${RCLONE.port} that says “Success”: that is rclone on this computer, taking Google’s answer.` });
+    const ctl = new AbortController();
+    this.stop.signal.addEventListener('abort', () => ctl.abort(), { once: true });
+    const row = this.buttons();
+    row.createEl('button', { text: 'Cancel' }).addEventListener('click', () => ctl.abort());
+    this.plugin.syncNote('sign-in started', [client ? 'own client ID' : 'shared client ID']);
+    await this.api.connect(client, url => {
+      if (linkRow.childElementCount || !this.alive()) return;
+      linkRow.createEl('button', { text: 'Open the sign-in page again' }).addEventListener('click', () => this.plugin.openInBrowser(url));
+      linkRow.createEl('button', { text: 'Copy its address' }).addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(url); new Notice('Copied. Paste it into a browser on this computer.'); } catch (e) { new Notice(url, 15000); }
+      });
+    }, ctl.signal);
+    this.plugin.syncNote('signed in');
+    // A sync that was waiting for the sign-in goes on by itself.
+    const engine = this.plugin.engine, was = engine.state.problem;
+    if (was && (was.kind === 'connect' || was.kind === 'client')) { engine.set({ status: 'idle', problem: null }); engine.start(false); void engine.run('manual'); }
+    this.plugin.refreshSync();
+    if (this.alive()) this.connected();
+  }
+
+  /* ----- The folder ----- */
+
+  browse(link) {
+    if (!this.browser) {
+      const at = link ? { root: link.root, driveId: link.driveId, driveName: link.driveName, parts: String(link.path).split('/').filter(Boolean).slice(0, -1) } : null;
+      this.browser = new SyncBrowser(this.api, at);
+    }
+    this.go(() => this.showFolder());
+  }
+
+  async showFolder(fresh) {
+    const b = this.browser, retrieve = this.mode === 'retrieve';
+    const el = this.page(retrieve ? 'Which folder in your Drive holds the vault? Open it, then choose it.' : 'Choose the folder in your Drive to keep this vault in: an empty or new folder for a first backup, or the folder that already holds this vault.');
+    // Where we are: each part can be clicked
+    const crumbs = el.createDiv({ cls: 'scriptorium-sync-crumbs' });
+    const rootName = b.at.root === 'shared' ? 'Shared with me' : b.at.root === 'drive' ? b.at.driveName : 'My Drive';
+    [rootName].concat(b.at.parts).forEach((name, i, all) => {
+      if (i) crumbs.createSpan({ text: ' › ' });
+      if (i === all.length - 1) crumbs.createEl('strong', { text: name });
+      else crumbs.createEl('a', { text: name, href: '#' }).addEventListener('click', ev => { ev.preventDefault(); b.jump(i); this.go(() => this.showFolder()); });
+    });
+    const list = el.createDiv({ cls: 'scriptorium-sync-folders' });
+    list.createDiv({ cls: 'scriptorium-drive-wait', text: 'Reading the folders…' });
+    const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: '' });
+    const row = this.buttons();
+    const choose = row.createEl('button', { cls: 'mod-cta', text: b.canChoose() ? `Use “${b.at.parts[b.at.parts.length - 1]}”` : 'Open a folder to choose it' });
+    choose.disabled = !b.canChoose();
+    choose.addEventListener('click', () => { this.link = b.link(); this.go(() => retrieve ? this.askTarget() : this.preview()); });
+    const make = row.createEl('button', { text: 'New folder here…' });
+    if (retrieve) make.style.display = 'none';
+    const roots = row.createEl('button', { text: 'Other places…' });
+    this.closeButton(row, 'Cancel');
+    make.addEventListener('click', () => {
+      if (el.querySelector('.scriptorium-sync-new')) return;
+      const r = el.createDiv({ cls: 'scriptorium-setup-row scriptorium-sync-new' });
+      list.after(r);
+      const input = r.createEl('input', { type: 'text', cls: 'scriptorium-setup-path', attr: { placeholder: 'The new folder’s name', 'aria-label': 'The new folder’s name' } });
+      input.value = b.at.parts.length ? '' : this.plugin.app.vault.getName();
+      const ok = r.createEl('button', { text: 'Make it' });
+      const doIt = () => this.go(async () => {
+        ok.disabled = true;
+        try { await b.create(input.value, this.stop.signal); } catch (e) {
+          ok.disabled = false;
+          if (e.kind === 'name') { said.setText(`${e.message} ${e.next || ''}`.trim()); input.focus(); return; }
+          throw e;
+        }
+        await this.showFolder();
+      });
+      ok.addEventListener('click', doIt);
+      input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); doIt(); } });
+      input.focus();
+    });
+    roots.addEventListener('click', () => this.go(async () => {
+      roots.disabled = true;
+      const all = await b.roots(this.stop.signal);
+      if (!this.alive()) return;
+      list.empty();
+      for (const r of all) {
+        list.createEl('button', { cls: 'scriptorium-sync-folder', text: r.name }).addEventListener('click', () => { b.setRoot(r.root, r.drive); this.go(() => this.showFolder()); });
+      }
+    }));
+    const dirs = await b.list(this.stop.signal, fresh);
+    if (!this.alive() || !list.isConnected) return;
+    list.empty();
+    if (b.at.parts.length) list.createEl('button', { cls: 'scriptorium-sync-folder scriptorium-sync-up', text: '↑ Up' }).addEventListener('click', () => { b.up(); this.go(() => this.showFolder()); });
+    if (!dirs.length) list.createDiv({ cls: 'scriptorium-setup-note', text: b.at.parts.length ? 'No folders in here. (Files are not shown.)' : 'No folders here yet.' });
+    for (const d of dirs) {
+      list.createEl('button', { cls: 'scriptorium-sync-folder', text: d.name }).addEventListener('click', () => { b.enter(d.name); this.go(() => this.showFolder()); });
+    }
+  }
+
+  /* ----- The first sync ----- */
+
+  async preview() {
+    const k = this.kit, link = this.link;
+    this.wait(`Looking at both sides: this vault, and ${syncWhere(link)}…`);
+    const settings = syncSettings(this.plugin.settings);
+    const pv = await syncPreview({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, signal: this.stop.signal });
+    if (!this.alive()) return;
+    const el = this.page();
+    el.createEl('p', { text: 'This is what the first sync will do. Nothing has been changed yet.' });
+    const ul = el.createEl('ul', { cls: 'scriptorium-drive-plan' });
+    ul.createEl('li', { text: `This vault: ${driveCount(pv.local.count, 'file')}, ${driveBytes(pv.local.bytes)}.` });
+    ul.createEl('li', { text: `${syncWhere(link)}: ${driveCount(pv.drive.count, 'file')}, ${driveBytes(pv.drive.bytes)}.` });
+    if (pv.onlyLocal) ul.createEl('li', { text: `${driveCount(pv.onlyLocal, 'file is', 'files are')} only on this computer: copied up to Drive.` });
+    if (pv.onlyDrive) ul.createEl('li', { text: `${driveCount(pv.onlyDrive, 'file is', 'files are')} only in the Drive folder: copied down to this vault.` });
+    if (pv.same) ul.createEl('li', { text: `${driveCount(pv.same, 'file is', 'files are')} the same on both sides: left alone.` });
+    let keep = 'both';
+    if (pv.differ.length) {
+      const li = ul.createEl('li', { text: `${driveCount(pv.differ.length, 'file has', 'files have')} the same name on both sides but different contents:` });
+      const pick = li.createDiv({ cls: 'scriptorium-drive-vaults' });
+      for (const [value, title, text] of [
+        ['both', 'Keep both (safest)', 'Drive’s version keeps the name; this computer’s is kept beside it as “name.conflict1.md”. Look them over and delete the one you do not want.'],
+        ['local', 'Keep this computer’s version', 'It replaces the one in Drive (Drive keeps its earlier versions for a while).'],
+        ['drive', 'Keep Drive’s version', 'It replaces the one here; the replaced files are kept for thirty days in Scriptorium’s own folder.'],
+      ]) {
+        const label = pick.createEl('label', { cls: 'scriptorium-drive-vault' });
+        const radio = label.createEl('input', { type: 'radio', attr: { name: 'scriptorium-sync-keep', value } });
+        radio.checked = value === 'both';
+        radio.addEventListener('change', () => { if (radio.checked) keep = value; });
+        const t = label.createDiv();
+        t.createDiv({ cls: 'scriptorium-drive-vault-name', text: title });
+        t.createDiv({ cls: 'scriptorium-setup-note', text });
+      }
+      const d = li.createEl('details', { cls: 'scriptorium-drive-skipped' });
+      d.createEl('summary', { text: 'Which files' });
+      d.createEl('pre', { cls: 'scriptorium-setup-plan', text: pv.differ.slice(0, 300).join('\n') + (pv.differ.length > 300 ? `\n… and ${pv.differ.length - 300} more` : '') });
+    }
+    if (pv.unread.length) ul.createEl('li', { text: `${driveCount(pv.unread.length, 'file')} could not be compared (they are treated as different, and the newer one is kept).` });
+    el.createEl('p', { text: 'The first sync deletes nothing: afterwards each side holds everything from both.' });
+    if (pv.local.count && pv.onlyDrive && !pv.same && !pv.differ.length) {
+      el.createEl('p', { cls: 'scriptorium-setup-problem', text: 'These two folders have nothing in common. If that Drive folder is not meant for this vault, choose another: everything in it would be copied into this vault.' });
+    }
+    if (pv.onlyDrive > 5000 || pv.drive.bytes > 5e9) el.createEl('p', { cls: 'scriptorium-setup-problem', text: `That Drive folder is large (${driveBytes(pv.drive.bytes)}). All of it will be downloaded into this vault.` });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: `After this, the vault is synced by itself every ${settings.minutes === 1 ? 'minute' : `${settings.minutes} minutes`} and shortly after you change a note${settings.auto ? '' : ' (automatic syncing is off in the settings: until you turn it on, only when you ask)'}. ` +
+      `Not synced: Obsidian’s window layout and caches, .trash, hidden folders, Lagrange’s settings (API keys)${settings.obsidian ? '' : ', Obsidian’s settings'}, and Google Docs.` });
+    const row = this.buttons();
+    row.createEl('button', { cls: 'mod-cta', text: 'Start syncing' }).addEventListener('click', () => this.go(() => this.first(pv, keep)));
+    row.createEl('button', { text: 'Choose another folder' }).addEventListener('click', () => this.browse(link));
+    this.closeButton(row, 'Cancel');
+  }
+
+  /* A page with a line of what is happening and a bar. Returns onLine for rclone's log. */
+  progress(text) {
+    const el = this.page();
+    const stage = el.createEl('p', { cls: 'scriptorium-drive-stage', text });
+    const bar = el.createEl('progress', { cls: 'scriptorium-drive-bar' });
+    const detail = el.createEl('p', { cls: 'scriptorium-setup-note', text: '' });
+    this.buttons().createEl('button', { text: 'Stop' }).addEventListener('click', () => this.close());
+    const stats = s => {
+      if (s.totalBytes > 0) { bar.max = s.totalBytes; bar.value = s.bytes; }
+      detail.setText(`${s.transfers || 0} of ${s.totalTransfers || 0} files, ${driveBytes(s.bytes || 0)}${s.totalBytes ? ` of ${driveBytes(s.totalBytes)}` : ''}`);
+    };
+    return { stage, stats, onLine: l => { if (l.stats) stats(l.stats); } };
+  }
+
+  async first(pv, keep) {
+    const k = this.kit, link = this.link, settings = syncSettings(this.plugin.settings);
+    const p = this.progress('Syncing for the first time…');
+    await this.plugin.engine.running;   // a timer's run of an earlier link ends first
+    const r = await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, differ: pv.differ, keep,
+      now: () => Date.now(), pid: process.pid, alive: k.alive, onLine: p.onLine, signal: this.stop.signal });
+    this.plugin.saveSyncLink(Object.assign({}, link, { linked: link.linked || new Date().toISOString(), first: new Date().toISOString() }));
+    this.plugin.engine.set({ status: 'idle', last: Date.now(), summary: r.summary, problem: null });
+    this.plugin.engine.start(false);
+    if (!this.contentEl.isConnected) return;
+    const el = this.page('This vault and its Drive folder now hold the same files.');
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(link) });
+    el.createEl('p', { text: `First sync: ${syncSummaryText(r.summary)}.` });
+    if (r.renamed.length) {
+      el.createEl('p', { text: `${driveCount(r.renamed.length, 'file')} differed and ${r.renamed.length === 1 ? 'was' : 'were'} kept twice. This computer’s version is now:` });
+      el.createEl('pre', { cls: 'scriptorium-setup-plan', text: r.renamed.slice(0, 100).map(x => x[1]).join('\n') });
+    }
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'From now on the status bar at the bottom says “Drive: synced” and the time. Click it to sync at once, or to see conflicts and problems.' });
+    const row = this.buttons();
+    row.createEl('button', { cls: 'mod-cta', text: 'Done' }).addEventListener('click', () => this.close());
+  }
+
+  /* ----- Syncing now, and the state of things ----- */
+
+  async syncNow(opts) {
+    this.wait('Syncing…', false);
+    const row = this.buttons();
+    row.createEl('button', { text: 'Close (the sync carries on)' }).addEventListener('click', () => this.close());
+    const r = await this.plugin.engine.run('manual', opts);
+    if (!this.contentEl.isConnected) return;
+    if (r && r.problem) { this.fail(r.problem); return; }
+    this.showStatus(r && r.skipped === 'busy' ? 'Another sync of this vault is running in another window; this one did not start.' : '');
+  }
+
+  showStatus(note) {
+    const plugin = this.plugin, link = plugin.syncLink(), st = plugin.engine.state, settings = syncSettings(plugin.settings);
+    const el = this.page();
+    if (!link) { this.go(() => this.connected()); return; }
+    el.createEl('p', { text: 'This vault is kept in step with:' });
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(link) });
+    if (note) el.createEl('p', { text: note });
+    const line = st.status === 'syncing' ? 'Syncing now…'
+      : st.status === 'problem' && st.problem ? `The last sync did not finish: ${st.problem.message}`
+        : st.last ? `Last synced ${new Date(st.last).toLocaleString()}: ${st.summary ? syncSummaryText(st.summary) : 'done'}.` : 'Not synced yet since Obsidian started.';
+    el.createEl('p', { cls: st.status === 'problem' ? 'scriptorium-setup-problem' : '', text: line });
+    if (st.status === 'problem' && st.problem) {
+      if (st.problem.cause2) { const p = el.createEl('p'); p.createEl('strong', { text: 'Likely cause: ' }); p.appendText(st.problem.cause2); }
+      if (st.problem.next) { const p = el.createEl('p'); p.createEl('strong', { text: 'What to do: ' }); p.appendText(st.problem.next); }
+    }
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: settings.auto ? `Synced by itself every ${settings.minutes === 1 ? 'minute' : `${settings.minutes} minutes`}, shortly after a note changes, and when Obsidian starts.` : 'Automatic syncing is off (Settings → Scriptorium): the vault is synced only when you ask.' });
+    const conflicts = plugin.syncConflicts();
+    if (conflicts.length) {
+      el.createEl('p', { text: `${driveCount(conflicts.length, 'file was', 'files were')} changed on both sides; the older version of each was kept under a “conflict” name. Compare them, keep what you want, and delete the conflict copy:` });
+      const list = el.createDiv({ cls: 'scriptorium-sync-folders' });
+      for (const f of conflicts.slice(0, 50)) {
+        list.createEl('button', { cls: 'scriptorium-sync-folder', text: f }).addEventListener('click', () => { void plugin.app.workspace.openLinkText(f, '', true); this.close(); });
+      }
+      if (conflicts.length > 50) el.createEl('p', { cls: 'scriptorium-setup-note', text: `… and ${conflicts.length - 50} more.` });
+    }
+    const row = this.buttons();
+    const p = st.problem;
+    if (st.status === 'problem' && p && p.kind === 'deletes') row.createEl('button', { cls: 'mod-cta', text: 'Sync anyway' }).addEventListener('click', () => this.go(() => this.syncNow({ force: true })));
+    else if (st.status === 'problem' && p && p.kind === 'connect') row.createEl('button', { cls: 'mod-cta', text: 'Connect to Google Drive' }).addEventListener('click', () => this.go(() => this.askConnect()));
+    else if (st.status === 'problem' && p && p.kind === 'client') row.createEl('button', { cls: 'mod-cta', text: 'Use a client ID of my own' }).addEventListener('click', () => this.go(() => this.askConnect('own')));
+    else if (st.status === 'problem' && p && ['check', 'empty', 'resync', 'folder', 'setup'].includes(p.kind)) row.createEl('button', { cls: 'mod-cta', text: 'Set up the sync again' }).addEventListener('click', () => this.go(() => this.setupAgain()));
+    else row.createEl('button', { cls: 'mod-cta', text: 'Sync now' }).addEventListener('click', () => this.go(() => this.syncNow()));
+    row.createEl('button', { text: 'Replaced files…' }).addEventListener('click', () => {
+      const dir = this.kit.path.join(this.kit.paths.kept, this.kit.id);
+      try { this.kit.fs.mkdirSync(dir, { recursive: true }); void require('electron').shell.openPath(dir); } catch (e) { new Notice(dir, 10000); }
+    });
+    row.createEl('button', { text: 'Choose another folder' }).addEventListener('click', () => this.go(() => this.setupAgain()));
+    row.createEl('button', { text: 'Stop syncing this vault' }).addEventListener('click', () => {
+      plugin.saveSyncLink(null);
+      plugin.engine.start(false);
+      this.page('This vault is no longer synced. Its files stay as they are, here and in Google Drive. This computer is still signed in to Google (Settings → Scriptorium → Disconnect removes that).');
+      this.closeButton(this.buttons());
+    });
+    this.reportButton(row);
+    this.closeButton(row);
+  }
+
+  /* ----- Retrieving a vault ----- */
+
+  askTarget() {
+    const k = this.kit, link = this.link;
+    const name = link.path.split('/').pop();
+    const el = this.page('Where should the vault go on this computer? A new or empty folder: retrieving never writes over what is already there.');
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(link) });
+    const parent = k.path.dirname(k.dir);
+    const row = el.createDiv({ cls: 'scriptorium-setup-row' });
+    const input = row.createEl('input', { type: 'text', cls: 'scriptorium-setup-path', attr: { placeholder: 'The new vault’s folder', 'aria-label': 'The new vault’s folder', spellcheck: 'false' } });
+    let suggested = k.path.join(parent, name);
+    for (let n = 2; k.fs.existsSync(suggested) && n < 50; n++) suggested = k.path.join(parent, `${name} ${n}`);
+    input.value = suggested;
+    const dialog = setupDialog();
+    if (dialog) {
+      row.createEl('button', { text: 'Browse…' }).addEventListener('click', async () => {
+        try {
+          const r = await dialog.showOpenDialog({ title: 'Choose a new or empty folder for the vault', defaultPath: parent, properties: ['openDirectory', 'createDirectory', 'promptToCreate'] });
+          if (r && !r.canceled && r.filePaths && r.filePaths[0]) { input.value = r.filePaths[0]; said.setText(''); input.focus(); }
+        } catch (e) { new Notice('Could not open the folder chooser: type the folder’s path instead.'); }
+      });
+    }
+    const said = el.createEl('p', { cls: 'scriptorium-setup-problem', text: '' });
+    const buttons = this.buttons();
+    const go = buttons.createEl('button', { cls: 'mod-cta', text: 'Retrieve' });
+    buttons.createEl('button', { text: 'Choose another folder in Drive' }).addEventListener('click', () => this.go(() => this.showFolder()));
+    this.closeButton(buttons, 'Cancel');
+    go.addEventListener('click', () => this.go(async () => {
+      const dir = setupFolder(k.path, input.value);
+      if (!dir) { said.setText(`Give the folder’s full path, from the ${k.platform === 'win32' ? 'drive letter (for example C:\\Users\\you\\Documents\\My vault)' : 'first / (for example /Users/you/Documents/My vault)'}.`); input.focus(); return; }
+      go.disabled = true;
+      said.setText('Looking at the Drive folder…');
+      k.fs.mkdirSync(k.paths.filters, { recursive: true });
+      const filters = k.path.join(k.paths.filters, 'retrieve.txt');
+      k.fs.writeFileSync(filters, syncFilters(SYNC_DEFAULTS));
+      const size = await this.api.size(link, filters, this.stop.signal);
+      go.disabled = false;
+      if (!size.count) { said.setText('That Drive folder has no files in it (Google Docs do not count). Choose the folder that holds the vault.'); return; }
+      const why = driveTargetProblem(k.fs, k.path, dir, size.bytes);
+      if (why) { said.setText(why); input.focus(); return; }
+      await this.retrieve(dir, filters, size);
+    }));
+  }
+
+  async retrieve(dir, filters, size) {
+    const k = this.kit, link = this.link;
+    const p = this.progress(`Retrieving ${driveCount(size.count, 'file')}, ${driveBytes(size.bytes)}…`);
+    k.fs.mkdirSync(dir, { recursive: true });
+    await this.api.copy(link, dir, filters, p.stats, this.stop.signal);
+    // The vault is made a Scriptorium vault with the same code as "Set up another vault".
+    let setup = '';
+    try {
+      const plan = planVaultSetup(k.fs, k.path, setupPackage(k.fs, k.path, k.dir), dir);
+      applyVaultSetup(k.fs, k.path, dir, plan);
+      setup = 'Scriptorium’s theme, snippet and plugins are set up in it.';
+    } catch (e) {
+      setup = 'Scriptorium could not be set up in it; run “Scriptorium: Set up another vault” on it.';
+      this.plugin.syncNote('setting up the retrieved vault failed', [String(e && e.message)]);
+    }
+    // Then it is linked to the Drive folder it came from, so that it stays in step from now on.
+    p.stage.setText('Linking the new vault to its Drive folder…');
+    let linked = '';
+    try {
+      const id = syncVaultId(k.crypto, k.path, dir, k.platform);
+      const theirs = syncSettings(syncReadJson(k.fs, k.path.join(dir, '.obsidian', 'plugins', 'scriptorium', 'data.json')));
+      await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id, dir, link, settings: theirs, differ: [], keep: 'both',
+        now: () => Date.now(), pid: process.pid, alive: k.alive, onLine: p.onLine, signal: this.stop.signal });
+      const now = new Date().toISOString();
+      syncSaveLink(k.fs, k.path, k.paths.vaults, id, Object.assign({}, link, { linked: now, first: now }));
+      linked = 'It is linked to that Drive folder: once it is open, it syncs by itself.';
+    } catch (e) {
+      linked = 'It could not be linked to the Drive folder yet: open it and run “Scriptorium: Sync this vault with Google Drive”.';
+      this.plugin.syncNote('linking the retrieved vault failed', e && e.tail);
+    }
+    if (!this.contentEl.isConnected) return;
+    const el = this.page('The vault is on this computer:');
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: dir });
+    el.createEl('p', { text: `${setup} ${linked} When Obsidian asks, choose “Trust author and enable plugins”.` });
+    const row = this.buttons();
+    row.createEl('button', { cls: 'mod-cta', text: 'Open the vault' }).addEventListener('click', () => {
+      if (openVaultWindow(dir)) this.close();
+      else new Notice('Could not open it from here: in the vault switcher, choose “Open folder as vault” and pick that folder.', 10000);
+    });
+    row.createEl('button', { text: 'Show the folder' }).addEventListener('click', () => { try { void require('electron').shell.openPath(dir); } catch (e) { new Notice(dir, 10000); } });
+    this.closeButton(row);
+  }
 }
 
 /* ==========================================================
@@ -4588,14 +3789,37 @@ class Scriptorium extends Plugin {
         return true;
       }
     });
-    // Backing up to Google Drive (experimental). On a phone or tablet the commands say why they cannot run there.
+    // Syncing with Google Drive through rclone (new). On a phone or tablet the commands say why they cannot run there.
+    // The ids are those of the older backup, so that a hotkey given to one of them still works.
+    this.syncRuns = [];
+    this.engine = new SyncEngine({
+      run: (reason, opts) => this.syncRun(reason, opts),
+      settings: () => syncSettings(this.settings),
+      linked: () => { const l = this.syncLink(); return Boolean(l && l.first); },
+      onState: () => this.refreshSync(),
+    });
+    this.syncBar = this.addStatusBarItem();
+    this.syncBar.addClass('scriptorium-sync-status');
+    this.syncBar.setAttribute('role', 'button');
+    this.syncBar.setAttribute('tabindex', '0');
+    this.registerDomEvent(this.syncBar, 'click', () => new SyncModal(this, 'status').open());
+    this.registerDomEvent(this.syncBar, 'keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); new SyncModal(this, 'status').open(); } });
     for (const [id, mode, name] of [
-      ['drive-back-up', 'backup', 'Back up this vault to Google Drive (experimental)'],
-      ['drive-sync-now', 'sync', 'Sync now with Google Drive (experimental)'],
-      ['drive-retrieve', 'retrieve', 'Retrieve a vault from Google Drive (experimental)'],
-    ]) this.addCommand({ id, name, callback: () => new DriveModal(this, mode).open() });
-    this.addCommand({ id: 'drive-connect', name: 'Connect to Google Drive with a Google sign-in (preview)', callback: () => new DriveModal(this, 'connect').open() });
+      ['drive-back-up', 'setup', 'Sync this vault with Google Drive (set up, or see how it is doing)'],
+      ['drive-retrieve', 'retrieve', 'Retrieve a vault from Google Drive'],
+      ['drive-connect', 'connect', 'Connect to Google Drive (sign in to Google)'],
+    ]) this.addCommand({ id, name, callback: () => new SyncModal(this, mode).open() });
+    this.addCommand({ id: 'drive-sync-now', name: 'Sync now with Google Drive', callback: () => this.syncNowCommand() });
     this.addCommand({ id: 'drive-report', name: 'Copy the Google Drive diagnostic report', callback: () => this.copyDriveReport() });
+    if (this.onDesktop()) {
+      for (const what of ['modify', 'create', 'delete', 'rename']) this.registerEvent(this.app.vault.on(what, () => this.engine.touch()));
+      // Before Obsidian quits, what is waiting is synced, for a quarter of a minute at most.
+      this.registerEvent(this.app.workspace.on('quit', tasks => {
+        if (!this.engine.pending() || !tasks || typeof tasks.add !== 'function') return;
+        tasks.add(() => Promise.race([this.engine.run('quit'), new Promise(done => setTimeout(done, SYNC_TIMES.quit))]).then(() => { if (this.syncStop) this.syncStop.abort(); }));
+      }));
+      this.app.workspace.onLayoutReady(() => { this.engine.start(true); this.refreshSync(); void this.tellAboutTheMove(); });
+    }
     this.addSettingTab(new ScriptoriumSettings(this.app, this));
 
     // Re-check an opening paragraph whenever its box changes (first layout, pane resize, fonts arriving).
@@ -4665,11 +3889,115 @@ class Scriptorium extends Plugin {
     return !(Platform && Platform.isDesktopApp === false) && Boolean(this.app.vault.adapter && this.app.vault.adapter.basePath);
   }
 
-  /* The direct Google Drive connection's parts (driveKit), made from Node's modules when first asked for. */
-  driveKit(log) {
-    const os = require('os');
-    return driveKit({ fs: require('fs'), path: require('path'), os, crypto: require('crypto'), http: require('http'), https: require('https'),
-      env: process.env, platform: process.platform, seal: driveSeal(), log });
+  /* What the sync needs of this computer, made from Node's modules when first asked for: where Scriptorium's own
+     folder is, this vault's folder and its short name there, and the settings that belong to this computer alone
+     (the path to rclone), which are kept in that folder and not in the vault. */
+  syncKit() {
+    if (this.kit) return this.kit;
+    const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
+    const home = os.homedir(), platform = process.platform, dir = this.app.vault.adapter.basePath;
+    const paths = syncPaths(path, syncUserDir(path, process.env, platform, home), platform);
+    const kit = {
+      fs, path, os, crypto, zlib: require('zlib'), https: require('https'), spawn: require('child_process').spawn,
+      env: process.env, platform, arch: process.arch, home, paths, dir, id: syncVaultId(crypto, path, dir, platform),
+      alive: pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } },
+      device: () => syncReadJson(fs, paths.device),
+      setDevice: patch => syncWriteJson(fs, path, paths.device, Object.assign(syncReadJson(fs, paths.device), patch)),
+      get test() { const c = syncConnection(fs, paths.conf); return c.connected && c.type !== 'drive'; },
+    };
+    this.kit = kit;
+    return kit;
+  }
+
+  /* rclone, found and asked for its version once (again after `fresh`, or when the path in the settings changed).
+     Throws a problem in plain words; .missing when there is no rclone at all, so that the download can be offered. */
+  async syncApi(fresh) {
+    const k = this.syncKit(), custom = k.device().rclone || '';
+    if (this.rcloneFound && !fresh && this.rcloneFound.custom === custom && k.fs.existsSync(this.rcloneFound.file)) return this.rcloneFound.api;
+    const found = findRclone(k.fs, rcloneCandidates({ path: k.path, env: k.env, platform: k.platform, home: k.home, custom, exe: k.paths.exe }), k.platform);
+    if (!found) {
+      const e = custom
+        ? syncProblem('rclone', 'There is no rclone at the path given in the settings.', 'The file was moved, or the path has a slip in it.', 'Correct the path in Settings → Scriptorium → rclone, or clear it and let Scriptorium find or download rclone.')
+        : syncProblem('rclone', 'rclone is not on this computer yet.', 'Scriptorium syncs by running rclone, and did not find it.', 'Choose “Find or download rclone”.');
+      e.missing = !custom;
+      throw e;
+    }
+    const api = rcloneApi({ spawn: k.spawn, fs: k.fs, path: k.path, exe: found.file, paths: k.paths, env: k.env, log: r => this.syncLogRun(r) });
+    const v = await api.version();
+    this.rcloneFound = { file: found.file, kind: found.kind, version: v.join('.'), custom, api };
+    return api;
+  }
+
+  syncLink() {
+    if (!this.onDesktop()) return null;
+    const k = this.syncKit();
+    return syncLink(k.fs, k.paths.vaults, k.id);
+  }
+
+  saveSyncLink(link) {
+    const k = this.syncKit();
+    syncSaveLink(k.fs, k.path, k.paths.vaults, k.id, link);
+    this.refreshSync();
+  }
+
+  /* What rclone was asked and how it ended, for the diagnostic report: the last forty calls. */
+  syncLogRun(r) {
+    this.syncRuns.push(Object.assign({ at: new Date().toISOString().slice(11, 19) }, r, { lines: (r.lines || []).filter(l => !l.stats).slice(-30) }));
+    if (this.syncRuns.length > 40) this.syncRuns.splice(0, this.syncRuns.length - 40);
+  }
+  syncNote(what, lines) {
+    this.syncLogRun({ what, ms: 0, code: 0, lines: (lines || []).map(m => ({ level: 'note', msg: String(m) })) });
+  }
+
+  /* One run of the sync for the engine. */
+  async syncRun(reason, opts) {
+    const k = this.syncKit(), api = await this.syncApi();
+    this.syncStop = new AbortController();
+    try {
+      return await syncOnce({ api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link: this.syncLink(), settings: syncSettings(this.settings),
+        force: Boolean(opts && opts.force), now: () => Date.now(), pid: process.pid, alive: k.alive, signal: this.syncStop.signal });
+    } finally {
+      this.syncStop = null;
+    }
+  }
+
+  /* "Sync now": runs at once where the vault is set up, and says how it went; opens the set-up otherwise. */
+  async syncNowCommand() {
+    if (!this.onDesktop()) { new SyncModal(this, 'status').open(); return; }
+    const link = this.syncLink();
+    if (!link || !link.first) { new SyncModal(this, 'setup').open(); return; }
+    const r = await this.engine.run('manual');
+    if (r && r.problem) new SyncModal(this, 'status').open();
+    else if (r && r.skipped === 'busy') new Notice('Another sync of this vault is already running.');
+    else if (r && r.summary) new Notice(`Synced with Google Drive: ${syncSummaryText(r.summary)}.`);
+  }
+
+  /* The copies that a sync kept of files changed on both sides, by their names. */
+  syncConflicts() {
+    return this.app.vault.getFiles().map(f => f.path).filter(p => SYNC_CONFLICT.test(p)).sort();
+  }
+
+  /* The status bar's word on the sync. */
+  refreshSync() {
+    if (!this.syncBar) return;
+    const t = syncStatusText(this.engine.state, Date.now());
+    this.syncBar.setText(t.text);
+    this.syncBar.style.display = t.text ? '' : 'none';
+    this.syncBar.setAttribute('aria-label', t.title);
+    this.syncBar.toggleClass('scriptorium-sync-problem', this.engine.state.status === 'problem');
+  }
+
+  /* Whether the older Google Drive backup was used in this vault (its settings or its record are there). */
+  oldDriveBackup() {
+    if (this.settings.drive && typeof this.settings.drive === 'object') return true;
+    try { const k = this.syncKit(); return k.fs.existsSync(k.path.join(k.dir, '.obsidian', 'plugins', 'scriptorium', 'drive-sync.json')); } catch (e) { return false; }
+  }
+
+  /* Said once to those who used the older backup: how to move to the sync. */
+  async tellAboutTheMove() {
+    if (this.settings.syncMoveTold || !this.oldDriveBackup()) return;
+    new Notice(`${SYNC_MOVED} (Settings → Scriptorium → Google Drive sync says this again.)`, 30000);
+    await this.updateSettings({ syncMoveTold: true });
   }
 
   /* Opens an address in the system's browser. */
@@ -4677,40 +4005,22 @@ class Scriptorium extends Plugin {
     try { return require('electron').shell.openExternal(url); } catch (e) { window.open(url); return null; }
   }
 
-  /* What a diagnostic report starts with. */
-  driveFacts() {
-    let os = null;
-    try { os = require('os'); } catch (e) { /* not a computer */ }
-    return { version: this.manifest && this.manifest.version, obsidian: typeof apiVersion === 'string' ? apiVersion : '', platform: typeof process !== 'undefined' ? process.platform : 'mobile',
-      arch: typeof process !== 'undefined' ? process.arch : '', release: os ? os.release() : '' };
-  }
-
-  /* Puts the report of the last run (or of d) on the clipboard. */
-  async copyDriveReport(d) {
-    d = d || this.driveDiag;
-    if (!d) {
-      d = driveDiagnostics(Object.assign(this.driveFacts(), { mode: 'none yet', way: driveTransport(this.settings) }));
-      d.note('no backup, sync or retrieval has been run since Obsidian started');
+  /* Puts the diagnostic report on the clipboard. */
+  async copyDriveReport() {
+    let text = 'Scriptorium: Google Drive sync diagnostic report\nThis is Obsidian on a phone or tablet, where the sync does not run.\n';
+    if (this.onDesktop()) {
+      const k = this.syncKit(), link = this.syncLink(), conn = syncConnection(k.fs, k.paths.conf), f = this.rcloneFound;
+      text = syncReport({
+        version: this.manifest && this.manifest.version, obsidian: typeof apiVersion === 'string' ? apiVersion : '', platform: k.platform, arch: k.arch, release: k.os.release(),
+        rclone: f ? { kind: f.kind, version: f.version } : {}, connected: conn.connected, own: conn.own, type: conn.type,
+        linked: Boolean(link), first: Boolean(link && link.first), where: link ? `${link.root === 'my' ? 'My Drive' : link.root === 'shared' ? 'Shared with me' : 'a shared drive'}, ${link.path.split('/').length} folders deep` : '',
+        settings: syncSettings(this.settings), state: this.engine.state,
+      }, this.syncRuns, k.home, [k.dir, k.dir.split('\\').join('/'), link ? link.path : '', this.app.vault.getName()]);
     }
-    let home = '';
-    try { home = require('os').homedir(); } catch (e) { /* not a computer */ }
-    const text = driveReport(d, home);
     this.lastDriveReport = text;
     try { await navigator.clipboard.writeText(text); new Notice('The diagnostic report is copied. Paste it wherever you are asking for help.'); }
     catch (e) { new Notice('The report could not be copied to the clipboard.'); }
     return text;
-  }
-
-  /* What the Google Drive backup needs to run Claude Code: Lagrange's {findCli, runCli, cliErrorMessage} and the path
-     to `claude` set in Lagrange's settings, or {problem} where it cannot run. */
-  driveTools() {
-    if (!this.onDesktop()) return { problem: DRIVE_MOBILE };
-    const lagrange = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins.lagrange;
-    const cli = lagrange && lagrange.constructor && lagrange.constructor.internals;
-    if (!cli || typeof cli.runCli !== 'function' || typeof cli.findCli !== 'function' || cli.runCliTakesEnv !== true) {
-      return { problem: 'Turn on the Lagrange plugin that comes with Scriptorium (Settings → Community plugins), then run this again: the backup runs Claude Code with Lagrange’s code. If it is on, update it with “Scriptorium: Set up this vault”.' };
-    }
-    return { cli, custom: lagrange.settings && lagrange.settings.claudeCodePath };
   }
 
   /* Export to PDF (see "Export to PDF: the page as Reading view sets it"). The returned promise is awaited by Obsidian
@@ -5026,6 +4336,7 @@ class Scriptorium extends Plugin {
     this.applyMode();
     this.applyFeatures();
     await this.saveData(this.settings);
+    if ('sync' in patch && this.engine) this.engine.start(false);
   }
 
   applyMode() {
@@ -5056,6 +4367,8 @@ class Scriptorium extends Plugin {
   onunload() {
     document.body.classList.remove('scriptorium-fancy', 'scriptorium-image-focus');
     for (const [value] of INITIALS) document.body.classList.remove(`scriptorium-initials-${value}`);
+    if (this.engine) this.engine.stop();
+    if (this.syncStop) this.syncStop.abort();   // a run that is going is asked to finish cleanly; the next one picks it up
     if (this.marginalia) this.marginalia.unload();
     if (this.imageFocus) this.imageFocus.unload();
     if (this.resizeObserver) this.resizeObserver.disconnect();
@@ -5072,10 +4385,9 @@ Object.assign(module.exports, {
   noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
   seedOf, fontFaces, setLabel, monoMask, downloadPlan, fetchDropcapSet, describeDownload, sizeText,
-  DRIVE_LIMITS, DRIVE_MANIFEST, DRIVE_STATE, DRIVE_TOOL, driveMime, driveSettings, driveRule, driveScan, drivePlan, driveConflictName, driveBatches,
-  driveStable, drivePrompt, applyDriveLine, driveResult, driveResults, driveRunner, driveCheck, driveManifest, driveLinked, DriveSync,
-  DRIVE_DEFAULT_CLIENT, DRIVE_DEFAULT_TRANSPORT, DRIVE_SCOPE, DRIVE_AUTH_FILE, DRIVE_UPLOADS, DRIVE_DIRECT, DRIVE_DIRECT_LIMITS, DRIVE_CLIENT_STEPS, GOOGLE_ENDPOINTS,
-  driveRealMime, driveEndpoints, driveTransport, driveAuthFile, driveParseClient, driveClient, driveAuthStore, driveHttp, driveRetryable, driveDelay, driveExplain,
-  driveTokens, driveApi, drivePkce, driveAuthUrl, driveSignIn, driveDisconnect, driveQuery, driveSessions, driveDirect, driveKit, driveHashFile, driveNameProblem,
-  driveRedact, driveDiagnostics, driveNameless, driveReport, driveTargetProblem, driveOtherWay
+  RCLONE, SYNC_SENTINEL, SYNC_DEFAULTS, SYNC_TIMES, SYNC_CONFLICT, SYNC_CLIENT_STEPS, syncSettings, syncUserDir, syncPaths, syncVaultId, syncReadJson, syncWriteJson,
+  syncLink, syncSaveLink, rcloneAsset, rcloneCandidates, findRclone, rcloneVersion, rcloneOldEnough, zipEntry, syncFetch, rcloneInstall, syncProblem, rcloneEnv,
+  syncLogLine, rcloneExec, syncConfRead, syncConnection, syncConfPrepare, syncParseClient, syncFilters, syncTarget, syncWhere, syncFolderName, syncParseDirs,
+  syncParseCheck, syncConflictName, syncBisyncArgs, syncSummary, syncSummaryText, syncExplain, rcloneApi, syncLock, syncUnlock, syncClearStale, syncPrune, syncOnce, syncStamp,
+  syncPreview, syncFirst, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
 });
