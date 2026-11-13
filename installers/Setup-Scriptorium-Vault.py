@@ -52,7 +52,7 @@ import zipfile
 from pathlib import Path
 
 PACKAGE_URL = "https://williamliaw.com/assets/downloads/Scriptorium.zip"
-PACKAGE_SHA256 = "f2d91be389e29b0004cdb59776cb37605f5fc43adcedef2e627d36e0aec92209"   # the same pin as the installers'
+PACKAGE_SHA256 = "bdee444b38250ef0c846d123aee8def623fd2453b3c1fb7a4877c212356ed8e8"   # the same pin as the installers'
 
 OBS = ".obsidian"
 BACKUP_PREFIX = "scriptorium-backup-"
@@ -67,6 +67,12 @@ REPLACE = {f"{OBS}/snippets/manuscript.css", f"{OBS}/plugins/lagrange/LagrangeHa
 # the Typewriter theme, and the sets of drop caps that come with the Scriptorium plugin
 REPLACE_UNDER = (f"{OBS}/themes/Typewriter/", f"{OBS}/plugins/scriptorium/dropcaps/")
 ADD_IF_MISSING = {f"{OBS}/core-plugins.json"} | {f"{OBS}/plugins/{p}/data.json" for p in BUNDLED_PLUGINS}
+# A vault that syncs with Google Drive (the Scriptorium plugin's sync, through rclone) has the plugin's check file in
+# it. What the sync needs is the plugin's settings (data.json, never written over: see above) and Scriptorium's own
+# folder outside every vault (the sign-in, the Drive folder of each vault, rclone's record of the last sync), which
+# this script never reads or writes. So setting up, or updating, leaves the sync as it was, and the plan says so.
+SYNC_CHECK_FILE = ".scriptorium-sync"
+SYNC_KEPT = "The sync of this vault with Google Drive is kept as it is: the sign-in, the Drive folder and its settings are not touched."
 PLUGINS_JSON = f"{OBS}/community-plugins.json"
 APPEARANCE_JSON = f"{OBS}/appearance.json"
 APP_JSON = f"{OBS}/app.json"
@@ -333,6 +339,8 @@ def plan(package, vault):
                 notes.append(note)
         elif now != content:
             changes.append({"rel": rel, "content": content, "replaces": True, "note": None})
+    if (vault / SYNC_CHECK_FILE).is_file():
+        notes.append(SYNC_KEPT)
     return changes, notes
 
 

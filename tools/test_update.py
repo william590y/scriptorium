@@ -47,13 +47,13 @@ def check(ok, what):
         failures.append(what)
 
 
-def run(exe, *args):
+def run(exe, *args, env=None):
     if os.name == "nt":
         cmd = [str(exe), *args]
     else:
         mono = os.environ.get("MONO")
         cmd = [os.path.join(mono, "bin", "mono") if mono else "mono", str(exe), *args]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=dict(os.environ, SCRIPTORIUM_NO_FONTS="1", SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1"))   # the fonts and the diagram plugins have tests of their own (test_fonts.py, test_diagram_plugins.py)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=dict(os.environ, SCRIPTORIUM_NO_FONTS="1", SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1", **(env or {})))   # the fonts and the diagram plugins have tests of their own (test_fonts.py, test_diagram_plugins.py)
     for line in (r.stdout + r.stderr).splitlines():
         print("      | " + line)
     return r
@@ -143,6 +143,62 @@ def test_update(exe, work):
     check(r.returncode == 0, "--update-only exits 0 the second time")
     check(snapshot(vault) == after, "the vault is unchanged")
     check(len(backups(vault)) == 1, "no new backup folder")
+
+
+SYNC_CLI = ROOT / "plugins-tests" / "sync-state-cli.js"
+SYNC_KEPT = "The sync of this vault with Google Drive is kept as it is"
+
+
+def sync_cli(node, mode, vault, user):
+    r = subprocess.run([node, str(SYNC_CLI), mode, str(vault), str(user)], capture_output=True, text=True, timeout=120,
+                       encoding="utf-8", errors="replace")
+    for line in (r.stdout + r.stderr).splitlines():
+        print("      | " + line)
+    return r.returncode == 0
+
+
+def test_sync_kept(exe, work):
+    """A vault that syncs with Google Drive (set up with 1.2.3, whose layout is today's) is updated: the sync's files,
+    in the vault and in Scriptorium's own folder outside it, are the same bytes afterwards, and the plugin's own code
+    finds the sync set up, with a plain sync next (plugins-tests/sync-state-cli.js)."""
+    print("\n== A vault that syncs with Google Drive is updated: the sync is as it was ==")
+    node = shutil.which("node")
+    if not node:
+        print("node was not found: the update of a synced vault is not tested here")
+        return
+    vault = fresh(exe, work, "sync")
+    # Scriptorium's own folder, where the plugin would look for it on this system (see syncUserDir in the plugin).
+    user = work / "sync" / "user data" / ("Scriptorium" if os.name == "nt" else "scriptorium")
+    env = {"SCRIPTORIUM_USER_DIR": str(user), "XDG_DATA_HOME": str(user.parent)}
+    manifest = vault / OBS / "plugins" / "scriptorium" / "manifest.json"
+    m = json.loads(manifest.read_text(encoding="utf-8"))
+    m["version"] = "1.2.3"
+    write_json(manifest, m)
+    with open(vault / OBS / "plugins" / "scriptorium" / "main.js", "a", encoding="utf-8") as f:
+        f.write("\n/* the code of an older version */\n")
+    check(sync_cli(node, "make", vault, user), "the vault's sync is set up (a pretend sign-in, a Drive folder, a record of the last sync)")
+    mine = (".scriptorium-sync", f"{OBS}/plugins/scriptorium/data.json", f"{OBS}/plugins/scriptorium/drive-sync.json")
+    before, outside = snapshot(vault), snapshot(user, skip_backups=False)
+    check(len(outside) >= 7 and all(rel in before for rel in mine), "its files are there, in the vault and outside it")
+
+    r = run(exe, "--update-only", str(vault), env=env)
+    check(r.returncode == 0 and f"(from 1.2.3 to {package_version()})" in r.stdout, "--update-only updates it from 1.2.3")
+    after = snapshot(vault)
+    check(after[f"{OBS}/plugins/scriptorium/main.js"] == (PACKAGE / OBS / "plugins" / "scriptorium" / "main.js").read_bytes(),
+          "the plugin's code is the new one")
+    for rel in mine:
+        check(after.get(rel) == before[rel], f"kept byte for byte: {rel}")
+    check(snapshot(user, skip_backups=False) == outside, "Scriptorium's own folder outside the vault is byte for byte as it was")
+    check(SYNC_KEPT in r.stdout, "it says that the sync is kept")
+    check(sync_cli(node, "check", vault, user), "the plugin finds the sync set up, and the next sync is a plain one")
+
+    r = run(exe, "--update-only", str(vault), env=env)
+    check(r.returncode == 0 and snapshot(vault) == after, "updating again changes nothing")
+    check(sync_cli(node, "check", vault, user), "and the sync is still set up")
+
+    print("\n== A vault that does not sync is told nothing about a sync ==")
+    r = run(exe, "--update-only", str(fresh(exe, work, "nosync")), env=env)
+    check(r.returncode == 0 and SYNC_KEPT not in r.stdout, "no word about a sync")
 
 
 def test_unreadable_json(exe, work):
@@ -298,6 +354,7 @@ def main():
     work = Path(tempfile.mkdtemp(prefix="scriptorium-update-test-"))
     try:
         test_update(exe, work)
+        test_sync_kept(exe, work)
         test_unreadable_json(exe, work)
         test_not_a_vault(exe, work)
         test_install_targets(exe, work)

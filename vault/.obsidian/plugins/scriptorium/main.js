@@ -10,19 +10,219 @@ const INITIALS = [
   ['plain', 'Plain capital (Cormorant Garamond)'],
   ['none', 'None']
 ];
-const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true };
+const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true, tikzRepair: true };
 
 /* Saved settings with every known key checked and defaulted; keys this version does not know are kept. */
 function normalizeSettings(saved) {
   const settings = Object.assign({}, saved && typeof saved === 'object' ? saved : {}, DEFAULT_SETTINGS);
   if (saved && typeof saved === 'object') {
-    for (const key of ['fancyMode', 'liveDropcaps', 'marginalia', 'imageFocus']) {
+    for (const key of ['fancyMode', 'liveDropcaps', 'marginalia', 'imageFocus', 'tikzRepair']) {
       if (typeof saved[key] === 'boolean') settings[key] = saved[key];
     }
     // one of the four built in, or a set of drop caps by name ("set:Dropcat", "set:My initials"; see "Sets of drop caps")
     if (INITIALS.some(([value]) => value === saved.initials) || (typeof saved.initials === 'string' && /^set:.+/.test(saved.initials))) settings.initials = saved.initials;
   }
   return settings;
+}
+
+/* "Show drop caps while editing" was off unless turned on in 1.4.0, and is on unless turned off since 1.4.1. What
+   1.4.0 saved cannot tell a writer who turned it off from one who never touched it (the plugin saved all its
+   settings, the default among them, when any one changed), so settings saved before 1.4.1 (they have no
+   `liveDropcapsSince`) are brought to the new default once: -> {settings, told}, told being true where a saved "off"
+   was turned on, which the plugin then says once, with where the switch is. Settings saved since are left as they
+   are, so turning it off afterwards holds. Pure. */
+const LIVE_DROPCAPS_SINCE = '1.4.1';
+function migrateSettings(saved) {
+  const had = saved && typeof saved === 'object' ? saved : null;
+  if (had && had.liveDropcapsSince) return { settings: had, told: false };
+  const settings = Object.assign({}, had || {}, { liveDropcapsSince: LIVE_DROPCAPS_SINCE });
+  const told = Boolean(had && had.liveDropcaps === false);
+  if (told) settings.liveDropcaps = true;
+  return { settings, told };
+}
+
+/* ==========================================================
+   TikZJax, repaired while it runs
+   ==========================================================
+   The TikZJax plugin (0.5.2) draws ```tikz blocks. It is not part of Scriptorium and none of its files is changed:
+   what follows only stands beside it in the page, while "Repair TikZJax rendering" is on and the TikZJax in the
+   vault is a version this was checked against. Three faults of its page script are met:
+
+   1. A figure whose <script> comes into the page inside an element that came in during the same task (Obsidian's
+      renderer filling a panel that is already on the page) is met twice by its observer. The second time it makes a
+      new spinner, forgets the one it put on the page, and later puts the finished figure in place of the forgotten
+      one: the spinner on the page turns for ever. The script keeps its spinner in a property, `loader`; here that
+      property takes the first spinner it is given and no other, so the figure goes where the spinner is.
+   2. If anything throws after TeX has run (a figure that comes out empty, for one), the figures after it wait for
+      ever: its queue is never taken up again. Its worker still answers, so a spinner that has stood for two seconds
+      while the worker has nothing to do is taken to be left behind, and the figure is asked of the worker here and
+      put in the spinner's place, as TikZJax would have put it (not kept in TikZJax's store).
+   3. An error in a figure's TikZ shows as a broken picture, and what TeX said only in the console. Here the picture
+      gives way to a line that says so and TeX's own words.
+
+   Nothing is done in windows other than the main one. repairTikzjax(win) -> {stop(), stats}. */
+const TIKZJAX_ID = 'obsidian-tikzjax';
+const TIKZJAX_REPAIRED = ['0.5.2'];        // the versions whose page script was read and tried; any other is left alone
+const TIKZ_BROKEN = 'invalid.site/img-not-found';
+
+/* Whether the repair is to stand: 'on', 'off' (the setting), 'absent' (no TikZJax in the vault), or 'unknown' (a
+   TikZJax this was not checked against). version: the installed TikZJax's, or null. Pure. */
+function tikzRepairState(settings, version) {
+  if (!settings || settings.tikzRepair === false) return 'off';
+  if (!version) return 'absent';
+  return TIKZJAX_REPAIRED.includes(String(version)) ? 'on' : 'unknown';
+}
+
+/* What TeX said was wrong, from the lines of its log: each line that begins with "!" and the "l.<n> …" line that
+   follows it (where in the source it stopped). -> text, '' when the log names no error. Pure. */
+function texError(lines) {
+  const all = (lines || []).map(l => String(l).replace(/\s+$/, '')), out = [];
+  for (let i = 0; i < all.length && out.length < 6; i++) {
+    if (!/^!/.test(all[i])) continue;
+    out.push(all[i]);
+    const where = all.slice(i + 1, i + 5).find(l => /^l\.\d+ /.test(l));
+    if (where) out.push(where);
+  }
+  return out.join('\n').slice(0, 600);
+}
+
+/* A figure's ids made its own, as TikZJax makes them (so that two figures on a page do not share "pgf…" ids). Pure. */
+function tikzOwnIds(svg, hash) {
+  let out = String(svg);
+  const ids = out.match(/\bid="pgf[^"]*"/g);
+  if (ids) {
+    ids.sort((a, b) => b.length - a.length);
+    for (const id of ids) { const name = id.replace(/id="pgf(.*)"/, '$1'); out = out.split(`pgf${name}`).join(`pgf${hash}${name}`); }
+  }
+  return out.split('&#173;').join('&#172;');
+}
+
+function repairTikzjax(win) {
+  const doc = win.document, now = () => win.performance.now();
+  const stats = { twice: 0, errors: 0, rescued: 0, runs: 0 };
+  const loaders = new WeakMap();   // a figure's <script> -> the spinner that is on the page for it
+  const pending = new Set();       // {script, loader, since, taken}: spinners not yet replaced
+  const own = new Map();           // our own questions to the worker: uid -> {resolve, reject}
+  const busy = new Set();          // the worker's runs under way (TikZJax's and ours), by uid
+  let worker = null, lines = [], idleSince = now(), timer = 0, uid = 2000000000, chain = Promise.resolve(), stopped = false, said = false;
+
+  // 1. the spinner of a figure is the first it is given
+  const proto = win.HTMLScriptElement.prototype;
+  const plain = (el, value) => Object.defineProperty(el, 'loader', { value, writable: true, configurable: true, enumerable: true });
+  Object.defineProperty(proto, 'loader', {
+    configurable: true,
+    get() { return loaders.get(this); },
+    set(value) {
+      if (stopped || this.getAttribute('type') !== 'text/tikz') { plain(this, value); return; }
+      if (loaders.has(this)) { stats.twice++; return; }     // met a second time: its spinner is already on the page
+      loaders.set(this, value);
+      // (home: where the figure stands, which is where its <script> is now and its spinner will be)
+      pending.add({ script: this, loader: value, since: now(), taken: false, home: this.parentElement });
+      if (!timer) timer = win.setInterval(tick, 500);
+    },
+  });
+
+  // TikZJax's worker, known by the first figure it is asked for; what it answers, and TeX's log
+  const WorkerProto = win.Worker.prototype, post = WorkerProto.postMessage;
+  const onMessage = event => {
+    const d = event.data;
+    if (typeof d === 'string') { if (lines.length < 400) lines.push(d); return; }
+    if (!d || typeof d.uid !== 'number' || !busy.has(d.uid)) return;
+    if (d.type !== 'result' && d.type !== 'error') return;
+    busy.delete(d.uid);
+    if (!busy.size) idleSince = now();
+    const mine = own.get(d.uid);
+    own.delete(d.uid);
+    if (d.type === 'error') {
+      const said = texError(lines) || String((d.error && d.error.message) || '').slice(0, 300);
+      if (mine) mine.reject(new Error(said));
+      else win.setTimeout(() => showErrors(said), 0);      // (TikZJax puts its broken picture in first)
+    } else if (mine) mine.resolve(d.payload);
+  };
+  const wrapped = function (message, ...rest) {
+    try {
+      if (!stopped && message && message.type === 'run' && message.method === 'texify' && typeof message.uid === 'number' && Array.isArray(message.args)) {
+        if (worker !== this) { if (worker) worker.removeEventListener('message', onMessage); worker = this; worker.addEventListener('message', onMessage); }
+        busy.add(message.uid);
+        lines = [];
+        stats.runs++;
+      }
+    } catch (e) { /* the message goes all the same */ }
+    return post.call(this, message, ...rest);
+  };
+  WorkerProto.postMessage = wrapped;
+
+  // 3. a broken picture gives way to what TeX said
+  const errorBox = text => {
+    const box = doc.createElement('div');
+    box.className = 'scriptorium-tikz-error';
+    box.appendChild(doc.createElement('strong')).textContent = 'TikZJax could not draw this figure.';
+    box.appendChild(doc.createElement('pre')).textContent = text || 'TeX stopped at an error in the figure’s TikZ (its words are in the developer console).';
+    return box;
+  };
+  const showErrors = text => {
+    if (stopped) return;
+    const broken = Array.from(doc.querySelectorAll(`img[src*="${TIKZ_BROKEN}"]`));
+    for (const img of broken) { stats.errors++; img.replaceWith(errorBox(broken.length === 1 ? text : '')); }
+  };
+
+  // 2. a spinner left behind: the figure is asked of the worker here
+  const ask = (source, options) => new Promise((resolve, reject) => {
+    const id = uid++;
+    own.set(id, { resolve, reject });
+    busy.add(id);
+    lines = [];
+    post.call(worker, { type: 'run', uid: id, method: 'texify', args: [source, options] });
+  });
+  const rescue = async p => {
+    if (stopped || !worker || !p.loader.isConnected) return;
+    const script = p.script, source = script.childNodes[0] ? script.childNodes[0].nodeValue : '';
+    try {
+      const svg = tikzOwnIds(await ask(source, Object.assign({}, script.dataset)), script.md5hash || '');
+      const figure = doc.createRange().createContextualFragment(svg).firstChild;
+      if (stopped || !p.loader.isConnected) return;
+      if (!figure || figure.nodeType !== 1) { p.loader.replaceWith(errorBox('The figure came out empty.')); stats.errors++; return; }
+      p.loader.replaceWith(figure);
+      stats.rescued++;
+      figure.dispatchEvent(new win.Event('tikzjax-load-finished', { bubbles: true }));
+      if (!said) { said = true; console.info('Scriptorium: a figure that TikZJax had left on its spinner was drawn by “Repair TikZJax rendering”.'); }
+    } catch (e) {
+      if (!stopped && p.loader.isConnected) { p.loader.replaceWith(errorBox(String((e && e.message) || ''))); stats.errors++; }
+    }
+  };
+  function tick() {
+    for (const p of Array.from(pending)) {
+      if (!p.loader.isConnected) {
+        // Replaced by its figure, or never shown. Or TikZJax was given no figure and put nothing in the spinner's place
+        // (the word "null": the throw that stops its queue): the spinner goes back, and is taken up below.
+        const home = p.home;
+        if (home && home.isConnected && !home.firstElementChild && home.textContent.trim() === 'null') { home.textContent = ''; home.appendChild(p.loader); continue; }
+        if (now() - p.since > 1000) pending.delete(p);
+        continue;
+      }
+      p.home = p.loader.parentElement || p.home;
+      if (p.taken || !worker || busy.size || now() - idleSince < 1000 || now() - p.since < 2000) continue;
+      p.taken = true;
+      chain = chain.then(() => rescue(p)).then(() => { pending.delete(p); }, () => { pending.delete(p); });
+    }
+    if (!pending.size && timer) { win.clearInterval(timer); timer = 0; }
+  }
+
+  return {
+    stats,
+    stop() {
+      stopped = true;
+      if (timer) win.clearInterval(timer);
+      timer = 0;
+      // (figures TikZJax is at keep their spinners, as plain properties, so that it finishes them as it would)
+      for (const p of pending) { try { plain(p.script, p.loader); } catch (e) { /* gone */ } }
+      pending.clear();
+      delete proto.loader;
+      if (WorkerProto.postMessage === wrapped) WorkerProto.postMessage = post;
+      if (worker) worker.removeEventListener('message', onMessage);
+      worker = null;
+    },
+  };
 }
 
 /* ==========================================================
@@ -1384,10 +1584,16 @@ class ScriptoriumSettings extends PluginSettingTab {
       });
     new Setting(el)
       .setName('Show drop caps while editing (Live Preview)')
-      .setDesc('Off by default: the editor shows the opening paragraph as plain text, and drop caps are drawn in Reading view and in an exported PDF only. On: Live Preview shows the same drop cap on the same paragraph, in the same place, with the first line in small capitals, so the text does not move between the two views. The initial is still the letter you typed (the cursor goes before and after it; it is selected, copied, found and spell-checked as any other); nothing is added to the note. Source mode stays plain.')
+      .setDesc('On by default: Live Preview shows the same drop cap as Reading view on the same paragraph, in the same place, with the first line in small capitals, so the text does not move between the two views. The initial is still the letter you typed (the cursor goes before and after it; it is selected, copied, found and spell-checked as any other); nothing is added to the note. Off: the editor shows the opening paragraph as plain text, and drop caps are drawn in Reading view and in an exported PDF only. Source mode stays plain.')
       .addToggle(toggle => toggle
         .setValue(settings.liveDropcaps)
         .onChange(value => this.plugin.updateSettings({ liveDropcaps: value })));
+    new Setting(el)
+      .setName('Repair TikZJax rendering')
+      .setDesc('On by default. The TikZJax plugin (0.5.2), which draws tikz figures, can leave a figure on its spinner for ever when the figure is shown in a panel (a chat, a sidebar), can stop drawing figures altogether after one goes wrong inside it, and shows an error in a figure only as a broken picture. With this on, Scriptorium stands beside TikZJax while it runs: the figure is drawn where its spinner is, a figure left behind is drawn all the same, and an error shows what TeX said. None of TikZJax’s files is changed, and another version of TikZJax is left alone. Off: TikZJax exactly as it comes.')
+      .addToggle(toggle => toggle
+        .setValue(settings.tikzRepair)
+        .onChange(value => this.plugin.updateSettings({ tikzRepair: value })));
     new Setting(el)
       .setName('Marginalia')
       .setDesc('In Reading view, set footnotes beside their references in the right margin, as sidenotes, when the pane is wide enough; otherwise they stay at the foot of the note. A callout of type margin (> [!margin]) becomes an unnumbered note in the margin.')
@@ -2379,6 +2585,10 @@ class ImageFocus {
 const SETUP_BACKUP = 'scriptorium-backup-';
 const SETUP_PLUGINS = ['scriptorium', 'manuscriptum', 'typewriter-mode', 'lagrange'];
 const SETUP_CODE = ['main.js', 'manifest.json', 'styles.css', 'LICENSE'];
+/* Said of a vault that syncs with Google Drive (it has the sync's check file): what the sync needs is this plugin's
+   data.json, which setting up never writes over, and Scriptorium's own folder outside every vault, which it never
+   reads or writes. The same words as Scriptorium Setup's and the script's. */
+const SETUP_SYNC_KEPT = 'The sync of this vault with Google Drive is kept as it is: the sign-in, the Drive folder and its settings are not touched.';
 
 /* How a file of the package is treated: 'replace', 'missing' (written only if the vault has none), 'plugins',
    'appearance' or 'app' (merged), or null (not part of setting up a vault). rel uses forward slashes. */
@@ -2531,6 +2741,7 @@ function planVaultSetup(fs, path, pkg, dir) {
       else if (note) notes.push(note);
     }
   }
+  if (existing(SYNC_SENTINEL)) notes.push(SETUP_SYNC_KEPT);
   return { changes, notes };
 }
 
@@ -4683,7 +4894,13 @@ function uprightMissing(doc, family) {
 
 class Scriptorium extends Plugin {
   async onload() {
-    this.settings = normalizeSettings(await this.loadData());
+    const saved = await this.loadData(), moved = migrateSettings(saved);
+    this.settings = normalizeSettings(moved.settings);
+    if (moved.told) {
+      // (once: the settings are saved with their mark, so this is not said again, and "off" chosen from now on holds)
+      try { await this.saveData(this.settings); } catch (e) { console.error('Scriptorium: the settings could not be saved', e); }
+      new Notice('Scriptorium now shows drop caps while you edit (Live Preview), as Reading view does. To have the editor plain again, turn off Settings → Scriptorium → Show drop caps while editing.', 20000);
+    }
     this.ribbon = this.addRibbonIcon('feather', 'Toggle fancy mode', () => {
       void this.setFancyMode(!this.settings.fancyMode);
     });
@@ -5502,7 +5719,27 @@ class Scriptorium extends Plugin {
     }
   }
 
+  /* "Repair TikZJax rendering": stands beside the TikZJax plugin's page script while the setting is on and the TikZJax
+     of the vault is a version it was checked against (see repairTikzjax); taken away at once when it is turned off.
+     TikZJax may come and go (installed, turned on or off, loaded before or after Scriptorium): this is looked at
+     again whenever the layout changes. */
+  applyTikzRepair() {
+    const manifest = this.app.plugins && this.app.plugins.manifests ? this.app.plugins.manifests[TIKZJAX_ID] : null;
+    const version = manifest ? manifest.version : null, state = tikzRepairState(this.settings, version);
+    if (state === 'on' && !this.tikzRepair) {
+      try { this.tikzRepair = repairTikzjax(window); } catch (e) { this.tikzRepair = null; console.error('Scriptorium: TikZJax could not be repaired', e); }
+    } else if (state !== 'on' && this.tikzRepair) {
+      try { this.tikzRepair.stop(); } catch (e) { console.error('Scriptorium', e); }
+      this.tikzRepair = null;
+    }
+    if (state === 'unknown' && this.tikzUnknown !== version) {
+      this.tikzUnknown = version;
+      console.info(`Scriptorium: TikZJax ${version} is not a version “Repair TikZJax rendering” was checked against (${TIKZJAX_REPAIRED.join(', ')}), so it is left as it is.`);
+    }
+  }
+
   applyFeatures() {
+    this.applyTikzRepair();
     const s = this.settings, body = document.body;
     this.applyLiveDropcaps();
     let changed = false;
@@ -5518,6 +5755,7 @@ class Scriptorium extends Plugin {
   }
 
   onunload() {
+    if (this.tikzRepair) { try { this.tikzRepair.stop(); } catch (e) { /* gone */ } this.tikzRepair = null; }
     document.body.classList.remove('scriptorium-fancy', 'scriptorium-image-focus');
     for (const [value] of INITIALS) document.body.classList.remove(`scriptorium-initials-${value}`);
     if (this.engine) this.engine.stop();
@@ -5533,10 +5771,12 @@ class Scriptorium extends Plugin {
   }
 }
 
+// (for the checks that run in Obsidian's console, where require('obsidian') is not to be had)
+Scriptorium.obsidian = { MarkdownRenderer, Component };
 module.exports = Scriptorium;
 // Pure helpers, exported for plugins-tests/ (Obsidian uses only the class).
 Object.assign(module.exports, {
-  normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
+  normalizeSettings, tikzRepairState, texError, tikzOwnIds, repairTikzjax, TIKZJAX_REPAIRED, migrateSettings, LIVE_DROPCAPS_SINCE, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
   DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsWanted, diagramPluginsNote, versionAtLeast,

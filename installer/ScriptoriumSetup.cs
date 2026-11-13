@@ -59,8 +59,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Scriptorium")]
 [assembly: AssemblyCompany("williamliaw.com")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 William Liaw. GPL-3.0-or-later.")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
 
 namespace ScriptoriumSetup
 {
@@ -1219,6 +1219,14 @@ namespace ScriptoriumSetup
 
         public static bool IsEmptyFolder(string dir) { return !Directory.EnumerateFileSystemEntries(dir).Any(); }
 
+        // A vault that syncs with Google Drive (the Scriptorium plugin's sync, through rclone) has the plugin's check file
+        // in it. What the sync needs is the plugin's settings (data.json, which is never written over) and Scriptorium's
+        // own folder outside every vault (the sign-in, the Drive folder of each vault, rclone's record of the last sync),
+        // which Setup never reads or writes. So an update or a set-up leaves the sync as it was, and says so.
+        // tools/test_update.py and tools/test_setup_vault.py test it with the plugin's own code.
+        public const string SyncKept = "The sync of this vault with Google Drive is kept as it is: the sign-in, the Drive folder and its settings are not touched.";
+        public static bool Syncs(string vault) { return File.Exists(Path.Combine(vault, ".scriptorium-sync")); }
+
         // The Scriptorium plugin's version in a vault, or null if it cannot be read.
         public static string VaultVersion(string dir)
         {
@@ -1356,6 +1364,7 @@ namespace ScriptoriumSetup
             if (longform != null)
                 foreach (Pinned p in Installer.Longform)
                     Plan(vault, Path.Combine(".obsidian", "plugins", "longform", p.File), File.ReadAllBytes(Path.Combine(longform, p.File)), changes, notes.Add, present);
+            if (Syncs(vault)) notes.Add(SyncKept);
             return changes;
         }
 
@@ -1646,6 +1655,7 @@ namespace ScriptoriumSetup
             if (report.Added > 0) log("Added " + Count(report.Added, "missing file"));
             if (changes.Count == 0) log("Scriptorium's files were already up to date");
             log("Kept your notes and settings");
+            if (Syncs(vault)) log(SyncKept);
         }
 
         static string Count(int n, string noun) { return n + " " + noun + (n == 1 ? "" : "s"); }

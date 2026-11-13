@@ -2985,6 +2985,7 @@ test('TikZJax: how a figure stands on the page, and what is said of one that doe
   assert.equal(L.tikzState(block(['svg', 'svg > circle > animate'])), 'waiting', 'the spinner is an svg too');
   assert.equal(L.tikzState(block(['svg'])), 'drawn');
   assert.equal(L.tikzState(block(['img'])), 'failed');
+  assert.equal(L.tikzState(block(['.scriptorium-tikz-error'])), 'failed', 'what Scriptorium’s repair shows in place of the broken picture');
   assert.equal(L.tikzState(block([])), 'waiting');
   assert.equal(L.tikzState(null), 'waiting');
   assert.match(L.tikzTrouble('failed', 'chat'), /error in its TikZ.*Its source:$/);

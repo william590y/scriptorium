@@ -1496,7 +1496,8 @@ function withoutFigures(text) {
 function tikzState(block) {
   if (!block || block.querySelector('script[type="text/tikz"]') || block.querySelector('svg > circle > animate')) return 'waiting';
   if (block.querySelector('svg')) return 'drawn';
-  return block.querySelector('img') ? 'failed' : 'waiting';
+  // (the broken picture, or what Scriptorium's "Repair TikZJax rendering" puts in its place: TeX's own words)
+  return block.querySelector('img') || block.querySelector('.scriptorium-tikz-error') ? 'failed' : 'waiting';
 }
 /* How long a figure is waited for before its source is shown in its place. TikZJax sets its figures one after
    another: a plain one takes well under a second, pgfplots or circuitikz a second or two, a thousand shapes half a
@@ -7051,9 +7052,12 @@ class LagrangeChatView extends ItemView {
         const state = tikzState(f.block);
         if (state === 'waiting' && Date.now() <= until) return true;
         if (state !== 'drawn') {
+          const said = f.block.querySelector('.scriptorium-tikz-error pre');     // what TeX said, where Scriptorium shows it
+          const words = said ? said.textContent.trim() : '';
           f.block.empty();
           f.block.addClass('lagrange-figure-source');
           f.block.createEl('small', { cls: 'lagrange-chat-degraded', text: tikzTrouble(state === 'failed' ? 'failed' : 'late', 'chat', wait) });
+          if (words) f.block.createEl('pre', { cls: 'lagrange-figure-said' }).createEl('code', { text: words });
           f.block.createEl('pre').createEl('code', { text: f.source });
         }
         this.scrollDown();

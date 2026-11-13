@@ -8,7 +8,9 @@ destination="${destination:-$default_path}"
 case "$destination" in /*) ;; *) printf 'Please enter an absolute path.\n'; exit 1 ;; esac
 if [ -e "$destination" ] || [ -L "$destination" ]; then
   printf 'Folder already exists: %s. Choose a new folder; nothing was changed.\n' "$destination"
-  printf 'To set up Scriptorium in a vault you already have, use Setup-Scriptorium-Vault.py (see the README).\n'
+  printf 'To set up Scriptorium in a vault you already have, or to update a Scriptorium vault, use\n'
+  printf 'Setup-Scriptorium-Vault.py (see the README): it keeps your notes, your settings and the sync with Google Drive.\n'
+  printf 'A vault in a new folder is a new vault: its sync with Google Drive would have to be set up again.\n'
   exit 1
 fi
 for utility in curl unzip; do
@@ -29,7 +31,7 @@ verify_hash() {
   actual_hash="${actual_hash%% *}"
   [ "$actual_hash" = "$2" ] || { echo "Download verification failed for $1."; exit 1; }
 }
-verify_hash "$work_dir/Writing.zip" 'f2d91be389e29b0004cdb59776cb37605f5fc43adcedef2e627d36e0aec92209'
+verify_hash "$work_dir/Writing.zip" 'bdee444b38250ef0c846d123aee8def623fd2453b3c1fb7a4877c212356ed8e8'
 unzip -q "$work_dir/Writing.zip" -d "$work_dir/vault"
 [ -f "$work_dir/vault/.obsidian/appearance.json" ] || { printf 'Invalid configuration archive.\n'; exit 1; }
 # ---- The diagram plugins ----

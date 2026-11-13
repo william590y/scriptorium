@@ -434,3 +434,8 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
 .scriptorium-drive-client, .scriptorium-drive-secret { display: block; width: 100%; margin: 0 0 8px; font-family: var(--font-monospace); font-size: var(--font-ui-small); }
 .scriptorium-drive-client { resize: vertical; }
 .scriptorium-drive .modal-button-container { flex-wrap: wrap; }
+
+/* A tikz figure that TikZJax could not draw ("Repair TikZJax rendering"): a line that says so, and what TeX said. */
+.scriptorium-tikz-error { text-align: start; font-size: 0.9em; color: var(--text-muted); border-left: 2px solid var(--text-error, var(--text-faint)); padding: 0.2em 0 0.2em 0.8em; margin: 0.4em 0; }
+.scriptorium-tikz-error > strong { display: block; font-weight: 600; color: var(--text-normal); }
+.scriptorium-tikz-error > pre { margin: 0.3em 0 0; padding: 0; background: none; border: 0; white-space: pre-wrap; font-size: 0.85em; color: var(--text-muted); }

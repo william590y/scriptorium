@@ -576,6 +576,15 @@ body:where(:not(.scriptorium-fancy)).theme-dark {
   padding-top: 0 !important;
   padding-bottom: 1.2em !important;
 }
+/* Live Preview: the subtitle has its short rule, as in Reading view, and the space under it is such that the
+   paragraph after the blank line stands where Reading view has it (the rule takes 1em + 2px; the blank line of the
+   editor stands for the rest of Reading view's 2.4em). The rule is the line's own ::after: nothing is added to the
+   note, and it stays while the cursor is on the line, so that nothing below moves when the cursor comes and goes.
+   Source mode is as it was. */
+:where(body:not(.scriptorium-fancy)) .markdown-source-view.mod-cm6.is-live-preview .cm-line.HyperMD-header-6 {
+  padding-bottom: 1.154em !important;
+}
+:where(body:not(.scriptorium-fancy)) .markdown-source-view.mod-cm6.is-live-preview .cm-line.HyperMD-header-6::after,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered h6::after {
   content: "";
   display: block;
@@ -843,6 +852,15 @@ body:where(.scriptorium-fancy).theme-dark {
   padding-top: 0 !important;
   padding-bottom: 1.2em !important;
 }
+/* Live Preview: the subtitle has its short rule, as in Reading view, and the space under it is such that the
+   paragraph after the blank line stands where Reading view has it (the rule takes 1em + 2px; the blank line of the
+   editor stands for the rest of Reading view's 2.4em). The rule is the line's own ::after: nothing is added to the
+   note, and it stays while the cursor is on the line, so that nothing below moves when the cursor comes and goes.
+   Source mode is as it was. */
+:where(body.scriptorium-fancy) .markdown-source-view.mod-cm6.is-live-preview .cm-line.HyperMD-header-6 {
+  padding-bottom: 1.154em !important;
+}
+:where(body.scriptorium-fancy) .markdown-source-view.mod-cm6.is-live-preview .cm-line.HyperMD-header-6::after,
 :where(body.scriptorium-fancy) .markdown-rendered h6::after {
   content: "";
   display: block;

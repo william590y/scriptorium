@@ -2,7 +2,7 @@
 
 A fancy and sophisticated Obsidian configuration for the typographically inclined.
 
-![Lagrange at work in Obsidian: the page in Reading view with its subtitle and drop cap, then the editor with the drop cap shown; a typed request, the loading plate, the pen striking out and writing in handwriting; a reply set with mathematics, code and a figure; and the pen drawing a diagram into the note](docs/lagrange.gif)
+![Lagrange at work in Obsidian: the editor with the title, the subtitle and its rule, and a drop cap; a typed request, the loading plate, the pen striking out and writing in handwriting; an equation drawn where it stands; code typed by a small typewriter; a diagram drawn into the note; and a reply set with mathematics, code and a figure](docs/lagrange.gif)
 
 *Lagrange, Scriptorium's writing companion, recorded in Obsidian (Demo provider, so no account is needed to try it).*
 
@@ -50,9 +50,7 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   `none`, or the name of a set, below), which you can also type yourself. Choosing **The vault's drop cap** removes
   the property. A drop cap that is chosen or changed is inked in: laid down from its top left corner as a pen would lay
   it, pale and wet at first (not when your system asks for reduced motion).
-- **Show drop caps while editing (Live Preview)** (new; off by default): with it off, the editor shows the opening
-  paragraph as plain text, as it always has, and drop caps are drawn in Reading view and in an exported PDF. Turn it on
-  (here, or with **Scriptorium: Toggle drop caps while editing (Live Preview)**; it takes effect at once) and Live
+- **Show drop caps while editing (Live Preview)** (on by default since 1.4.1): Live
   Preview shows the same drop cap on the same paragraph, in the same face, size and place, with the first line in small
   capitals and broken where Reading view breaks it, so the text does not move when you switch between the two. The
   initial is still the letter you typed: nothing is added to the note, the cursor goes before and after it (click the
@@ -60,7 +58,12 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   an initial while you write in its paragraph (delete it and the next letter becomes the initial). One exception: where
   a paragraph begins with marks that Live Preview shows only by the cursor (`**Bold** beginning`, `[[a link]] first`),
   its line is plain while the cursor is on it. Source mode stays plain. A paragraph that begins with an HTML tag has
-  its drop cap in Reading view only. Lagrange's pen writes round the initial.
+  its drop cap in Reading view only. Lagrange's pen writes round the initial. Turn it off (here, or with
+  **Scriptorium: Toggle drop caps while editing (Live Preview)**; it takes effect at once) and the editor shows the
+  opening paragraph as plain text, exactly as it did before there was such a setting, with drop caps in Reading view
+  and in an exported PDF only. A vault that comes from 1.4.0, where this was off unless turned on, is brought to the
+  new default once, and Scriptorium says so with where the switch is (what 1.4.0 saved does not tell a vault where it
+  was turned off from one where it was never touched); turned off after that, it stays off.
 - **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
   margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
   rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
@@ -134,17 +137,20 @@ urgent kinds, in Reading view and Live Preview, light and dark.
 ### Live Preview and Reading view: what still differs
 
 Scriptorium sets the page in Reading view and in an exported PDF; the editor (Live Preview) is closer to it than it
-was, and with **Show drop caps while editing** on the opening paragraph is the same in both to within a pixel. The
-rest of the editor is as it was in 1.3.1. These differences are known and left as they are in this version (measured
-at a 22 px text size in a 792 px column):
+was: the opening paragraph with its drop cap and its first line in small capitals is the same in both to within a
+pixel (unless **Show drop caps while editing** is turned off), and so is the subtitle with its rule. These differences
+are known and left as they are in this version (measured at a 22 px text size in a 792 px column):
 
 1. **Paragraphs:** the editor shows the blank line between paragraphs and no indent; Reading view sets no gap and
    indents every paragraph after the first by 1.5 em.
 2. **Under a heading:** the opening paragraph stands about 17 px lower under the note's title in the editor (more
    after an epigraph or centred verse); a heading's line is deeper in the editor (63 px against 39 px) and its text
    sits 22 px further right, because the editor centres it with the hidden `## `.
-3. **Subtitle (`######`):** the editor draws no short rule under it and sets it 22 px further right; the paragraph
-   after it is 27 px higher than in Reading view.
+3. **Subtitle (`######`):** since 1.4.1 the editor draws its short rule and the paragraph after the blank line
+   stands where Reading view has it (within 0.1 px, measured with the drop cap shown in both); the subtitle and its rule are 1 px lower than in Reading view.
+   With the cursor on the subtitle's line its `######` marks show and its text moves 39 px to the right; the rule
+   and everything below stay where they are. Where no blank line follows the subtitle, the next paragraph is a line
+   higher than in Reading view. Source mode has no rule.
 4. **Quotations:** the editor sets the text at the bar and to the full width; Reading view sets it in from the bar and
    keeps the right of the column free, so quotations wrap differently.
 5. **Lists:** hanging bullets and justified text in the editor; Reading view indents and does not justify.
@@ -157,7 +163,7 @@ at a 22 px text size in a 792 px column):
    positions in the window differ from Reading view by design.
 9. **Footnotes in the margin, callouts, image captions and the scene-break ornament under the cursor** are Reading
    view only, as before.
-10. **With drop caps shown while editing:** a paragraph that begins with an HTML tag has its drop cap in Reading view
+10. **With drop caps shown while editing (the default):** a paragraph that begins with an HTML tag has its drop cap in Reading view
     only; Arrow Down from the initial goes to the line under it, not to the second line; beside a picture initial the
     cursor before and after the hidden letter stands in the same place; and a short opening paragraph is followed by
     the blank line beside the initial, so the next paragraph starts one line lower than in Reading view.
@@ -354,13 +360,28 @@ has an error (it leaves a broken-picture mark), so Lagrange watches for it: the 
 has failed, and the chat says that the figure in the note could not be drawn, or is still not drawn after 30 seconds
 (TikZJax sets one figure at a time, and a figure of a thousand shapes takes half a minute).
 
+**TikZJax, repaired while it runs.** TikZJax 0.5.2 has three faults that show in any vault, not only with Lagrange:
+a figure rendered into a panel that is already on the page (a chat, a sidebar, a modal of any plugin) stays on its
+spinner for ever, although it is compiled; once something goes wrong inside it after TeX has run (a figure that comes
+out empty, for one), no later figure is drawn until Obsidian is restarted; and an error in a figure shows only as a
+broken picture, with TeX's message in the developer console. **Settings → Scriptorium → Repair TikZJax rendering**
+(on by default) meets all three while TikZJax runs: the figure is drawn where its spinner is; a spinner that has
+stood for two seconds while TikZJax's worker has nothing to do is taken to be left behind, and Scriptorium asks the
+worker for the figure itself and puts it in place; and the broken picture gives way to a line that says so and what
+TeX said (`! Undefined control sequence.` and the line it stopped at). None of TikZJax's files is changed or shipped:
+the installers still download it from its own release and check its SHA-256, and the repair is a few lines that
+stand beside it in the page. It applies to TikZJax 0.5.2 only (any other version is left alone, with one line in the
+console), in the main window only, and turning the setting off takes it away at once and leaves TikZJax exactly as
+it comes. Notes are not affected either way: figures in Reading view and Live Preview are drawn by TikZJax and kept
+in its own store as before. `plugins-tests/tikzjax-repair.harness.js` checks all of this in a real Obsidian.
+
 **What the chat shows.** Replies, and your own messages, are set as Obsidian sets a note: code with its colours and a
 copy button, inline and displayed mathematics, Mermaid diagrams, a `tikz` figure where TikZJax is on and an Excalidraw
 embed where Excalidraw is on (without the plugin, the source in a code block and a line that says why), pictures and
 video of the vault. A `tikz` figure that TikZJax cannot draw (an error in its TikZ), or has not drawn after 30
-seconds, gives way to its source under a line that says which. (A figure in a message is put into the chat in one
-step, already whole: TikZJax 0.5.2 leaves a figure on its spinner for ever when it is rendered into a panel that is
-already on the page, although it has compiled it.) In demo mode, ask Lagrange to *explain* something to see a reply
+seconds, gives way to its source under a line that says which, with what TeX said where Scriptorium's repair of
+TikZJax (above) has it. (A figure in a message is put into the chat in one step, already whole, so that it is drawn
+also where that repair is off or TikZJax is another version.) In demo mode, ask Lagrange to *explain* something to see a reply
 with mathematics, code and a figure. While a reply arrives, each finished block is set once and what is still being written stays plain
 text until it closes. The chat only shows: it runs no code a reply holds (a block that another plugin would act on,
 such as a Dataview query, is shown as its source), and it fetches nothing from the web because a reply says so (a
@@ -418,6 +439,13 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   were off, leaving your own snippets and plugins as they are. With its box ticked, it adds TikZJax and Excalidraw if
   the vault does not have them (see [The diagram plugins](#the-diagram-plugins)). Every file of Scriptorium's it replaces is first copied to
   `.obsidian\scriptorium-backup-<date>-<time>\`, and if anything fails half-way the vault is put back as it was.
+  **A vault that [syncs with Google Drive](#syncing-a-vault-with-google-drive-new) goes on syncing as before**: you
+  are not asked to sign in or to pick the Drive folder again, and the next sync is an ordinary one, not a new first
+  sync. Kept byte for byte are the vault's check file `.scriptorium-sync`, the plugin's settings (how often to sync,
+  what to include, the deletion limit) and everything in Scriptorium's own folder outside the vault, which Setup
+  never reads or writes: the sign-in (`rclone.conf`), which Drive folder goes with which vault, the path to rclone,
+  rclone's record of the last sync and the files that syncs replaced (see
+  [Where things are kept](#where-things-are-kept)). Setup says so when it is done.
   Restart Obsidian (or reload the vault) afterwards. (An updated vault is one Obsidian already knows, so **Open
   Obsidian when done** only starts Obsidian.)
 - **A vault you already have:** see [Setting up a vault you already have](#setting-up-a-vault-you-already-have).
@@ -429,6 +457,15 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   has its `obsidian-cli` next to it (the `.deb`); a Snap or Flatpak Obsidian keeps its vault list elsewhere, so the
   script only opens Obsidian's vault switcher. The Linux script needs `python3` and `pgrep` for this. All three add
   [the diagram plugins](#the-diagram-plugins) to the new vault.
+- **Updating (macOS, Linux, or without Setup):** the script installers only make new vaults; given a folder that is
+  there, they change nothing and say so. Update a Scriptorium vault with
+  `python3 installers/Setup-Scriptorium-Vault.py /path/to/vault` (see
+  [Setting up a vault you already have](#setting-up-a-vault-you-already-have)), or in Obsidian with **Scriptorium:
+  Set up another vault** run from a newer Scriptorium vault. Both replace Scriptorium's own files in `.obsidian` and
+  keep your notes, your settings and, as Setup's Update does, the vault's sync with Google Drive. (A vault installed
+  afresh in a new folder is a new vault: this computer stays signed in to Google Drive, but the new vault has to be
+  linked to its Drive folder again with **Sync this vault with Google Drive**, because the link goes by the vault's
+  folder.)
 - **Manual:** extract `Scriptorium.zip` from the latest release, open the folder as a vault in Obsidian, install
   [EB Garamond](https://fonts.google.com/specimen/EB+Garamond) and
   [Cormorant Garamond](https://fonts.google.com/specimen/Cormorant+Garamond), then open **Lorem Ipsum** in Reading
@@ -551,6 +588,11 @@ What setting up does, and does not do:
   a setup later, copy the files back from that folder.
 - [The diagram plugins](#the-diagram-plugins), TikZJax and Excalidraw, are downloaded from their own releases and
   turned on, unless the vault has them already (then they, and their settings, are left as they are).
+- A vault that [syncs with Google Drive](#syncing-a-vault-with-google-drive-new) goes on syncing as before, whichever
+  of the three ways is used, and the list of changes says so. Its check file `.scriptorium-sync` and the plugin's
+  settings are left byte for byte as they are, and Scriptorium's own folder outside the vault (the sign-in, the Drive
+  folder of each vault, rclone's record of the last sync) is never read or written: no new sign-in, no picking the
+  folder again, no new first sync.
 - Run again, it changes nothing and makes no second backup.
 
 Close the vault in Obsidian first (Obsidian rewrites some of these files while a vault is open), or reload it
@@ -688,6 +730,12 @@ Outside every vault, in one folder per user of the computer:
 
 In the vault there is only the check file `.scriptorium-sync` and, in the plugin's settings, how often to sync and
 what to include. To remove everything: **Disconnect**, then delete that folder.
+
+None of this is touched when Scriptorium is updated or set up again in the vault (Setup's **Update** and **Set up**,
+`Setup-Scriptorium-Vault.py`, **Set up another vault** and **Set up this vault**), and the layout is the same in every
+version since 1.2.3, so the sync carries on as it was. The link to the Drive folder goes by the vault's folder: a vault
+that is moved, renamed or installed afresh elsewhere is linked again with **Sync this vault with Google Drive** (the
+sign-in is kept).
 
 ### When it does not work
 
