@@ -2250,3 +2250,22 @@ test('live: the real Claude Code and Codex read a picture handed to them as a lo
   assert.match(x.text, want);
   assert.equal(x.picturesRefused, false);
 });
+
+test('A look at the page: Scriptorium’s marks for aligned text go where Reading view has them, and hidden marker lines are not read out', () => {
+  // Written all at once, a block carries Scriptorium's alignment marks itself; Reading view has them on the <div>
+  // around the block, which is where the snippet's rules for drop caps look. Every one of Scriptorium's marks moves.
+  const sc = fs.readFileSync(path.join(ROOT, 'vault', '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
+  const list = /const ALIGN_CLASSES = \[([^\]]+)\]/.exec(sc);
+  assert.ok(list, 'Scriptorium lists its alignment classes');
+  const marks = list[1].split(',').map(c => c.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.ok(marks.includes('scriptorium-align-center') && marks.includes('scriptorium-opens'));
+  assert.deepEqual(L.frameMarks(marks), marks, 'each of them is moved to the frame');
+  assert.deepEqual(L.frameMarks(['scriptorium-align', 'has-list-bullet', 'scriptorium-dropcap-goudy', 'scriptorium-aligned', 'scriptorium-opens-x', 'math']), ['scriptorium-align']);
+  assert.deepEqual(L.frameMarks([]), []);
+  assert.deepEqual(L.frameMarks(null), []);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /for \(const c of frameMarks\(Array\.from\(el\.classList\)\)\) \{ block\.classList\.add\(c\); el\.classList\.remove\(c\); \}/);
+  // the description gives a block's words as shown (Scriptorium hides the "::: center" lines), and takes a drop cap's letter from them
+  assert.match(js, /text: tidy\(shown\(el\)\)\.slice\(0, 200\)/);
+  assert.match(js, /exec\(shown\(p\)\)/);
+});

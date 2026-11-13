@@ -4589,6 +4589,12 @@ async function renderPage(app, view, text, width, frontmatter) {
   }
 }
 
+/* Which of a block's classes belong on the <div> Reading view puts around it: Scriptorium's marks for a centred or
+   right-aligned block and for the block that stands for a chapter's opening (its ALIGN_CLASSES). Pure. */
+function frameMarks(classes) {
+  return (classes || []).filter(c => /^scriptorium-(?:align(?:-|$)|opens$)/.test(c));
+}
+
 /* Gives what Obsidian's renderer has written into `written` the frame Reading view gives a note: the sizer, the
    header above the text (with the title, if there is one), and each block in a <div> of its own marked by its
    element (el-p, el-h2, …). A table's block scrolls sideways, as it does there (which also keeps the table's margins
@@ -4610,6 +4616,10 @@ function dressLikeReadingView(written, title) {
       const dir = (el.querySelector('th, td') || el).getAttribute('dir');
       if (dir === 'ltr' || dir === 'rtl') block.setAttribute('dir', dir);
     }
+    // Scriptorium marks a centred or right-aligned block, and the block that stands for a chapter's opening, on the
+    // <div> around it in Reading view; written all at once, the marks are on the block itself. They go to the
+    // <div>, where the snippet's rules look for them (no drop cap on aligned text; the cap on the prose after it).
+    for (const c of frameMarks(Array.from(el.classList))) { block.classList.add(c); el.classList.remove(c); }
     block.appendChild(el);
   }
   for (const list of Array.from(sizer.querySelectorAll('ul:not(.has-list-bullet)'))) {
@@ -4756,9 +4766,23 @@ function measurePage(page, info) {
     }
     return n;
   };
+  // the words of an element that are shown: text that a style keeps off the page is left out (Scriptorium hides
+  // the marker lines of a centred or right-aligned block that way). -> the text nodes shown, in order
+  const shownNodes = el => {
+    const out = [], hidden = new Map();
+    const off = n => {
+      if (!n || n === el.parentElement || n.nodeType !== 1) return false;
+      if (!hidden.has(n)) hidden.set(n, style(n).display === 'none' || off(n.parentElement));
+      return hidden.get(n);
+    };
+    const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) if (!off(node.parentElement)) out.push(node);
+    return out;
+  };
+  const shown = el => (el.firstElementChild ? shownNodes(el).map(n => n.data).join('') : el.textContent || '');
   const dropcapOf = p => {
     const ps = style(p), base = parseFloat(ps.fontSize) || 16, line = parseFloat(ps.lineHeight) || base * 1.5;
-    const letter = (/[\p{L}\p{N}]/u.exec(p.textContent || '') || [''])[0];
+    const letter = (/[\p{L}\p{N}]/u.exec(shown(p)) || [''])[0];
     if (!letter) return null;
     // a picture in the letter's place (Scriptorium's sets of drop caps): a floated box before the text
     const before = style(p, '::before');
@@ -4771,8 +4795,7 @@ function measurePage(page, info) {
     // how deep it sinks: the letter's own box against the lines
     let deep = 0;
     try {
-      const walker = doc.createTreeWalker(p, NodeFilter.SHOW_TEXT);
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      for (const node of shownNodes(p)) {
         const i = node.data.indexOf(letter);
         if (i < 0) continue;
         const r = doc.createRange();
@@ -4820,8 +4843,8 @@ function measurePage(page, info) {
     const cls = el.classList, tag = el.tagName.toLowerCase();
     const inMargin = cls.contains('callout') && cls.contains('scriptorium-in-margin');
     if (box.height < 0.5 && !inMargin) return;      // the front matter, a comment: nothing on the page
-    const b = { kind: tag, text: tidy(el.textContent).slice(0, 200), top: box.top - origin.top, bottom: box.bottom - origin.top };
-    b.key = b.text;       // (its words as they stand on the page: what is on screen in Reading view is found by them)
+    const b = { kind: tag, text: tidy(shown(el)).slice(0, 200), top: box.top - origin.top, bottom: box.bottom - origin.top };
+    b.key = tidy(el.textContent).slice(0, 200);       // (all its words, shown or not, as visibleLines reads them: what is on screen in Reading view is found by them)
     if (lines) { b.from = lines.from + (info.shift || 0); b.to = lines.to + (info.shift || 0); }
     let inner = el;
     if (cls.contains('inline-title')) b.kind = 'title';
@@ -6938,4 +6961,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM });
+Object.assign(LagrangePlugin.internals, { ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
