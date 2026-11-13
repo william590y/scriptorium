@@ -418,6 +418,13 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   were off, leaving your own snippets and plugins as they are. With its box ticked, it adds TikZJax and Excalidraw if
   the vault does not have them (see [The diagram plugins](#the-diagram-plugins)). Every file of Scriptorium's it replaces is first copied to
   `.obsidian\scriptorium-backup-<date>-<time>\`, and if anything fails half-way the vault is put back as it was.
+  **A vault that [syncs with Google Drive](#syncing-a-vault-with-google-drive-new) goes on syncing as before**: you
+  are not asked to sign in or to pick the Drive folder again, and the next sync is an ordinary one, not a new first
+  sync. Kept byte for byte are the vault's check file `.scriptorium-sync`, the plugin's settings (how often to sync,
+  what to include, the deletion limit) and everything in Scriptorium's own folder outside the vault, which Setup
+  never reads or writes: the sign-in (`rclone.conf`), which Drive folder goes with which vault, the path to rclone,
+  rclone's record of the last sync and the files that syncs replaced (see
+  [Where things are kept](#where-things-are-kept)). Setup says so when it is done.
   Restart Obsidian (or reload the vault) afterwards. (An updated vault is one Obsidian already knows, so **Open
   Obsidian when done** only starts Obsidian.)
 - **A vault you already have:** see [Setting up a vault you already have](#setting-up-a-vault-you-already-have).
@@ -429,6 +436,15 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   has its `obsidian-cli` next to it (the `.deb`); a Snap or Flatpak Obsidian keeps its vault list elsewhere, so the
   script only opens Obsidian's vault switcher. The Linux script needs `python3` and `pgrep` for this. All three add
   [the diagram plugins](#the-diagram-plugins) to the new vault.
+- **Updating (macOS, Linux, or without Setup):** the script installers only make new vaults; given a folder that is
+  there, they change nothing and say so. Update a Scriptorium vault with
+  `python3 installers/Setup-Scriptorium-Vault.py /path/to/vault` (see
+  [Setting up a vault you already have](#setting-up-a-vault-you-already-have)), or in Obsidian with **Scriptorium:
+  Set up another vault** run from a newer Scriptorium vault. Both replace Scriptorium's own files in `.obsidian` and
+  keep your notes, your settings and, as Setup's Update does, the vault's sync with Google Drive. (A vault installed
+  afresh in a new folder is a new vault: this computer stays signed in to Google Drive, but the new vault has to be
+  linked to its Drive folder again with **Sync this vault with Google Drive**, because the link goes by the vault's
+  folder.)
 - **Manual:** extract `Scriptorium.zip` from the latest release, open the folder as a vault in Obsidian, install
   [EB Garamond](https://fonts.google.com/specimen/EB+Garamond) and
   [Cormorant Garamond](https://fonts.google.com/specimen/Cormorant+Garamond), then open **Lorem Ipsum** in Reading
@@ -551,6 +567,11 @@ What setting up does, and does not do:
   a setup later, copy the files back from that folder.
 - [The diagram plugins](#the-diagram-plugins), TikZJax and Excalidraw, are downloaded from their own releases and
   turned on, unless the vault has them already (then they, and their settings, are left as they are).
+- A vault that [syncs with Google Drive](#syncing-a-vault-with-google-drive-new) goes on syncing as before, whichever
+  of the three ways is used, and the list of changes says so. Its check file `.scriptorium-sync` and the plugin's
+  settings are left byte for byte as they are, and Scriptorium's own folder outside the vault (the sign-in, the Drive
+  folder of each vault, rclone's record of the last sync) is never read or written: no new sign-in, no picking the
+  folder again, no new first sync.
 - Run again, it changes nothing and makes no second backup.
 
 Close the vault in Obsidian first (Obsidian rewrites some of these files while a vault is open), or reload it
@@ -690,6 +711,12 @@ Outside every vault, in one folder per user of the computer:
 
 In the vault there is only the check file `.scriptorium-sync` and, in the plugin's settings, how often to sync and
 what to include. To remove everything: **Disconnect**, then delete that folder.
+
+None of this is touched when Scriptorium is updated or set up again in the vault (Setup's **Update** and **Set up**,
+`Setup-Scriptorium-Vault.py`, **Set up another vault** and **Set up this vault**), and the layout is the same in every
+version since 1.2.3, so the sync carries on as it was. The link to the Drive folder goes by the vault's folder: a vault
+that is moved, renamed or installed afresh elsewhere is linked again with **Sync this vault with Google Drive** (the
+sign-in is kept).
 
 ### When it does not work
 
