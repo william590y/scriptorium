@@ -8,7 +8,9 @@ destination="${destination:-$default_path}"
 case "$destination" in /*) ;; *) printf 'Please enter an absolute path.\n'; exit 1 ;; esac
 if [ -e "$destination" ] || [ -L "$destination" ]; then
   printf 'Folder already exists: %s. Choose a new folder; nothing was changed.\n' "$destination"
-  printf 'To set up Scriptorium in a vault you already have, use Setup-Scriptorium-Vault.py (see the README).\n'
+  printf 'To set up Scriptorium in a vault you already have, or to update a Scriptorium vault, use\n'
+  printf 'Setup-Scriptorium-Vault.py (see the README): it keeps your notes, your settings and the sync with Google Drive.\n'
+  printf 'A vault in a new folder is a new vault: its sync with Google Drive would have to be set up again.\n'
   exit 1
 fi
 for utility in curl unzip; do

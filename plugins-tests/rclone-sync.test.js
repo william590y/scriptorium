@@ -821,3 +821,100 @@ test('sizes and counts are said the way a reader says them', () => {
   assert.deepEqual([S.driveBytes(0), S.driveBytes(999), S.driveBytes(1500), S.driveBytes(32193987), S.driveBytes(5.2e9)], ['0 B', '999 B', '1.5 kB', '32 MB', '5.2 GB']);
   assert.deepEqual([S.driveCount(1, 'file'), S.driveCount(2, 'file'), S.driveCount(0, 'file is', 'files are')], ['1 file', '2 files', '0 files are']);
 });
+
+/* ---------- An update keeps the sync ---------- */
+
+/* What 1.2.3, the first version with this sync, wrote on a computer, taken from its code. A newer plugin that reads
+   or writes any of it differently would lose a vault's sync when Scriptorium is updated: the link to the Drive folder
+   is found by the vault's id, and a list of rules that differs from the one the last sync used makes the next sync
+   match both sides anew. Change these only together with code that carries what is there across. */
+test('an update keeps the sync: where 1.2.3 kept things, and under which names, is where this version looks', () => {
+  const p = path.posix, sha = text => crypto.createHash('sha256').update(text).digest('hex');
+  assert.deepEqual(S.syncPaths(p, '/u', 'linux'), { dir: '/u', conf: '/u/rclone.conf', exe: `/u/rclone/v${S.RCLONE.version}/rclone`, vaults: '/u/sync-vaults.json',
+    device: '/u/sync-device.json', work: '/u/bisync', kept: '/u/replaced', filters: '/u/filters', locks: '/u/locks' });
+  assert.equal(S.syncVaultId(crypto, p, '/home/ada/Documents/Scriptorium/', 'linux'), 'f75520a5dc1d10b8');
+  assert.equal(S.syncVaultId(crypto, path.win32, 'C:\\Users\\Ada\\Documents\\Scriptorium', 'win32'), 'c5208b2319c78f6b');
+  assert.equal(S.SYNC_SENTINEL, '.scriptorium-sync');
+  assert.equal(S.RCLONE.remote, 'scriptorium-drive');
+  assert.deepEqual(S.SYNC_DEFAULTS, { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30 });
+  assert.equal(sha(S.syncFilters(S.syncSettings({}))), '8347dea53450cd8dbe99a1d95cc1033e4d20ee6a4fc9e601029dc2f0edb7187b');
+  assert.equal(sha(S.syncFilters(S.syncSettings({ sync: { obsidian: false } }))), '03fe792d826b4c6cd2abef73fe3aff0e3d9bc29ac46bc2e53e22d7a59bc2c4b7');
+  const args = S.syncBisyncArgs({ path: p, local: '/v', link: { root: 'my', path: 'A/B' }, paths: S.syncPaths(p, '/u', 'linux'), id: 'ID', settings: S.syncSettings({}), stamp: '2026-01-01' });
+  assert.deepEqual(args.slice(0, 7), ['bisync', '/v', 'scriptorium-drive:A/B', '--workdir', '/u/bisync/ID', '--filters-file', '/u/filters/ID.txt']);
+});
+
+test('an update keeps the sync: the plugin’s settings as 1.2.3 saved them are read as they are, and saved again whole', () => {
+  const saved = { fancyMode: true, initials: 'goudy', marginalia: true, imageFocus: true, pdfTitleSet: true, syncMoveTold: true,
+    sync: { auto: false, minutes: 17, obsidian: false, maxDelete: 35, keepDays: 90 }, drive: { folder: 'an older backup' } };
+  const now = S.normalizeSettings(JSON.parse(JSON.stringify(saved)));
+  assert.deepEqual(now.sync, saved.sync);
+  assert.deepEqual(S.syncSettings(now), saved.sync);
+  for (const key of Object.keys(saved)) assert.deepEqual(now[key], saved[key], key);
+});
+
+/* A vault whose sync is set up (plugins-tests/sync-state-cli.js: a pretend sign-in, a Drive folder, a record of the
+   last sync), in a folder of its own; {vault, user, check()}: check() asks the plugin's code whether the sync is
+   still set up and the next sync a plain one. */
+function syncedVault(t, change) {
+  const { execFileSync } = require('node:child_process');
+  const root = tmp(t, 'kept'), vault = path.join(root, 'My vault'), user = path.join(root, 'user data', 'scriptorium');
+  const cli = mode => execFileSync(process.execPath, [path.join(__dirname, 'sync-state-cli.js'), mode, vault, user], { stdio: 'pipe' });
+  fs.cpSync(path.join(__dirname, '..', 'vault'), vault, { recursive: true });
+  if (change) change(vault);
+  cli('make');
+  return { vault, user, check: () => cli('check') };
+}
+function bytesOf(dir) {
+  const out = {};
+  const walk = rel => {
+    for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (!e.name.startsWith('scriptorium-backup-')) walk(child); } else out[child] = fs.readFileSync(path.join(dir, child)).toString('base64');
+    }
+  };
+  walk('');
+  return out;
+}
+const SYNC_KEPT = 'The sync of this vault with Google Drive is kept as it is: the sign-in, the Drive folder and its settings are not touched.';
+
+test('an update keeps the sync: “Set up another vault” over a vault of 1.2.3 that syncs replaces the code and leaves the sync as it was', t => {
+  const main = path.join('.obsidian', 'plugins', 'scriptorium', 'main.js'), source = path.join(__dirname, '..', 'vault');
+  const v = syncedVault(t, vault => {
+    fs.appendFileSync(path.join(vault, main), '\n/* the code of an older version */\n');
+    const manifest = path.join(vault, '.obsidian', 'plugins', 'scriptorium', 'manifest.json');
+    fs.writeFileSync(manifest, JSON.stringify(Object.assign(JSON.parse(fs.readFileSync(manifest, 'utf8')), { version: '1.2.3' })));
+  });
+  // The vault it is set up from syncs too, with settings of its own: they are not the other vault's.
+  const from = tmp(t, 'from');
+  fs.cpSync(source, from, { recursive: true });
+  fs.writeFileSync(path.join(from, '.obsidian', 'plugins', 'scriptorium', 'data.json'), JSON.stringify({ fancyMode: false, sync: { minutes: 3, obsidian: true } }));
+  const before = bytesOf(v.vault), outside = bytesOf(v.user);
+  const plan = S.planVaultSetup(fs, path, S.setupPackage(fs, path, from), v.vault);
+  assert.deepEqual(plan.changes.map(c => c.rel).sort(), ['.obsidian/plugins/scriptorium/main.js', '.obsidian/plugins/scriptorium/manifest.json']);
+  assert.ok(plan.notes.includes(SYNC_KEPT));
+  assert.ok(S.describeVaultSetup(plan).some(line => line.includes(SYNC_KEPT)));
+  S.applyVaultSetup(fs, path, v.vault, plan);
+  const after = bytesOf(v.vault);
+  assert.ok(fs.readFileSync(path.join(v.vault, main)).equals(fs.readFileSync(path.join(source, main))));
+  for (const rel of Object.keys(before)) if (!plan.changes.some(c => c.rel === rel)) assert.equal(after[rel], before[rel], rel);
+  assert.deepEqual(bytesOf(v.user), outside);
+  v.check();
+});
+
+test('an update keeps the sync: “Set up this vault” in a vault that syncs changes nothing, and says that the sync is kept', t => {
+  const v = syncedVault(t);
+  const before = bytesOf(v.vault), outside = bytesOf(v.user);
+  const plan = S.planVaultSetup(fs, path, S.setupPackage(fs, path, v.vault), v.vault);
+  assert.deepEqual(plan.changes, []);
+  assert.deepEqual(plan.notes, [SYNC_KEPT]);
+  assert.equal(S.applyVaultSetup(fs, path, v.vault, plan), null);
+  assert.deepEqual(bytesOf(v.vault), before);
+  assert.deepEqual(bytesOf(v.user), outside);
+  v.check();
+});
+
+test('an update keeps the sync: a vault that does not sync is told nothing about one', t => {
+  const dir = tmp(t, 'plain');
+  fs.cpSync(path.join(__dirname, '..', 'vault'), dir, { recursive: true });
+  assert.ok(!S.planVaultSetup(fs, path, S.setupPackage(fs, path, dir), dir).notes.includes(SYNC_KEPT));
+});
