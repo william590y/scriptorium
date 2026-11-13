@@ -29,8 +29,12 @@ test('the plugin module exports the plugin class and its helpers', () => {
 });
 
 test('settings: defaults, checked values, unknown keys kept', () => {
-  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', marginalia: true, imageFocus: true });
-  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', marginalia: true, imageFocus: true });
+  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true });
+  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true });
+  // drop caps while editing: off by default, and off for a vault that was set up before there was such a setting
+  assert.equal(S.normalizeSettings({ fancyMode: false, initials: 'goudy', marginalia: true, imageFocus: true, pdfTitleSet: true }).liveDropcaps, false);
+  assert.equal(S.normalizeSettings({ liveDropcaps: true }).liveDropcaps, true);
+  assert.equal(S.normalizeSettings({ liveDropcaps: 'yes' }).liveDropcaps, false);
   const s = S.normalizeSettings({ initials: 'goudy', marginalia: false, imageFocus: 'no', future: 3 });
   assert.equal(s.initials, 'goudy');
   assert.equal(s.marginalia, false);
@@ -1082,11 +1086,51 @@ test('drop caps in Live Preview: the snippet sets the editor’s opening line wi
 
 test('drop caps in Live Preview: the plugin registers the extension, never changes the note for it, and previews in the editor too', () => {
   const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
-  assert.match(src, /this\.dropcapLive = dropcapExtension\(this\); this\.registerEditorExtension\(this\.dropcapLive\.extension\)/);
+  // a setting, off by default: what is registered is an empty list, and the extension is made only when it is turned on
+  assert.match(src, /this\.liveExtensions = \[\];\s*try \{ this\.registerEditorExtension\(this\.liveExtensions\); \}/);
+  assert.equal(src.split('dropcapExtension(this)').length - 1, 1, 'made in one place only');
+  assert.match(src, /this\.dropcapLive = on \? dropcapExtension\(this\) : null;/);
+  assert.match(src, /'toggle-live-dropcaps'/);
+  assert.match(src, /Show drop caps while editing \(Live Preview\)/);
   const ext = src.slice(src.indexOf('function dropcapExtension('), src.indexOf('Export to PDF: the page as Reading view sets it'));
   assert.doesNotMatch(ext, /changes\s*:/, 'decorations only: no change to the text');
   assert.doesNotMatch(ext, /Decoration\.(?:replace|widget)/, 'the letter stays the note’s own text');
   assert.match(ext, /Decoration\.line\(/);
   assert.match(src, /previewDropcap\(view, which, quiet\) \{\s*this\.previewLive\(view, which, quiet\);/);
   assert.equal(typeof S.dropcapExtension, 'function');
+});
+
+test('drop caps in Live Preview: off, nothing is put into the editors; on and off again takes effect at once', () => {
+  // the plugin's own method, on a stand-in for the plugin: the list Obsidian was given, and whether the editors were told
+  const made = [];
+  const realLoad2 = Module._load;
+  Module._load = function (request, ...rest) {
+    if (request === '@codemirror/state') {
+      const def = { define: () => ({ of: v => v, is: () => false }) };
+      return { StateField: { define: spec => ({ spec }) }, StateEffect: def, RangeSetBuilder: class {}, Prec: { highest: x => x } };
+    }
+    if (request === '@codemirror/view') return { Decoration: { mark: () => ({}), line: () => ({}), none: {} }, EditorView: { decorations: { from: () => ({}) }, domEventHandlers: h => h }, ViewPlugin: { fromClass: c => c } };
+    if (request === 'obsidian') return {};
+    return realLoad2.call(this, request, ...rest);
+  };
+  try {
+    let told = 0;
+    const plugin = { settings: S.normalizeSettings({}), liveExtensions: made, dropcapLive: null, app: { workspace: { updateOptions: () => { told++; } } } };
+    const apply = () => S.prototype.applyLiveDropcaps.call(plugin);
+    apply();
+    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 0], 'off by default: nothing registered, no editor touched');
+    // and with it off the plugin's calls into the editors do nothing
+    S.prototype.refreshEditors.call(plugin);
+    S.prototype.previewLive.call(plugin, { editor: { cm: { dispatch() { throw new Error('an editor was touched'); } } } }, 'goudy');
+    plugin.settings = S.normalizeSettings({ liveDropcaps: true });
+    apply();
+    assert.equal(made.length, 1);
+    assert.ok(plugin.dropcapLive && Array.isArray(made[0]) && made[0].length >= 3);
+    assert.equal(told, 1, 'the editors are told at once');
+    apply();
+    assert.equal(told, 1, 'not again while nothing changed');
+    plugin.settings = S.normalizeSettings({ liveDropcaps: false });
+    apply();
+    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 2], 'off again: taken out of the editors');
+  } finally { Module._load = realLoad2; }
 });

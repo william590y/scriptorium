@@ -7552,7 +7552,7 @@ class LagrangePlugin extends Plugin {
       try { saved = await scriptorium.addDrawnDropcap({ set: want.set, letter: want.letter, bytes: drawn.bytes, kind: drawn.kind, mono: want.mono }); }
       catch (e) { throw new LagrangeError(`The drawing could not be kept: ${e.message}.`, { reply: drawn.kind === 'svg' ? new TextDecoder().decode(drawn.bytes) : undefined }); }
       await scriptorium.setNoteDropcap(view.file, `set:${saved.set}`);
-      // show it: where drop caps are drawn (Reading view; Live Preview too, with a Scriptorium that draws them there)
+      // show it: where drop caps are drawn (Reading view; Live Preview too, if Scriptorium's setting for that is on)
       try {
         const state = view.leaf.getViewState();
         const live = Boolean(scriptorium.dropcapLive) && state.state && state.state.mode === 'source' && !state.state.source;

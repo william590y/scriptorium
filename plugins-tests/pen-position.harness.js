@@ -16,7 +16,9 @@
 // pens' handwriting ever meets, that the note is in the end exactly what one pen leaves (the same edits are run again
 // with "Several pens at once" off) in less time, that the view does not move when the run ends, and that a key, a
 // click, typing alongside and Undo do with three pens what they do with one.
-// And, where a chapter's opening paragraph has its drop cap in Live Preview (Scriptorium 1.4): that handwriting which
+// And, where a chapter's opening paragraph has its drop cap in Live Preview (Scriptorium's setting "Show drop caps
+// while editing", off by default: the cases that are about drop caps turn it on for themselves, and every other case
+// runs with it as the vault has it, or as window.penPositionOptions.liveDropcaps says: true | false): that handwriting which
 // begins with the initial begins at the initial's left edge on the first line's baseline, and that later lines of
 // handwriting beside an initial (a letter, or a picture) begin after it, where the note's own lines begin.
 // This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
@@ -238,10 +240,14 @@
     return lines.map(l => l.left);
   };
 
+  // Scriptorium's drop caps in Live Preview: on for the cases about them, else as asked for, else as the vault has them
+  const scriptorium = app.plugins.plugins.scriptorium, capsWere = scriptorium && scriptorium.settings ? scriptorium.settings.liveDropcaps : undefined;
+  const setCaps = async on => { if (scriptorium && typeof scriptorium.applyLiveDropcaps === 'function' && scriptorium.settings.liveDropcaps !== on) await scriptorium.updateSettings({ liveDropcaps: on }); };
   const results = [];
   for (const c of cases) {
     await setPanel(c.panel || PANEL);
     if (options.only && !c.name.includes(options.only)) continue;
+    await setCaps(c.cap ? true : options.liveDropcaps != null ? Boolean(options.liveDropcaps) : Boolean(capsWere));
     const text = c.note != null ? c.note : NOTE;
     const mode = c.mode || 'live';
     plugin.settings.severalPens = c.several !== false;
@@ -421,7 +427,7 @@
         // the paragraph has its drop cap in the editor (Scriptorium is on), and the case met it
         const opening = Array.from(cm.contentDOM.querySelectorAll('.cm-line.scriptorium-opening'));
         out.cap = opening.length;
-        if (!opening.length) fail('no paragraph of the note has a drop cap in Live Preview: is the Scriptorium plugin (1.4 or later) on, with its snippet?');
+        if (!opening.length) fail('no paragraph of the note has a drop cap in Live Preview: is the Scriptorium plugin on (one that has “Show drop caps while editing”), with its snippet?');
         if (c.picture && !opening.some(l => l.classList.contains('scriptorium-dropcap-image'))) fail('the drop cap is not a picture: is the set Dropcat in the plugin’s folder?');
         if (c.cap !== 'after') { out.beside = +(seen.beside || 0).toFixed(1); if (!(seen.beside > 20)) fail('no later line of the handwriting was beside the initial: the case is not what it was written for'); }
       }
@@ -1101,6 +1107,7 @@
   });
 
   await setPanel(PANEL);
+  if (capsWere !== undefined) await setCaps(Boolean(capsWere));
   plugin.settings.penSpeed = saved.speed;
   plugin.settings.severalPens = saved.several;
   plugin.settings.maxPens = saved.max;

@@ -10,13 +10,13 @@ const INITIALS = [
   ['plain', 'Plain capital (Cormorant Garamond)'],
   ['none', 'None']
 ];
-const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', marginalia: true, imageFocus: true };
+const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true };
 
 /* Saved settings with every known key checked and defaulted; keys this version does not know are kept. */
 function normalizeSettings(saved) {
   const settings = Object.assign({}, saved && typeof saved === 'object' ? saved : {}, DEFAULT_SETTINGS);
   if (saved && typeof saved === 'object') {
-    for (const key of ['fancyMode', 'marginalia', 'imageFocus']) {
+    for (const key of ['fancyMode', 'liveDropcaps', 'marginalia', 'imageFocus']) {
       if (typeof saved[key] === 'boolean') settings[key] = saved[key];
     }
     // one of the four built in, or a set of drop caps by name ("set:Dropcat", "set:My initials"; see "Sets of drop caps")
@@ -1338,7 +1338,7 @@ class DropcapModal extends Modal {
     box.addEventListener('change', () => void this.plugin.setNoteDropcapAligned(file, box.checked));
     this.contentEl.createEl('p', {
       cls: 'scriptorium-dropcap-hint',
-      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view and in Live Preview. A set ' +
+      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view (and while editing, if “Show drop caps while editing” is on in the settings). A set ' +
         'of images shows where it has the paragraph’s first letter. Centred and right-aligned text has no drop cap ' +
         'unless the box is ticked (“dropcap-aligned” in the properties) or its own marker line asks for one (“::: center dropcap”).',
     });
@@ -1382,6 +1382,12 @@ class ScriptoriumSettings extends PluginSettingTab {
         }
         dropdown.setValue(settings.initials).onChange(value => this.plugin.updateSettings({ initials: value }));
       });
+    new Setting(el)
+      .setName('Show drop caps while editing (Live Preview)')
+      .setDesc('Off by default: the editor shows the opening paragraph as plain text, and drop caps are drawn in Reading view and in an exported PDF only. On: Live Preview shows the same drop cap on the same paragraph, in the same place, with the first line in small capitals, so the text does not move between the two views. The initial is still the letter you typed (the cursor goes before and after it; it is selected, copied, found and spell-checked as any other); nothing is added to the note. Source mode stays plain.')
+      .addToggle(toggle => toggle
+        .setValue(settings.liveDropcaps)
+        .onChange(value => this.plugin.updateSettings({ liveDropcaps: value })));
     new Setting(el)
       .setName('Marginalia')
       .setDesc('In Reading view, set footnotes beside their references in the right margin, as sidenotes, when the pane is wide enough; otherwise they stay at the foot of the note. A callout of type margin (> [!margin]) becomes an unnumbered note in the margin.')
@@ -4579,6 +4585,14 @@ class Scriptorium extends Plugin {
       callback: () => this.setFancyMode(!this.settings.fancyMode)
     });
     this.addCommand({
+      id: 'toggle-live-dropcaps',
+      name: 'Toggle drop caps while editing (Live Preview)',
+      callback: async () => {
+        await this.updateSettings({ liveDropcaps: !this.settings.liveDropcaps });
+        new Notice(this.settings.liveDropcaps ? 'Drop caps are shown while editing, in Live Preview.' : 'Drop caps are shown in Reading view only.');
+      }
+    });
+    this.addCommand({
       id: 'toggle-marginalia',
       name: 'Toggle marginalia (footnotes in the margin)',
       callback: () => this.updateSettings({ marginalia: !this.settings.marginalia })
@@ -4694,9 +4708,13 @@ class Scriptorium extends Plugin {
     });
     // Centred and right-aligned text (see "Centred and right-aligned text"): Live Preview's lines, and the commands.
     try { this.registerEditorExtension(alignExtension()); } catch (e) { console.error('Scriptorium: text is not aligned in Live Preview', e); }
-    // Drop caps in the editor (see "Drop caps in Live Preview").
+    // Drop caps in the editor (see "Drop caps in Live Preview"): a setting, off unless the writer turns it on. What
+    // is registered is a list that stays empty while it is off (the editor is then exactly as it is without this),
+    // and holds the extension while it is on (applyLiveDropcaps).
     this.inking = new WeakMap();   // an editor -> the timer that ends its inking
-    try { this.dropcapLive = dropcapExtension(this); this.registerEditorExtension(this.dropcapLive.extension); } catch (e) { this.dropcapLive = null; console.error('Scriptorium: no drop caps in Live Preview', e); }
+    this.dropcapLive = null;       // the extension and its effects, while the setting is on
+    this.liveExtensions = [];
+    try { this.registerEditorExtension(this.liveExtensions); } catch (e) { console.error('Scriptorium: no drop caps in Live Preview', e); }
     for (const [id, name, kind] of [
       ['align-center', 'Centre selection', 'center'],
       ['align-right', 'Right-align selection', 'right'],
@@ -4941,6 +4959,19 @@ class Scriptorium extends Plugin {
     if (this.shapes.has(url)) return this.shapes.get(url);
     if (!this.ratios.has(url)) void this.ratio(url).then(r => { if (r) this.refreshEditors(); });
     return 0;
+  }
+
+  /* "Show drop caps while editing (Live Preview)": puts the extension into the editors, or takes it out of them,
+     at once (no restart). Off, nothing of it is in any editor. */
+  applyLiveDropcaps() {
+    const on = Boolean(this.settings.liveDropcaps);
+    if (!this.liveExtensions || on === Boolean(this.dropcapLive)) return;
+    try {
+      this.liveExtensions.length = 0;
+      this.dropcapLive = on ? dropcapExtension(this) : null;
+      if (on) this.liveExtensions.push(this.dropcapLive.extension);
+      this.app.workspace.updateOptions();
+    } catch (e) { this.dropcapLive = null; this.liveExtensions.length = 0; console.error('Scriptorium: no drop caps in Live Preview', e); }
   }
 
   /* Has every editor set its opening lines again, and look again at where their first lines break. */
@@ -5352,6 +5383,7 @@ class Scriptorium extends Plugin {
 
   applyFeatures() {
     const s = this.settings, body = document.body;
+    this.applyLiveDropcaps();
     let changed = false;
     for (const [value] of INITIALS) {
       const cls = `scriptorium-initials-${value}`, on = value === s.initials && value !== 'yinit';

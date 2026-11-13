@@ -1,4 +1,7 @@
-// Drop caps in Live Preview, checked in a real Obsidian: the editor must show the drop caps Reading view shows.
+// Drop caps in Live Preview, checked in a real Obsidian. They are a setting ("Show drop caps while editing (Live
+// Preview)"), off by default. Off, the editor must be as it is without them: nothing of the extension in any
+// editor, no class on any line, the opening paragraph set as every other. On (turned on here, with no restart), the
+// editor must show the drop caps Reading view shows.
 // For each case a note is opened in Live Preview and in Reading view, and the two are measured from the page:
 //   - the same paragraphs have a drop cap in both (and no others);
 //   - the initial has the same face, size, colour and margins (the computed style of ::first-letter, ::first-line
@@ -28,7 +31,7 @@
   const frame = () => new Promise(r => requestAnimationFrame(r));
   const plugin = app.plugins.plugins.scriptorium;
   if (!plugin) throw new Error('Scriptorium is not enabled in this vault');
-  if (!plugin.dropcapLive) throw new Error('This Scriptorium has no drop caps in Live Preview');
+  if (typeof plugin.applyLiveDropcaps !== 'function') throw new Error('This Scriptorium has no drop caps in Live Preview');
   const S = plugin.constructor;
   const TOL = 2;
 
@@ -60,7 +63,7 @@
     require('electron').webFrame.setZoomFactor(1);
   } catch (e) { /* not the desktop app: the window is as it is */ }
   ws.leftSplit.collapse(); ws.rightSplit.collapse();
-  const saved = { initials: plugin.settings.initials, fancy: plugin.settings.fancyMode };
+  const saved = { initials: plugin.settings.initials, fancy: plugin.settings.fancyMode, live: plugin.settings.liveDropcaps };
   const theme = async dark => { const name = dark ? 'obsidian' : 'moonstone'; app.vault.setConfig('theme', name); app.changeTheme(name); await sleep(400); };
 
   const cmOf = () => leaf.view.editor.cm;
@@ -250,7 +253,70 @@
 
   try {
     await theme(false);
-    await plugin.updateSettings({ initials: 'yinit', fancyMode: false });
+    await plugin.updateSettings({ initials: 'yinit', fancyMode: false, liveDropcaps: false });
+
+    // ---- the setting: off (the default), the editor is as it is without the feature ----
+    const START = note('', '## A chapter', PARAS.A, SECOND, '## Another', `**The pendulum** ${PARAS.T.slice(13)}`, '## Verse', '::: center dropcap\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::');
+    const plain = out => {
+      const cm = cmOf(), marked = cm.dom.querySelectorAll('.scriptorium-opening, .scriptorium-opening-gap, .sc-keep, [class*="scriptorium-dropcap"], .scriptorium-align-dropcap');
+      if (marked.length) out.why.push(`${marked.length} element(s) of the editor carry a class of the drop caps`);
+      for (const start of ['A body at rest', 'The pendulum keeps', 'Tyger']) {
+        const line = liveLine(start), m = measure(line), cs = getComputedStyle(line);
+        if (m.has || m.style.float !== 'none' || m.style.size !== m.style.text || m.style.caps === 'small-caps') out.why.push(`“${start}” has an initial (${m.style.float}, ${m.style.size}, ${m.style.caps})`);
+        if (cs.whiteSpace !== 'break-spaces') out.why.push(`“${start}” is set with white-space: ${cs.whiteSpace}`);
+        if (line.getAttribute('style')) out.why.push(`“${start}” has a style of its own: ${line.getAttribute('style').slice(0, 60)}`);
+      }
+      if (plugin.dropcapLive !== null || plugin.liveExtensions.length) out.why.push('the extension is in the list Obsidian was given');
+    };
+    await run('the setting is off by default; off, nothing of the drop caps is in the editor, and Reading view has them as ever', async out => {
+      if (S.normalizeSettings({}).liveDropcaps !== false || S.normalizeSettings({ initials: 'goudy', fancyMode: true }).liveDropcaps !== false) out.why.push('the setting is not off by default');
+      await open(START, 'live');
+      plain(out);
+      // nothing the plugin does for Reading view's drop caps reaches the editor: shown from the list, sets read again, a typed property
+      const before = Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).map(l => `${l.className}|${Math.round(l.getBoundingClientRect().height * 10)}`).join(';');
+      let dispatched = 0;
+      const cm = cmOf(), real = cm.dispatch;
+      cm.dispatch = function (...args) { dispatched++; return real.apply(this, args); };
+      try {
+        plugin.previewDropcap(leaf.view, 'goudy'); plugin.previewDropcap(leaf.view, undefined, true); plugin.remarkAll(); plugin.recheck();
+        await sleep(300);
+      } finally { delete cm.dispatch; }
+      out.dispatches = dispatched;
+      if (dispatched) out.why.push(`the plugin sent the editor ${dispatched} transaction(s)`);
+      plain(out);
+      const after = Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).map(l => `${l.className}|${Math.round(l.getBoundingClientRect().height * 10)}`).join(';');
+      if (before !== after) out.why.push('the editor’s lines changed');
+      await setMode('reading');
+      await dry();
+      if (kind(measure(readPara('A body at rest'))) !== 'dropped') out.why.push('Reading view has no drop cap');
+    });
+    await run('turned on, the drop caps are there at once (no restart, the note not opened again); turned off, they are gone at once', async out => {
+      await open(START, 'live');
+      const texts = () => Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).map(l => l.textContent).join('\n');
+      const was = texts(), value = leaf.view.editor.getValue();
+      await plugin.updateSettings({ liveDropcaps: true });
+      await frame(); await frame(); await sleep(150);
+      const kinds = ['A body at rest', 'The pendulum keeps', 'Tyger'].map(start => kind(measure(liveLine(start))));
+      out.on = kinds.join(',');
+      if (kinds.join(',') !== 'dropped,dropped,standing') out.why.push(`turned on, the three openings are ${kinds.join(', ')}`);
+      if (texts() !== was || leaf.view.editor.getValue() !== value) out.why.push('turning it on changed the text');
+      await plugin.updateSettings({ liveDropcaps: false });
+      await frame(); await frame(); await sleep(150);
+      plain(out);
+      if (texts() !== was || leaf.view.editor.getValue() !== value) out.why.push('turning it off changed the text');
+      // the command does the same
+      app.commands.executeCommandById('scriptorium:toggle-live-dropcaps');
+      await sleep(300);
+      document.querySelectorAll('.notice').forEach(n => n.remove());
+      if (!plugin.settings.liveDropcaps || kind(measure(liveLine('A body at rest'))) !== 'dropped') out.why.push('the command does not turn it on');
+      app.commands.executeCommandById('scriptorium:toggle-live-dropcaps');
+      await sleep(300);
+      document.querySelectorAll('.notice').forEach(n => n.remove());
+      if (plugin.settings.liveDropcaps) out.why.push('the command does not turn it off');
+      plain(out);
+    });
+    // ---- on: everything below is with the setting on ----
+    await plugin.updateSettings({ liveDropcaps: true });
 
     // ---- which paragraphs ----
     await run('the same paragraphs have a drop cap in Live Preview as in Reading view', async out => {
@@ -538,7 +604,7 @@
     });
   } finally {
     await theme(layout.theme !== 'moonstone');
-    await plugin.updateSettings({ initials: saved.initials, fancyMode: saved.fancy });
+    await plugin.updateSettings({ initials: saved.initials, fancyMode: saved.fancy, liveDropcaps: saved.live });
     if (!options.keep) {
       await dropSets();
       try { await leaf.openFile(file, { state: { mode: 'source', source: false } }); await app.vault.delete(file); } catch (e) { /* stays */ }
