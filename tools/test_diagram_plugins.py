@@ -6,6 +6,8 @@
 #     python3 tools/test_diagram_plugins.py                              (the scripts)
 #     python3 tools/test_diagram_plugins.py dist/Scriptorium-Setup.exe   (and Scriptorium Setup: a new vault, an update
 #                                                                         and a set-up; under Mono where it is not Windows)
+# With --real as well, the Windows script's PowerShell and Scriptorium Setup also download the pinned releases themselves
+# from GitHub (about 18 MB each time) and the files are compared with the pins; CI does this on Windows.
 # The Windows script installer's PowerShell is run where there is a PowerShell (Windows; pwsh elsewhere). For it and for
 # Scriptorium Setup the releases are served from this computer (http://127.0.0.1), so their real download code runs.
 #
@@ -261,7 +263,7 @@ else:
 
 # 7. Scriptorium Setup (the Windows installer): a new vault (--install-only), an update (--update-only) and a set-up
 #    (--setup-only), each with --plugin-pins naming the stand-in releases
-exe = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
+exe = next((Path(a).resolve() for a in sys.argv[1:] if not a.startswith("--")), None)
 if not exe:
     print("SKIP  Scriptorium-Setup.exe was not given, so the Windows installer was not run")
 else:
@@ -368,6 +370,33 @@ else:
     vault = notes("plan")
     r = run_exe("--setup-plan", str(vault), "--plugin-pins", good)
     check(r.returncode == 0 and f"TikZJax {tikz['version']}, from its own release on GitHub" in r.stdout and "Excalidraw" in r.stdout and not (vault / ".obsidian").exists(), "Scriptorium-Setup.exe: the set-up plan names the two downloads, and changes nothing")
+
+# 8. --real: the pinned releases themselves, from GitHub, by the Windows script's PowerShell and by Scriptorium Setup
+if "--real" in sys.argv[1:]:
+    real = {(p["id"], n): d for p in PINNED for n, d in p["files"].items()}
+
+    def as_pinned(vault):
+        return {(p["id"], n): hashlib.sha256(q.read_bytes()).hexdigest() for p in PINNED for n in p["files"]
+                for q in [vault / ".obsidian" / "plugins" / p["id"] / n] if q.is_file()}
+
+    if shell:
+        work = Path(tempfile.mkdtemp(prefix="scriptorium-diagrams-real-ps-"))
+        (work / "vault" / ".obsidian").mkdir(parents=True)
+        (work / "vault" / ".obsidian" / "community-plugins.json").write_bytes((ROOT / "vault" / ".obsidian" / "community-plugins.json").read_bytes())
+        (work / "temp").mkdir()
+        whole = cmd.split("# ---- The diagram plugins ----", 1)[1].split("# ---- end of the diagram plugins ----", 1)[0]
+        (work / "part.ps1").write_text("$ErrorActionPreference = 'Stop'\n[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12\n"
+                                       + download + f"\n$tempPath = '{work / 'temp'}'\n$staging = '{work / 'vault'}'\n" + whole + "\nWrite-Host ('MISSING:' + ($diagramMissing -join ','))\n", encoding="utf-8-sig")
+        r = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(work / "part.ps1")], capture_output=True, text=True, timeout=900,
+                           env={k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"})
+        for line in (r.stdout + r.stderr).splitlines():
+            print("      | " + line)
+        check(r.returncode == 0 and as_pinned(work / "vault") == real, "Install-Scriptorium-Windows.cmd, from GitHub: the six files are downloaded and are the pinned ones")
+    if exe:
+        vault = Path(tempfile.mkdtemp(prefix="scriptorium-diagrams-real-exe-")) / "vault"
+        r = run_exe("--install-only", str(vault))
+        check(r.returncode == 0 and as_pinned(vault) == real, "Scriptorium-Setup.exe --install-only, from GitHub: the six files are downloaded and are the pinned ones")
+        check(listed(vault)[-2:] == [p["id"] for p in PINNED], "Scriptorium-Setup.exe --install-only, from GitHub: both are turned on")
 
 server.shutdown()
 print("All diagram plugin checks passed." if not failed else f"{len(failed)} check(s) FAILED")
