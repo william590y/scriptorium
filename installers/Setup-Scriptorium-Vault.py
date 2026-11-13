@@ -129,7 +129,8 @@ DIAGRAM_PLUGINS = [
 
 
 def version_key(text):
-    return [int(n) for n in re.findall(r"\d+", str(text))[:4]]
+    key = [int(n) for n in re.findall(r"\d+", str(text))[:4]]
+    return key + [0] * (4 - len(key))   # 0.5 is 0.5.0
 
 
 def fetch_url(url):
@@ -175,14 +176,18 @@ def install_diagram_plugins(vault, fetch=fetch_url, log=print):
                 log(f"{p['name']} was NOT installed ({e}). Scriptorium itself is set up. To add it: in Obsidian, "
                     f"Settings → Community plugins → Browse, search for “{p['name']}”, Install, then Enable.")
                 continue
-        # turned on, next to the plugins the vault already has on
+        # turned on, next to the plugins the vault already has on (a list that is not a JSON list is left as it is)
         listing = vault / OBS / "community-plugins.json"
-        try:
-            on = json.loads(listing.read_text(encoding="utf-8"))
+        on = []
+        if listing.exists():
+            try:
+                on = json.loads(listing.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                on = None
             if not isinstance(on, list):
-                on = []
-        except (OSError, ValueError):
-            on = []
+                log(f"Left community-plugins.json as it was (it is not a valid JSON list): turn {p['name']} on in "
+                    "Settings → Community plugins.")
+                continue
         if p["id"] not in on:
             on.append(p["id"])
             listing.parent.mkdir(parents=True, exist_ok=True)
@@ -423,7 +428,19 @@ def main(argv=None):
         changes, notes = plan(package, vault)
         print(f"Scriptorium {version} in {vault}")
         def diagrams():
-            if args.no_diagram_plugins or args.dry_run:
+            # (SCRIPTORIUM_NO_DIAGRAM_PLUGINS: the tests of everything else, which must not need the network)
+            if args.no_diagram_plugins or os.environ.get("SCRIPTORIUM_NO_DIAGRAM_PLUGINS"):
+                return
+            if args.dry_run:
+                for p in DIAGRAM_PLUGINS:
+                    folder = vault / OBS / "plugins" / p["id"]
+                    try:
+                        had = json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("version")
+                    except (OSError, ValueError, AttributeError):
+                        had = None
+                    if not (had is not None and version_key(had) >= version_key(p["version"]) and (folder / "main.js").is_file()):
+                        print(f"  download {OBS}/plugins/{p['id']}: {p['name']} {p['version']}, from its own release on GitHub"
+                              + (f" (in place of your {had})" if had is not None else ""))
                 return
             fetch = fetch_url
             if args.plugins_from:      # <folder>/<plugin id>/<file>
@@ -446,6 +463,7 @@ def main(argv=None):
               (" The .obsidian folder as it is now is copied to .obsidian/scriptorium-backup-<time> first."
                if (vault / OBS).is_dir() else ""))
         if args.dry_run:
+            diagrams()
             return 0
         if not args.yes:
             if not sys.stdin.isatty():

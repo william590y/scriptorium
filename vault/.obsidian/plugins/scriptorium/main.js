@@ -2203,8 +2203,12 @@ async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
       }
     }
     const listing = path.join(dir, '.obsidian', 'community-plugins.json');
+    // (a list that is there but is not a JSON list is left as it is: the plugin is installed, and is turned on in Settings)
     let on = [];
-    try { on = JSON.parse(fs.readFileSync(listing, 'utf8')); if (!Array.isArray(on)) on = []; } catch (e) { on = []; }
+    if (fs.existsSync(listing)) {
+      try { on = JSON.parse(fs.readFileSync(listing, 'utf8').replace(/^\uFEFF/, '')); } catch (e) { on = null; }
+      if (!Array.isArray(on)) continue;
+    }
     if (!on.includes(p.id)) {
       on.push(p.id);
       fs.mkdirSync(path.dirname(listing), { recursive: true });
