@@ -3292,6 +3292,22 @@ function createPen(app, settings) {
             };
             L.sheet.appendChild(hand);
             lay();
+            // The handwriting's font is in the styles but is loaded at its first use: the hand is measured once it is
+            // there (measured in a stand-in font, its lines would break elsewhere when the font arrived).
+            if (doc.fonts && typeof doc.fonts.load === 'function') {
+              const font = `${fs.toFixed(1)}px ${win.getComputedStyle(hand).fontFamily}`;
+              let ready = true;
+              try { ready = doc.fonts.check(font); } catch (e) { ready = true; }
+              if (!ready) {
+                await L.ctx.wait(done => {
+                  const id = win.setTimeout(done, 1200);
+                  doc.fonts.load(font).then(() => done(), () => done());
+                  return () => win.clearTimeout(id);
+                });
+                first = charBox(L, view, at.start) || first;
+                lay();
+              }
+            }
             if (pieces.some(q => q.math)) {
               // MathJax adds the styles for the symbols it used; wait for them, and for the fonts, before measuring.
               try { if (typeof obsidian.finishRenderMath === 'function') await Promise.race([obsidian.finishRenderMath(), sleep(1200)]); } catch (e) { /* drawn as it is */ }
@@ -4896,8 +4912,13 @@ class LagrangePlugin extends Plugin {
   trackEdits(update) {
     if (!update.docChanged || !this.edits.length) return;
     const history = !this.ownHistory && update.transactions.some(tr => tr.docChanged && (tr.isUserEvent('undo') || tr.isUserEvent('redo')));
+    let lost = null;
     for (const r of this.edits) {
       if (update.view !== r.view) continue;
+      // A record that no longer fits the editor's text (another note was opened in the same tab: Obsidian puts a new
+      // text in the editor without a change to follow) can be neither undone nor redone, and is forgotten.
+      const kept = r.undone ? r.sinceUndo : r.since;
+      if (kept && kept.newLength !== update.startState.doc.length) { (lost || (lost = [])).push(r); continue; }
       if (r.expecting === 'undo') {
         r.expecting = null;
         r.undone = true;
@@ -4920,6 +4941,10 @@ class LagrangePlugin extends Plugin {
         r.since = r.since.compose(update.changes);
         if (history) r.viaHistory = true;
       }
+    }
+    if (lost) {
+      this.edits = this.edits.filter(r => !lost.includes(r));
+      for (const r of lost) { r.expecting = null; this.announce(r); }
     }
   }
 

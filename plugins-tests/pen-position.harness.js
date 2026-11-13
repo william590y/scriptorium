@@ -1,5 +1,6 @@
 // Where the pen writes, checked in a real Obsidian: for each kind of edit, Lagrange's pen must begin its handwriting
-// where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame), start
+// where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame but
+// for a reflow of at most three frames, which is counted), start
 // each further line at the left edge of the note's own line, and draw each equation that Live Preview typesets on that
 // very equation. Since 1.2.3 it also checks, in every case, that the handwriting of a line is never seen before the pen
 // comes to it, that no letter is cut by the box that uncovers it (ascenders, descenders and swashes included), that
@@ -173,6 +174,14 @@
         if (cs.clipPath !== 'none' || getComputedStyle(seg.parentElement.parentElement).clipPath !== 'none') { seen.clipped++; seen.clipWhy = 'the handwriting is clipped'; }
       };
       let sampling = true, handNo = -1, lastHand = null;
+      seen.off = [];
+      seen.reflow = 0;
+      // a run of frames in which the hand was off its text has ended: a reflow if it was short, else a failure
+      const settle = () => {
+        const run = seen.off.splice(0);
+        if (run.length <= 3) seen.reflow += run.length;
+        else for (const [a, b] of run) { seen.dx = Math.max(seen.dx, a); seen.dy = Math.max(seen.dy, b); }
+      };
       const sample = () => {
         if (!sampling) return;
         const cm = leaf.view.editor && leaf.view.editor.cm;
@@ -182,8 +191,16 @@
           const h = handStart(hand), g = glyphAt(cm, starts[Math.min(handNo, starts.length - 1)]);
           if (h && g) {
             seen.frames++;
-            seen.dx = Math.max(seen.dx, Math.abs(h.x - g.x));
-            seen.dy = Math.max(seen.dy, Math.abs(h.baseline - g.baseline));
+            // The note's text may move under the hand for a frame or two when an equation in it is typeset for the first
+            // time in a session (the hand is put back on it in the next frame): up to three frames in a row are let
+            // pass as such a reflow, and counted; a hand that stays off its text is not.
+            const ddx = Math.abs(h.x - g.x), ddy = Math.abs(h.baseline - g.baseline);
+            if (ddx > TOL || ddy > TOL) seen.off.push([ddx, ddy]);
+            else {
+              settle();
+              seen.dx = Math.max(seen.dx, ddx);
+              seen.dy = Math.max(seen.dy, ddy);
+            }
             const lefts = handLines(hand);
             seen.lines = Math.max(seen.lines, lefts.length);
             if (lefts.length > 1) {
@@ -225,7 +242,8 @@
           if (!seen.drawn.has(el)) seen.drawn.set(el, []);
           seen.drawn.get(el).push({ x: r.left, y: r.top - scroll, w: r.width, h: r.height, inNote: Boolean(cm && cm.contentDOM.contains(el)) });
         }
-        requestAnimationFrame(sample);
+        // (asked for from a timer, so that it runs after the pen's own frame callbacks: what is measured is what is painted)
+        setTimeout(() => requestAnimationFrame(sample), 0);
       };
       requestAnimationFrame(sample);
       const view = leaf.view;
@@ -241,6 +259,7 @@
       const nextTop = cm.scrollDOM.scrollTop, nextY = textAt();
       await sleep(700);
       sampling = false;
+      settle();
       document.querySelectorAll('.notice').forEach(n => n.remove());
       // the equations the pen drew on, against where they rest now
       let drawn = 0, mdx = 0, mdsize = 0;
@@ -280,7 +299,7 @@
       }
       if (document.querySelector('.lagrange-pen-unwritten, .lagrange-pen-revealing, .lagrange-pen-drawing')) fail('the pen left a mark on the note');
       // one line at a time, and no letter cut
-      Object.assign(out, { segs: seen.segs, early: seen.early, clipped: seen.clipped });
+      Object.assign(out, { segs: seen.segs, early: seen.early, clipped: seen.clipped, reflowFrames: seen.reflow || 0 });
       if (seen.early) fail(`a later line of handwriting was visible before the pen came to it (in ${seen.early} frames)`);
       if (seen.clipped) fail(`a letter is cut: ${seen.clipWhy}`);
       if (seen.cutWord) {

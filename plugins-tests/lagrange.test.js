@@ -1645,3 +1645,13 @@ test('Rewind: a turn during which the writer typed is not taken for Lagrange’s
   assert.equal(L.userChangedSince(turns, 0, 'B'), true, 'the writer is asked before their typing is taken back');
   assert.equal(L.userChangedSince([{ path: 'N.md', before: 'A', after: 'B', userTyped: false }], 0, 'B'), false);
 });
+
+test('Undo records: one that no longer fits the editor’s text is forgotten, not composed with', () => {
+  // (another note opened in the same tab: Obsidian sets a new text without a change; composing a record of the old
+  // text with later changes threw, and every later record of that editor stopped following the writer's typing)
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /kept\.newLength !== update\.startState\.doc\.length\) \{ \(lost \|\| \(lost = \[\]\)\)\.push\(r\); continue; \}/);
+  assert.match(js, /this\.edits = this\.edits\.filter\(r => !lost\.includes\(r\)\)/);
+  // the handwriting's font is waited for before the hand is measured
+  assert.match(js, /doc\.fonts\.load\(font\)/);
+});
