@@ -3409,7 +3409,7 @@ function needsWholeRender(md) {
      is kept from running by a zero-width space before it;
    - nothing is fetched from the web because a reply says so: a picture at an http(s) address becomes a link to it
      (pictures of the vault and data: pictures are shown), and HTML that would load or run something (a frame, an
-     embedded object, a form, a remote picture or video) is shown as its text.
+     embedded object, a form, a remote picture or video) is shown as its text, in inline code.
    opts: {tikz, sketch: whether the two diagram plugins are on; acts(name) -> bool; inlineRun: [string]}. Pure. */
 const CHAT_DRAWN_BLOCKS = new Set(['mermaid', 'tikz', 'math', 'latex']);
 function chatMarkdown(md, opts) {
@@ -3467,8 +3467,8 @@ function chatMarkdown(md, opts) {
     l = l.split(/(`+[^`\n]*`+)/).map((seg, i) => (i % 2 ? seg : seg
       .replace(/!\[([^\]\n]*)\]\(\s*<?(https?:\/\/[^\s)>]+)>?[^)\n]*\)/gi, (m, alt, url) => `[${alt || 'picture'} (a picture on the web, not loaded)](${url})`)
       .replace(/!\[(?!\[)([^\]\n]*)\]\[([^\]\n]*)\]/g, '[$1][$2]')
-      .replace(/<(\/?)(iframe|webview|object|embed|frame|frameset|form|script|style|link|meta|base|portal)\b/gi, '&lt;$1$2')
-      .replace(/<(img|video|audio|source|picture|track|input)\b(?=[^>\n]*(?:https?:)?\/\/)/gi, '&lt;$1'))).join('');
+      .replace(/<\/?(?:iframe|webview|object|embed|frame|frameset|form|script|style|link|meta|base|portal)\b[^>\n]*>?/gi, m => `\`${m}\``)
+      .replace(/<(?:img|video|audio|source|picture|track|input)\b(?=[^>\n]*(?:https?:)?\/\/)[^>\n]*>?/gi, m => `\`${m}\``))).join('');
     out.push(l);
   }
   if (fence && note) { out.push(fence); say(note); }   // (a block the reply left open at its end)
@@ -3479,7 +3479,7 @@ function chatMarkdown(md, opts) {
    Kept in memory for the session, like the conversation itself (nothing is written into the vault); a file of the
    vault is attached by its path and read when the message is sent. */
 const ATTACH_MAX = 8;                      // attachments to one message
-const ATTACH_BYTES = { image: 20e6, video: 200e6, pdf: 20e6, text: 5e6 };
+const ATTACH_BYTES = { image: 20e6, video: 100e6, pdf: 20e6, text: 5e6 };
 const ATTACH_TEXT_CHARS = 60000;           // of one text file (and of a PDF's text) sent to the model
 const ATTACH_IMAGE_EDGE = 1568;            // a picture's longer side, in pixels, as it is sent
 const ATTACH_IMAGE_BYTES = 3500000;        // a picture larger than this is re-encoded even if it is small enough in pixels
@@ -3700,10 +3700,12 @@ function attachmentMessage(message, items, inputs) {
       }
     }
   }
+  const said = inputs.demo ? (items || []).filter(it => !it.problem).map(it => `${quote(it.name || 'attachment')} was not sent anywhere (demo mode).`).concat(notes.filter(n => / could not be read /.test(n)))
+    : notes.map(n => n.charAt(0).toUpperCase() + n.slice(1));
   const words = String(message || '').trim() || '(The writer sent the attachments without a message.)';
   const build = (l, fs) => (l.length ? `<attachments>\nThe writer attached ${l.length === 1 ? 'this' : 'these'} to the message:\n${l.join('\n')}\n</attachments>\n\n` : '') +
     (fs.length ? fs.join('\n\n') + '\n\n' : '') + words;
-  return { parts, text: build(list, files), alt: build(altList, altFiles), notes };
+  return { parts, text: build(list, files), alt: build(altList, altFiles), notes: said };
 }
 
 /* Whether any message holds a picture or a document (which a provider may turn down). */
@@ -3801,7 +3803,7 @@ async function prepareAttachment(att, env) {
 function demoAttachmentLine(items) {
   if (!items || !items.length) return '';
   const one = it => `**${it.name}** (${it.problem ? `could not be read: ${it.problem}` : it.kind === 'image' ? `a picture, ${it.image.width}×${it.image.height}`
-    : it.kind === 'video' ? `a video of ${seconds(it.duration)} s, ${it.frames.length} frames taken` : it.kind === 'pdf' ? `a PDF, ${it.pages || '?'} pages, ${it.total.toLocaleString('en')} characters of text`
+    : it.kind === 'video' ? `a video of ${seconds(it.duration)} s, ${it.frames.length} frames taken` : it.kind === 'pdf' ? `a PDF, ${it.pages || '?'} ${it.pages === 1 ? 'page' : 'pages'}, ${it.total.toLocaleString('en')} characters of text`
       : `a text file, ${it.total.toLocaleString('en')} characters`})`;
   return `You attached ${items.map(one).join(', ')}. In demo mode nothing is sent anywhere, so no model has looked at ${items.length === 1 ? 'it' : 'them'}.`;
 }

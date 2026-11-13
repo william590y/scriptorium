@@ -196,6 +196,9 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 .lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(.block-language-tikz, .mermaid) { text-align: center; overflow-x: auto; }
 .lagrange-turn-text.markdown-rendered > :first-child { margin-top: 0; }
 .lagrange-turn-text.markdown-rendered > :last-child { margin-bottom: 0; }
+/* a table is set a little smaller and scrolls sideways when it is wide; its words are not broken to make it fit */
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) table { font-size: 0.85em; overflow-wrap: normal; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(th, td) { font-size: inherit; overflow-wrap: normal; word-break: normal; padding: 0.25em 0.55em; }
 /* what is still being written, under the blocks that are rendered */
 .lagrange-turn-open { white-space: pre-wrap; }
 .lagrange-turn-open:empty { display: none; }
@@ -234,6 +237,7 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
   border-radius: 3px;
   box-sizing: border-box;
 }
+.lagrange-turn--user .lagrange-chip { font-style: normal; }
 .lagrange-chip-thumb {
   flex: none;
   width: 2.4em;
@@ -254,7 +258,7 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 .lagrange-view button.lagrange-chip-remove:is(:hover, :focus-visible) { color: var(--lagrange-rubric); }
 .lagrange-view button.lagrange-chip-remove svg { width: 0.95em; height: 0.95em; }
 /* The tray above the box: what is attached to the message being written. It scrolls when there is much. */
-.lagrange-tray { display: flex; flex-direction: column; gap: 0.3em; max-height: 9.5em; overflow-y: auto; margin-bottom: 0.4em; }
+.lagrange-tray { display: flex; flex-direction: column; gap: 0.3em; max-height: 12.2em; overflow-y: auto; margin-bottom: 0.4em; }
 .lagrange-tray.is-empty { display: none; }
 .lagrange-view button.lagrange-attach { flex: none; align-self: center; width: 1.7em; height: 1.7em; padding: 0; margin-left: -0.2em; color: var(--lagrange-muted); }
 .lagrange-view button.lagrange-attach:is(:hover, :focus-visible) { color: var(--lagrange-rubric); }

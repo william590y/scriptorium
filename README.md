@@ -290,6 +290,27 @@ folder of their own in your temporary folder, which only you can read, and delet
 Lagrange from ever rendering or capturing the page, turn off **Settings → Lagrange → Let Lagrange look at the
 rendered page**.
 
+**What the chat shows.** Replies, and your own messages, are set as Obsidian sets a note: code with its colours and a
+copy button, inline and displayed mathematics, Mermaid diagrams, a `tikz` figure where TikZJax is on and an Excalidraw
+embed where Excalidraw is on (without the plugin, the source in a code block and a line that says why), pictures and
+video of the vault. While a reply arrives, each finished block is set once and what is still being written stays plain
+text until it closes. The chat only shows: it runs no code a reply holds (a block that another plugin would act on,
+such as a Dataview query, is shown as its source), and it fetches nothing from the web because a reply says so (a
+picture at a web address becomes a link).
+
+**Attaching pictures, video and files.** Paste a copied picture, video or file into the box, drop it on the panel
+(from your system, or a file of the vault from Obsidian's file explorer), or pick it with the paperclip. Each shows as
+a chip you can take off before sending, and in the message once sent (pictures and video as they are, files as chips).
+Up to eight to a message; a picture up to 20 MB, a video up to 100 MB, a PDF up to 20 MB, a text file up to 5 MB.
+What goes to the model: a picture as a picture, scaled to 1568 pixels on its longer side; a video as up to six frames
+taken from it, without its sound, because none of the providers takes video; a PDF as a document with an Anthropic or
+OpenAI API key, and as the text taken from it otherwise; Markdown, text, code, CSV and JSON as text, the first 60,000
+characters of a longer file. Whatever does not go as it is, the chat says so under your message, and a file Lagrange
+cannot read is refused with the reason. A model that takes no pictures is told what was attached in words. The
+attachments are kept in memory with the conversation and are gone when you clear it or close Obsidian: nothing is
+written into the vault, and a file of the vault is read when you send the message, not before. The last four messages
+with attachments keep their pictures and documents for follow-up questions; earlier ones stay as words.
+
 Choose who writes the replies in **Settings → Lagrange**. The default is **your Claude subscription**, through Claude
 Code (install it, run `claude` once in a terminal and sign in; no API key). The others are Anthropic's Claude with an
 API key, your ChatGPT subscription through Codex, OpenAI with an API key, an OpenAI-compatible server such as a local

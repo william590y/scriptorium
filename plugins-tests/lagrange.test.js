@@ -2629,7 +2629,7 @@ test('chatMarkdown: a diagram whose plugin is off shows as its source with a lin
   assert.ok(web.includes('![[local.png]]') && web.includes('![d](data:image/png;base64,AAAA)') && web.includes('![v](Media/pic.png)'), 'pictures of the vault and data: pictures are shown');
   assert.equal(L.chatMarkdown('![a][r] and ![[w]]\n\n[r]: https://x.example/a.png', all), '[a][r] and ![[w]]\n\n[r]: https://x.example/a.png', 'a picture by reference becomes a link');
   const html = L.chatMarkdown('<iframe src="https://x.example"></iframe> <img src="https://x.example/p.gif"> <img src="data:image/gif;base64,R0"> <video src="//x.example/v.mp4"> `<iframe>` <form action="/x">', all);
-  assert.ok(html.startsWith('&lt;iframe src="https://x.example">&lt;/iframe> &lt;img src="https://x.example/p.gif"> <img src="data:image/gif;base64,R0"> &lt;video src="//x.example/v.mp4"> `<iframe>` &lt;form'));
+  assert.equal(html, '`<iframe src="https://x.example">``</iframe>` `<img src="https://x.example/p.gif">` <img src="data:image/gif;base64,R0"> `<video src="//x.example/v.mp4">` `<iframe>` `<form action="/x">`');
   // inside code, everything is as it was written
   const code = '```html\n<iframe src="https://x.example"></iframe>\n![a](https://x.example/a.png) `$= 1` ![[d.excalidraw]]\n```';
   assert.equal(L.chatMarkdown(code, Object.assign({}, all, { sketch: false })), code);
@@ -2831,6 +2831,7 @@ test('Attachments: what each provider takes, and the message made for it (pictur
   assert.ok(local.text.includes('- “paper.pdf” (a PDF, 2 pages): the text taken from it is below; its pictures and layout are not.'));
   assert.ok(local.text.includes('Page two text.'));
   assert.ok(local.notes.some(n => n === '“paper.pdf” was given to the model on your server as the text taken from it, without its pictures and layout.'));
+  assert.ok(local.notes.some(n => n === 'The model on your server takes no video, so “clip.mp4” (4 s) was sent as 4 frames taken from it, without its sound.'), 'a line begins with a capital');
   // a model that reads text only: nothing is dropped in silence
   const blind = L.attachmentMessage('Q', items, L.providerInputs(S({ provider: 'openai', openaiModel: 'llama3.1' }), {}));
   assert.deepEqual(blind.parts, []);
@@ -2841,7 +2842,7 @@ test('Attachments: what each provider takes, and the message made for it (pictur
   // the demo sends nothing
   const demo = L.attachmentMessage('Q', items, L.providerInputs(S({ provider: 'demo' }), {}));
   assert.deepEqual(demo.parts, []);
-  assert.ok(demo.notes.includes('“photo.png” was not sent anywhere (demo mode).'));
+  assert.deepEqual(demo.notes, ['photo.png', 'clip.mp4', 'paper.pdf', 'notes.md'].map(n => `“${n}” was not sent anywhere (demo mode).`));
   assert.match(L.demoAttachmentLine(items), /^You attached \*\*photo\.png\*\* \(a picture, 320×200\), \*\*clip\.mp4\*\* \(a video of 4 s, 4 frames taken\), \*\*paper\.pdf\*\* \(a PDF, 2 pages, 30 characters of text\), \*\*notes\.md\*\* \(a text file, 16 characters\)\. In demo mode nothing is sent anywhere/);
   // a file cut short, a PDF with no text, a file that could not be read, a message of attachments alone
   const env = fakeEnv([]);
