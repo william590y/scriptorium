@@ -2379,6 +2379,10 @@ class ImageFocus {
 const SETUP_BACKUP = 'scriptorium-backup-';
 const SETUP_PLUGINS = ['scriptorium', 'manuscriptum', 'typewriter-mode', 'lagrange'];
 const SETUP_CODE = ['main.js', 'manifest.json', 'styles.css', 'LICENSE'];
+/* Said of a vault that syncs with Google Drive (it has the sync's check file): what the sync needs is this plugin's
+   data.json, which setting up never writes over, and Scriptorium's own folder outside every vault, which it never
+   reads or writes. The same words as Scriptorium Setup's and the script's. */
+const SETUP_SYNC_KEPT = 'The sync of this vault with Google Drive is kept as it is: the sign-in, the Drive folder and its settings are not touched.';
 
 /* How a file of the package is treated: 'replace', 'missing' (written only if the vault has none), 'plugins',
    'appearance' or 'app' (merged), or null (not part of setting up a vault). rel uses forward slashes. */
@@ -2531,6 +2535,7 @@ function planVaultSetup(fs, path, pkg, dir) {
       else if (note) notes.push(note);
     }
   }
+  if (existing(SYNC_SENTINEL)) notes.push(SETUP_SYNC_KEPT);
   return { changes, notes };
 }
 
