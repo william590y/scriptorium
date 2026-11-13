@@ -1088,7 +1088,8 @@
       const tick = () => {
         if (!on) return;
         for (const svg of cm.contentDOM.querySelectorAll(selector)) {
-          if (!svg.hasAttribute('data-lagrange-seen') && shown(svg)) seen.early++;
+          // (before the pen has begun: once the run is over the note may draw the figure afresh, and then it simply shows)
+          if (!seen.frames && !svg.hasAttribute('data-lagrange-seen') && shown(svg)) seen.early++;
           if (!svg.hasAttribute('data-lagrange-drawing')) continue;
           seen.frames++;
           const d = Number(svg.getAttribute('data-lagrange-drawn'));
@@ -1131,8 +1132,12 @@
       for (let i = 0; i < 1500 && !cm.contentDOM.querySelector(`${selector.split(',')[0].trim()}[data-lagrange-drawing], svg[data-lagrange-drawing]`); i++) await frame();
       for (let i = 0; i < 20; i++) await frame();
       cm.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', bubbles: true, cancelable: true }));
-      const cut = cm.contentDOM.querySelector(selector);
-      if (!cut || !cut.hasAttribute('data-lagrange-seen') || cut.hasAttribute('data-lagrange-drawing') || parts(cut).some(n => !shown(n))) fail('after a key the figure is not whole');
+      // at once: nothing of a figure is hidden or half drawn (the note may be drawing it afresh at this moment, the
+      // run's undo step having been made: then it is whole when it comes)
+      const whole = () => Array.from(cm.contentDOM.querySelectorAll(selector)).every(g => shown(g) && !g.hasAttribute('data-lagrange-drawing') && !parts(g).some(n => !shown(n)) && !g.querySelector('[style*="dash"]'));
+      if (!whole()) fail('right after a key a figure is hidden or half drawn');
+      for (let i = 0; i < 300 && !cm.contentDOM.querySelector(selector); i++) await frame();
+      if (!cm.contentDOM.querySelector(selector) || !whole()) fail('after a key the figure is not whole');
       if (cm.dom.classList.contains('lagrange-pen-figures')) fail('after a key the editor is still marked as waiting for figures');
       res = await run;
       if (res.ended !== 'key') fail(`the run reports ended=${res.ended}`);
