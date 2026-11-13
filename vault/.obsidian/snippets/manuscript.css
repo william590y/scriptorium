@@ -1174,3 +1174,13 @@ body.theme-dark {
 @media print {
   .markdown-rendered .callout[data-callout] { break-inside: avoid; }
 }
+
+
+/* ---------- Diagrams: TikZJax figures and Excalidraw drawings ----------
+   A figure stands in the middle of the column, in the page's ink and on the page's paper: TikZJax draws in the
+   text colour already; an Excalidraw drawing brings a white ground of its own, which is taken away. */
+.block-language-tikz { text-align: center; margin: 1em 0; background: none; }
+.block-language-tikz svg { max-width: 100%; height: auto; color: var(--text-normal); background: none; }
+svg.excalidraw-svg { background: none; max-width: 100%; height: auto; }
+svg.excalidraw-svg > rect[fill="#FFFFFF"], svg.excalidraw-svg > rect[fill="#ffffff"] { fill: transparent; }
+.excalidraw-embedded-img, .internal-embed .excalidraw-svg { background: none; }

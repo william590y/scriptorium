@@ -4049,8 +4049,11 @@ function createPen(app, settings) {
   };
   /* Draws a figure where the note has it: each line of it is drawn along its length under the nib, in the figure's
      own order, and filled when it is closed; then its labels are uncovered from left to right. A figure of very
-     many parts is uncovered from left to right as a whole. data-lagrange-drawn counts the parts drawn so far. */
-  const drawFigure = async (L, svg, k) => {
+     many parts is uncovered from left to right as a whole. data-lagrange-drawn counts the parts drawn so far.
+     The note may draw a figure afresh while the pen is at it (Live Preview makes the block again when the text
+     around it changes): the pen then stops, and the caller hands it the new one to go on with from part `from`.
+     -> how many parts are drawn, or -1 when the whole figure is. */
+  const drawFigure = async (L, svg, k, from) => {
     const win = L.win;
     const parts = figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
     const order = figureOrder(parts.map(n => ({ text: /^(text|foreignObject|image)$/i.test(n.tagName) })));
@@ -4066,17 +4069,18 @@ function createPen(app, settings) {
         place(L, r.left + r.width * t, r.top + r.height * (0.5 + 0.35 * Math.sin(t * 40)));
       });
       svg.style.clipPath = '';
-      return;
+      return -1;
     }
-    for (const n of parts) n.style.opacity = '0';
+    order.forEach((i, at) => { if (at >= (from || 0)) parts[i].style.opacity = '0'; });
     svg.setAttribute('data-lagrange-drawing', '');
     svg.setAttribute('data-lagrange-seen', '');
     svg.setAttribute('data-lagrange-drawn', '0');
     const each = Math.max(70, Math.min(520, 6500 / parts.length));
-    let drawn = 0;
-    for (const i of order) {
+    let drawn = Math.min(from || 0, order.length);
+    svg.setAttribute('data-lagrange-drawn', String(drawn));
+    for (const i of order.slice(drawn)) {
       const n = parts[i];
-      if (!svg.isConnected) break;
+      if (!svg.isConnected) return drawn;
       const label = /^(text|foreignObject|image)$/i.test(n.tagName);
       let len = 0;
       try { len = !label && n.getTotalLength ? n.getTotalLength() : 0; } catch (e) { len = 0; }
@@ -4115,6 +4119,7 @@ function createPen(app, settings) {
       svg.setAttribute('data-lagrange-drawn', String(++drawn));
     }
     svg.removeAttribute('data-lagrange-drawing');
+    return svg.isConnected ? -1 : drawn;
   };
 
   const drawInPlace = async (L, box, k) => {
@@ -4744,7 +4749,14 @@ function createPen(app, settings) {
             // And the diagrams: the note draws them (TikZJax after it has compiled one), and the pen draws each in its place.
             if (wantFigures) {
               const found = await awaitFigures(L, view, wantFigures, figs.tikz ? 15000 : 6000);
-              for (const svg of found) await drawFigure(L, svg, k);
+              for (let svg of found) {
+                // (drawn again by the note while the pen was at it: the pen goes on with the new one)
+                for (let done = 0, tries = 0; svg && tries < 6; tries++) {
+                  done = await drawFigure(L, svg, k, done);
+                  if (done < 0) break;
+                  svg = (await awaitFigures(L, view, 1, 3000))[0];
+                }
+              }
               if (found.length < wantFigures) console.debug(`Lagrange: ${wantFigures - found.length} of ${wantFigures} diagram(s) of this edit were not drawn by the note in time (the plugin is off, the figure has an error, or the cursor is in its source), so the pen did not draw them.`);
             }
             await flyOff();
@@ -5446,7 +5458,8 @@ async function settlePage(page, signal) {
     if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(2000, signal)]);
     for (let laid = false; ;) {
       await sleep(50, signal);
-      const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)');
+      const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)')
+        || host.querySelector('.block-language-tikz:not(:has(svg))');        // a TikZ figure that TikZJax is still compiling
       const late = Date.now() > deadline;
       if (!late && (waiting || Date.now() - changed < 160)) continue;
       if (!late && dressEmbeds(page)) continue;     // embedded notes have come in: framed, and waited for in turn
@@ -5590,6 +5603,7 @@ function measurePage(page, info) {
     let inner = el;
     if (cls.contains('inline-title')) b.kind = 'title';
     else if (/^h[1-6]$/.test(tag)) { b.kind = 'heading'; b.level = Number(tag[1]); }
+    else if (tag === 'p' && el.querySelector('svg.excalidraw-svg, .excalidraw-embedded-img')) { b.kind = 'Excalidraw drawing'; b.text = tidy((el.querySelector('.internal-embed') || el).getAttribute('src') || '').slice(0, 80); }
     else if (tag === 'p') b.kind = el.querySelector('img') && !b.text ? 'picture' : 'paragraph';
     else if (tag === 'blockquote') { b.kind = 'blockquote'; inner = el.querySelector('p') || el; }
     else if (cls.contains('callout')) {
@@ -5609,6 +5623,7 @@ function measurePage(page, info) {
       if (lang) b.language = lang[1];
       inner = el.querySelector('code') || el;
     } else if (cls.contains('math')) { b.kind = 'math'; b.text = ''; }
+    else if (cls.contains('block-language-tikz')) { b.kind = el.querySelector('svg') ? 'TikZ figure' : 'TikZ figure (not drawn: TikZJax is off, or the figure has an error)'; b.text = ''; }
     else if (tag === 'hr') b.kind = 'rule';
     else if (tag === 'section' && cls.contains('footnotes')) { b.kind = 'footnotes'; b.items = el.querySelectorAll('li').length; inner = el.querySelector('li') || el; }
     parts.set(b, { el, inner, inMargin });
