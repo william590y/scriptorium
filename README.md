@@ -464,8 +464,8 @@ underneath. The commands keep their places in the palette (and any hotkey you ga
 
 - `plugins-tests/rclone-real.test.js` runs the real rclone 1.76.0 with a second folder standing in for Drive (an
   rclone "alias" remote under the same name): the first sync with each choice, steady syncing, conflicts, deletions,
-  the deletion limit and **Sync anyway**, an emptied, missing or swapped side, a run killed halfway and picked up, a
-  clean stop, the lock, the filters and changing them, a 48 MB file, names in several scripts, a path of more than 300
+  the deletion limit and **Sync anyway**, an emptied, missing or swapped side, a run cut off halfway and picked up
+  (by a kill, and by Scriptorium's own stop), the lock, the filters and changing them, a 48 MB file, names in several scripts, a path of more than 300
   characters, names that Windows forbids, two computers on one folder, retrieving, and the sign-in as far as rclone's
   listener and the address it sends the browser to. GitHub Actions runs it on Linux, Windows and macOS, after
   downloading rclone with the plugin's own downloader and SHA-256 check.

@@ -334,7 +334,7 @@ test('a run that is cut off is picked up by the next one', { skip }, async t => 
   assert.equal(fs.readdirSync(path.join(d.folder, 'many')).length, 300);
 });
 
-test('a stop asks rclone to finish cleanly, and the next run carries on', { skip: skip || (WIN && 'Windows has no interrupt signal to send: a stop there is a cut-off, tested above') }, async t => {
+test('a stop (the window closed, Obsidian quitting) cuts rclone off, and the next run carries on', { skip }, async t => {
   const d = drive(t), a = computer(t, d, 'a');
   write(a.dir, 'start.md', 'x');
   await a.first({});

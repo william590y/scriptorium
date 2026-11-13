@@ -2011,8 +2011,8 @@ function setupDialog() {
        instead of deleting the other side (rclone also refuses an empty side by itself); a limit on how much one run
        may delete (--max-delete, half the files unless changed); a file changed on both sides keeps both (the older
        one is renamed "name.conflict1.md"); whatever a run deletes or replaces on this computer is moved to a folder
-       of Scriptorium's own for thirty days instead; Drive's own trash keeps what is deleted there; an interrupted
-       run is picked up by the next one (--resilient --recover).
+       of Scriptorium's own for thirty days instead; Drive's own trash keeps what is deleted there; a run that is
+       cut off is picked up by the next one (--resilient --recover).
    Not synced: Obsidian's workspace, caches and .trash, hidden folders, Lagrange's settings (they hold API keys),
    Google's own documents (Docs, Sheets), and what the older Drive backup left behind. The functions below take fs,
    path, spawn and the like as arguments and are tested under Node (plugins-tests/rclone-sync.test.js with a pretend
@@ -2367,18 +2367,19 @@ function syncLogLine(line) {
   return { level: 'text', msg: t, object: '', stats: null };
 }
 
-/* Runs rclone without a shell. o: {spawn, exe, args, env, onLine(parsed), signal, timeout, grace}. Resolves, never
+/* Runs rclone without a shell. o: {spawn, exe, args, env, onLine(parsed), signal, timeout}. Resolves, never
    rejects: {code, out (what it printed), lines (the last of its log, parsed), failed (it could not be started:
-   the system's error), stopped, timedOut}. A stop asks rclone to finish cleanly first (bisync saves its state on an
-   interrupt), and ends it after o.grace ms. */
+   the system's error), stopped, timedOut}. A stop or a timeout ends rclone at once. That is on purpose: in tests
+   with the real rclone a sync cut off like this was picked up by the next run every time (--recover), while an
+   interrupt, which makes bisync wind down by itself, left it needing a new first sync about one time in four. */
 function rcloneExec(o) {
   return new Promise(resolve => {
-    let child, done = false, out = '', rest = '', timer = null, killer = null, stopped = false, timedOut = false;
+    let child, done = false, out = '', rest = '', timer = null, stopped = false, timedOut = false;
     const lines = [];
     const finish = r => {
       if (done) return;
       done = true;
-      clearTimeout(timer); clearTimeout(killer);
+      clearTimeout(timer);
       if (o.signal) o.signal.removeEventListener('abort', stop);
       if (rest.trim()) take(rest);
       resolve(Object.assign({ code: null, out, lines, failed: null, stopped, timedOut }, r));
@@ -2392,8 +2393,7 @@ function rcloneExec(o) {
     };
     const end = () => {
       if (!child || done) return;
-      try { child.kill(process.platform === 'win32' ? undefined : 'SIGINT'); } catch (e) { /* already gone */ }
-      killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* already gone */ } }, o.grace === undefined ? 5000 : o.grace);
+      try { child.kill('SIGKILL'); } catch (e) { /* already gone */ }
     };
     function stop() { stopped = true; end(); }
     try {
@@ -2717,7 +2717,7 @@ function rcloneApi(o) {
     async connect(client, onLink, signal) {
       syncConfPrepare(fs, path, paths.conf, client);
       const r = await call('sign-in', ['config', 'update', RCLONE.remote, 'scope=drive'], {
-        signal, timeout: SYNC_TIMES.signIn, grace: 1500,
+        signal, timeout: SYNC_TIMES.signIn,
         onLine: l => { const m = /(http:\/\/127\.0\.0\.1:\d+\/auth\S*)/.exec(l.msg); if (m && onLink) onLink(m[1]); },
       });
       if (r.failed || r.stopped || r.timedOut || r.code !== 0 || !api.connection().connected) {
@@ -2777,7 +2777,7 @@ function rcloneApi(o) {
     },
     /* One run of the sync; resolves rcloneExec's result with .summary, or throws a problem. */
     async bisync(args, onLine, signal) {
-      const r = await call(args.includes('--resync') ? 'first' : 'sync', args, { signal, timeout: 0, grace: 75000, onLine });
+      const r = await call(args.includes('--resync') ? 'first' : 'sync', args, { signal, timeout: 0, onLine });
       if (r.failed || r.stopped || r.timedOut || r.code !== 0) throw syncExplain(r, 'sync');
       r.summary = syncSummary(r.lines);
       return r;
@@ -4368,7 +4368,7 @@ class Scriptorium extends Plugin {
     document.body.classList.remove('scriptorium-fancy', 'scriptorium-image-focus');
     for (const [value] of INITIALS) document.body.classList.remove(`scriptorium-initials-${value}`);
     if (this.engine) this.engine.stop();
-    if (this.syncStop) this.syncStop.abort();   // a run that is going is asked to finish cleanly; the next one picks it up
+    if (this.syncStop) this.syncStop.abort();   // a run that is going is cut off; the next one picks it up
     if (this.marginalia) this.marginalia.unload();
     if (this.imageFocus) this.imageFocus.unload();
     if (this.resizeObserver) this.resizeObserver.disconnect();

@@ -282,12 +282,12 @@ test('a program that is not there, a stop and a timeout are told apart; nothing 
   const conf = path.join(dir, 'rclone.conf');
   fs.writeFileSync(conf, '[scriptorium-drive]\ntype = drive\n');
   const lines = [];
-  const p = S.rcloneExec({ spawn: fakeSpawn, exe: 'rclone', args: ['--config', conf, 'config', 'update', 'scriptorium-drive', 'scope=drive'], env: Object.assign({}, process.env, hang), signal: ctl.signal, grace: 300,
+  const p = S.rcloneExec({ spawn: fakeSpawn, exe: 'rclone', args: ['--config', conf, 'config', 'update', 'scriptorium-drive', 'scope=drive'], env: Object.assign({}, process.env, hang), signal: ctl.signal,
     onLine: l => { lines.push(l); if (/Waiting for code/.test(l.msg)) ctl.abort(); } });
   const stopped = await p;
   assert.equal(stopped.stopped, true);
   assert.equal(lines.length, 4);
-  const late = await S.rcloneExec({ spawn: fakeSpawn, exe: 'rclone', args: ['--config', conf, 'config', 'update', 'scriptorium-drive', 'scope=drive'], env: Object.assign({}, process.env, hang), timeout: 300, grace: 200 });
+  const late = await S.rcloneExec({ spawn: fakeSpawn, exe: 'rclone', args: ['--config', conf, 'config', 'update', 'scriptorium-drive', 'scope=drive'], env: Object.assign({}, process.env, hang), timeout: 300 });
   assert.equal(late.timedOut, true);
   fs.rmSync(dir, { recursive: true, force: true });
 });
