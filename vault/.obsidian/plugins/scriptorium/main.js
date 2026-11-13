@@ -64,6 +64,15 @@ function seedOf(text) {
   return h >>> 0;
 }
 
+/* A paragraph's text as it is shown: without the marker line of centred or right-aligned text, which is in the
+   paragraph but not on the page (see fenceLine). */
+function shownText(p) {
+  if (!p.childNodes) return String(p.textContent || '');
+  let text = '';
+  for (const node of Array.from(p.childNodes)) if (!(node.classList && node.classList.contains('scriptorium-fence'))) text += node.textContent;
+  return text.replace(/^\s+/, '');
+}
+
 /* Marks (or unmarks) one rendered block with a drop cap: which is one of the four built in, or `set` is a set of
    drop caps (see "Sets of drop caps"). A set of images marks the block only if it has an image for the letter the
    block's paragraph begins with; otherwise the block keeps the vault's drop cap. Where a set has several images of a
@@ -82,7 +91,7 @@ function markDropcap(el, which, set, key) {
       return null;
     }
     const p = el.querySelector ? el.querySelector(':scope > p') : null;
-    const text = p ? String(p.textContent || '') : '';
+    const text = p ? shownText(p) : '';
     const slot = p && set.letters[openingLetter(text)];
     if (!slot) return null;
     const seed = seedOf(`${key || ''}\n${text.slice(0, 48)}`);
@@ -524,6 +533,341 @@ function describeDownload(name, r) {
 }
 
 /* ==========================================================
+   Centred and right-aligned text
+   ==========================================================
+   A block of a note is centred, or set to the right, between two marker lines:
+       ::: center
+       Shall I compare thee to a summer's day?
+       Thou art more lovely and more temperate:
+       :::
+   and "::: right" for the right (an attribution, a signature). It is the fenced container of Pandoc and of
+   markdown-it ("::: center", or "::: {.center}"), so the note stays plain Markdown and reads as such anywhere. The
+   opening line stands at the start of a block (a blank line or a heading before it, or the top of the note) and the
+   closing line at the end of one (a blank line or a heading after it, or the end of the note); a block that is not
+   closed aligns nothing. Inside, every line of the note is a line on the page (verse needs no two spaces at a line's
+   end) and a blank line parts two stanzas. A note's property "align: center" (or right) aligns the whole note.
+
+   Why marker lines and not a callout (> [!center]): Live Preview draws a callout as one block of its own, which the
+   editor cannot write in line by line (nor can Lagrange's pen). Between marker lines the text stays ordinary lines
+   of the editor: alignExtension marks each of them and the snippet sets them, so the same text is centred in Live
+   Preview, in Reading view and in an exported PDF.
+
+   Drop caps. Aligned text has no drop cap and no small-capped first line (the snippet's rules for
+   .scriptorium-align), and it does not use up the chapter opening either: the first paragraph after a heading that
+   is not aligned still has the drop cap, whatever centred or right-aligned blocks stand between the heading and it
+   (an epigraph in verse, the name under a quotation). For that the last block of such a run is marked
+   .scriptorium-opens, which the snippet's rules for chapter openings take as they take a heading. The writer can ask
+   for a drop cap on aligned text all the same: "::: center dropcap" for one block (the commands "Use a drop cap on
+   this aligned paragraph" and "Remove the drop cap from this aligned paragraph"), or the property
+   "dropcap-aligned: true" for a note (the picker's "Also on centred and right-aligned text"). Such a block is a
+   paragraph like any other: it has the drop cap where a chapter opens, and the paragraph after it has none.
+
+   Reading view draws a note a section (a block) at a time and keeps a section for as long as its own text stays the
+   same, so the marks are set from the note's text and each section's lines (alignPlan, sectionMarks), and set again
+   for every section whenever the sections change (watchSizer). A page that is rendered all at once (Export to PDF,
+   an embed) has no lines to go by: there the same plan is made from the blocks themselves (blockMarks). */
+
+const ALIGN_OPEN = /^ {0,3}:{3,}[ \t]*\{?[ \t]*\.?(center|centre|centered|centred|right)(?![\w-])([^{}\n]*)\}?[ \t]*:*[ \t]*$/i;
+const ALIGN_CLOSE = /^ {0,3}:{3,}[ \t]*$/;
+const ALIGN_DROPCAP = /(^|[\s.])drop-?cap(?![\w-])/i;
+const ALIGN_CLASSES = ['scriptorium-align', 'scriptorium-align-center', 'scriptorium-align-right', 'scriptorium-align-dropcap',
+  'scriptorium-align-fence', 'scriptorium-align-lines', 'scriptorium-opens'];
+
+/* 'center' | 'right' from a word of the marker line or of the "align" property, or null. */
+function alignKind(word) {
+  const w = String(word == null ? '' : word).trim().toLowerCase();
+  return /^cent(?:er|re|ered|red)$/.test(w) ? 'center' : w === 'right' ? 'right' : null;
+}
+
+/* A marker line read: {align, dropcap} for an opening line ("::: center", "::: right dropcap", "::: {.center}"),
+   {close: true} for a closing one (":::"), or null for any other line. */
+function alignMarker(line) {
+  const text = String(line == null ? '' : line);
+  if (ALIGN_CLOSE.test(text)) return { close: true };
+  const m = ALIGN_OPEN.exec(text);
+  return m ? { align: alignKind(m[1]), dropcap: ALIGN_DROPCAP.test(m[2]) } : null;
+}
+
+/* The level of an ATX heading line (1 to 6), or 0. */
+function headingLevel(line) {
+  const m = /^ {0,3}(#{1,6})(?:[ \t]|$)/.exec(String(line || ''));
+  return m ? m[1].length : 0;
+}
+
+/* What a note's properties say of its alignment: {align: 'center' | 'right' | null, dropcap: whether its aligned
+   text may have drop caps ("dropcap-aligned: true")}. */
+function noteAlign(frontmatter) {
+  const fm = frontmatter && typeof frontmatter === 'object' ? frontmatter : {};
+  const yes = v => v === true || (typeof v === 'string' && /^(?:true|yes|on)$/i.test(v.trim()));
+  return { align: alignKind(typeof fm.align === 'string' ? fm.align : ''), dropcap: yes(fm['dropcap-aligned']) };
+}
+
+/* Where a note's text is aligned, from its lines: {lines, body, note, ranges}.
+     body    the first line after the properties (0 without them)
+     note    {align, dropcap}: what the properties say (read from the lines themselves, or given as `note` where the
+             lines have no properties: a page rendered from its blocks)
+     ranges  [{align, dropcap, own, open, close, lead}] in order: the lines of the two markers; dropcap, whether the
+             block may have a drop cap (its own "dropcap", kept in `own`, or the note's); lead, whether a chapter
+             opening may come where the block stands: it is the first thing under a heading of level 1, 2 or 6 or
+             at the top of a note without properties, but for other aligned blocks without a drop cap and one
+             quotation (the epigraph the snippet allows for).
+   Marker lines inside a fenced code block are code. Pure. */
+function alignPlan(lines, note) {
+  const n = lines.length, blank = i => !/\S/.test(lines[i]);
+  let body = 0;
+  const said = { align: null, dropcap: false };
+  if (n && /^---[ \t]*$/.test(lines[0])) {
+    for (let j = 1; j < n; j++) if (/^(?:---|\.\.\.)[ \t]*$/.test(lines[j])) { body = j + 1; break; }
+    for (let j = 1; j < body - 1; j++) {
+      const m = /^(align|dropcap-aligned)[ \t]*:[ \t]*["']?([^"'#\n]*?)["']?[ \t]*(?:#.*)?$/i.exec(lines[j]);
+      if (m && m[1].toLowerCase() === 'align') said.align = alignKind(m[2]);
+      else if (m) said.dropcap = /^(?:true|yes|on)$/i.test(m[2].trim());
+    }
+  }
+  const of = note || said;
+  const ranges = [];
+  let code = null, open = null;
+  for (let k = body; k < n; k++) {
+    const line = lines[k];
+    if (code) { if (code.test(line)) code = null; continue; }
+    const fence = line.includes('```') || line.includes('~~~') ? /^ {0,3}(`{3,}|~{3,})/.exec(line) : null;
+    if (fence) { code = new RegExp(`^ {0,3}\\${fence[1][0]}{${fence[1].length},}[ \\t]*$`); continue; }
+    const m = line.includes(':::') ? alignMarker(line) : null;   // (most lines are no marker: not worth a closer look)
+    if (!m) continue;
+    if (m.close) {
+      if (open && (k === n - 1 || blank(k + 1) || headingLevel(lines[k + 1]))) {
+        ranges.push({ align: open.align, dropcap: open.dropcap || of.dropcap, own: open.dropcap, open: open.at, close: k, lead: false });
+        open = null;
+      }
+    } else if (k === body || blank(k - 1) || headingLevel(lines[k - 1])) open = { align: m.align, dropcap: m.dropcap, at: k };
+  }
+  // What stands above each block: a chapter opening may come there, or not.
+  const closes = new Map();
+  const leads = (k, quote) => {
+    let j = k - 1;
+    while (j >= body && blank(j)) j--;
+    if (j < body) return body === 0;
+    const level = headingLevel(lines[j]);
+    if (level) return level <= 2 || level === 6;
+    if (closes.has(j)) { const r = closes.get(j); return r.lead && !r.dropcap; }
+    if (/^ {0,3}(?:=+|-+)[ \t]*$/.test(lines[j]) && j > body && !blank(j - 1) && !headingLevel(lines[j - 1])) return true;   // a heading underlined
+    if (!quote) return false;
+    let q = j;
+    while (q > body && !blank(q - 1)) q--;
+    return /^ {0,3}>/.test(lines[q]) && !/^ {0,3}>[ \t]*\[!/.test(lines[q]) && leads(q, false);
+  };
+  for (const r of ranges) { r.lead = leads(r.open, true); closes.set(r.close, r); }
+  return { lines, body, note: of, ranges };
+}
+
+/* The marks of one block of a note, which takes the lines from..to: null where nothing is aligned, else
+   {align, dropcap, first, last, fence, opens}: first and last, whether the block begins with the opening marker and
+   ends with the closing one (lines that are not shown); fence, whether it is nothing but markers; opens, whether a
+   chapter opening may follow it (see above). Pure. */
+function sectionMarks(plan, from, to) {
+  const r = plan.ranges.find(x => x.close >= from && x.open <= to);
+  if (!r) return plan.note.align && from >= plan.body ? { align: plan.note.align, dropcap: plan.note.dropcap, first: false, last: false, fence: false, opens: false } : null;
+  const first = r.open >= from, last = r.close <= to;
+  let fence = true;
+  for (let k = Math.max(from, r.open); k <= Math.min(to, r.close) && fence; k++) if (k !== r.open && k !== r.close && /\S/.test(plan.lines[k])) fence = false;
+  return { align: r.align, dropcap: r.dropcap, first, last, fence, opens: r.lead && (r.dropcap ? first && fence : last) };
+}
+
+/* The classes that say so on the block (the snippet's rules read them). */
+function alignClasses(marks) {
+  if (!marks) return [];
+  const out = ['scriptorium-align', `scriptorium-align-${marks.align}`];
+  if (marks.dropcap) out.push('scriptorium-align-dropcap');
+  if (marks.fence) out.push('scriptorium-align-fence');
+  if (marks.opens) out.push('scriptorium-opens');
+  return out;
+}
+
+/* The lines a rendered block stands for, as nearly as its tag and text tell: a heading with its #s, a quotation with
+   its >, a paragraph line by line (a marker line is a line of the paragraph it was written against); anything else
+   that has no text, or is code, is one line that is no marker. */
+function blockLines(tag, text, title) {
+  const t = String(tag || '').toUpperCase(), lines = String(text == null ? '' : text).split('\n').map(l => l.trim()).filter(Boolean);
+  if (title) return [`# ${lines.join(' ')}`];
+  if (/^H[1-6]$/.test(t)) return [`${'#'.repeat(Number(t[1]))} ${lines.join(' ')}`];
+  if (t === 'PRE' || t === 'TABLE' || !lines.length) return [`<${t.toLowerCase() || 'div'}>`];
+  return t === 'BLOCKQUOTE' ? lines.map(l => `> ${l}`) : lines;
+}
+
+/* The marks of blocks that were rendered all at once (a page about to be printed, an embed): blocks is
+   [{tag, text, title}] in order, note is the note's own alignment (noteAlign). → the marks of each. Pure. */
+function blockMarks(blocks, note) {
+  const lines = [], spans = [];
+  for (const b of blocks) {
+    const own = blockLines(b.tag, b.text, b.title);
+    spans.push([lines.length, lines.length + own.length - 1]);
+    lines.push(...own, '');
+  }
+  const plan = alignPlan(lines, note || { align: null, dropcap: false });
+  return spans.map(([from, to]) => sectionMarks(plan, from, to));
+}
+
+/* What the commands change in a note, as edits of its lines: {line, insert} puts a new line before line `line` (which
+   may be one past the last), {line, remove: true} takes a line out, {line, text} replaces one. All of them count
+   lines as they are before any edit.
+   alignEdits(lines, from, to, kind): the selection takes the lines from..to (the cursor's line twice, without one).
+     kind 'center' | 'right': the paragraphs the selection touches are put between marker lines; where it touches
+       blocks that are aligned already, those are given this alignment instead.
+     kind null: the markers of the aligned blocks it touches are taken out.
+   Centring and removing the alignment again leaves the note exactly as it was (unless a blank line had to be made
+   for the opening marker: a heading that stood against the paragraph above it). Pure. */
+function alignEdits(lines, from, to, kind) {
+  const plan = alignPlan(lines), blank = i => !/\S/.test(lines[i] || '');
+  const touched = plan.ranges.filter(r => r.close >= from && r.open <= to);
+  if (touched.length) {
+    if (!kind) return touched.flatMap(r => [{ line: r.open, remove: true }, { line: r.close, remove: true }]);
+    return touched.filter(r => r.align !== kind).map(r => ({ line: r.open, text: lines[r.open].replace(/cent(?:ered|red|er|re)|right/i, kind) }));
+  }
+  from = Math.max(from, plan.body);
+  to = Math.min(to, lines.length - 1);
+  while (from <= to && blank(from)) from++;
+  while (to >= from && blank(to)) to--;
+  if (!kind || from > to) return [];
+  const head = i => headingLevel(lines[i]) > 0;
+  while (from > plan.body && !blank(from - 1) && !head(from - 1) && !head(from)) from--;
+  while (to < lines.length - 1 && !blank(to + 1) && !head(to + 1)) to++;
+  const edits = [];
+  if (from > plan.body && !blank(from - 1) && !head(from - 1)) edits.push({ line: from, insert: '' });
+  edits.push({ line: from, insert: `::: ${kind}` }, { line: to + 1, insert: ':::' });
+  return edits;
+}
+
+/* The edit that gives the aligned block the line `line` is in a drop cap (on) or takes it away: "dropcap" on its
+   opening marker. [] if it is so already; null if the line is in no aligned block. Pure. */
+function alignDropcapEdits(lines, line, on) {
+  const r = alignPlan(lines).ranges.find(x => x.open <= line && x.close >= line);
+  if (!r) return null;
+  if (r.own === Boolean(on)) return [];
+  const text = lines[r.open];
+  if (!on) return [{ line: r.open, text: text.replace(/[ \t]*\.?drop-?cap(?![\w-])/i, '') }];
+  const m = /^( {0,3}:{3,}[ \t]*\{[^}\n]*?)[ \t]*\}(.*)$/.exec(text);
+  return [{ line: r.open, text: m ? `${m[1]} .dropcap}${m[2]}` : text.replace(/[ \t]*:*[ \t]*$/, '') + ' dropcap' }];
+}
+
+/* The lines after the edits. Pure (the editor makes the same edits as changes: see alignCommand). */
+function applyLineEdits(lines, edits) {
+  const out = [];
+  for (let i = 0; i <= lines.length; i++) {
+    for (const e of edits) if (e.line === i && 'insert' in e) out.push(e.insert);
+    if (i === lines.length) break;
+    const e = edits.find(x => x.line === i && !('insert' in x));
+    if (!e) out.push(lines[i]); else if (!e.remove) out.push(e.text);
+  }
+  return out;
+}
+
+/* Where line `line` is after the edits. */
+function lineAfterEdits(edits, line) {
+  let shift = 0;
+  for (const e of edits) {
+    if ('insert' in e) { if (e.line <= line) shift++; } else if (e.remove && e.line < line) shift--;
+  }
+  return Math.max(0, line + shift);
+}
+
+/* Hides the marker line a rendered block begins (which 'first') or ends ('last') with, or shows it again: the line
+   is put in a span of its own, with the line break beside it, and the snippet does not show the span. The text is
+   kept, because Reading view keeps the block: if the markers stop being markers, the line is shown again. */
+function fenceLine(block, which, on) {
+  const doc = block.ownerDocument, cls = `scriptorium-fence-${which}`;
+  const old = Array.from(block.querySelectorAll('span.scriptorium-fence')).find(s => s.classList.contains(cls));
+  if (old && on) return;
+  if (old) { old.replaceWith(...Array.from(old.childNodes)); block.normalize(); return; }
+  if (!on) return;
+  const walker = doc.createTreeWalker(block, 4), nodes = [];   // 4: text nodes
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) if (/\S/.test(node.data) && !node.parentElement.closest('span.scriptorium-fence')) nodes.push(node);
+  let node = which === 'first' ? nodes[0] : nodes[nodes.length - 1];
+  if (!node) return;
+  const span = doc.createElement('span');
+  span.className = `scriptorium-fence ${cls}`;
+  if (which === 'first') {
+    const at = node.data.indexOf('\n', node.data.search(/\S/));
+    const marker = alignMarker((at < 0 ? node.data : node.data.slice(0, at)).trim());
+    if (!marker || marker.close) return;
+    if (at >= 0 && at + 1 < node.data.length) node.splitText(at + 1);
+    const next = node.nextSibling;
+    node.replaceWith(span);
+    span.appendChild(node);
+    if (next && next.nodeName === 'BR') span.appendChild(next);
+  } else {
+    const text = node.data.replace(/\s+$/, ''), at = text.lastIndexOf('\n');
+    const marker = alignMarker(text.slice(at + 1).trim());
+    if (!marker || !marker.close) return;
+    if (at > 0 && /\S/.test(text.slice(0, at))) node = node.splitText(at);
+    const prev = node.previousSibling;
+    node.replaceWith(span);
+    span.appendChild(node);
+    if (prev && prev.nodeName === 'BR') span.insertBefore(prev, node);
+  }
+}
+
+/* Sets a rendered block's marks: el is the block Reading view made for a section (or the block itself where there
+   is none around it). Returns whether its classes changed. */
+function markAligned(el, marks) {
+  const want = new Set(alignClasses(marks));
+  const block = el.firstElementChild && /^(?:P|UL|OL|BLOCKQUOTE|H[1-6])$/.test(el.firstElementChild.tagName) && el.tagName === 'DIV' ? el.firstElementChild : el;
+  if (marks && !marks.fence && block.tagName === 'P' && !block.querySelector('br') && /\n/.test(block.textContent.trim())) want.add('scriptorium-align-lines');   // "Strict line breaks": a line is a line all the same
+  let changed = false;
+  for (const c of ALIGN_CLASSES) if (el.classList.contains(c) !== want.has(c)) { el.classList.toggle(c, want.has(c)); changed = true; }
+  if (el.querySelector) {
+    try {
+      fenceLine(el, 'first', Boolean(marks && marks.first));
+      fenceLine(el, 'last', Boolean(marks && marks.last));
+    } catch (e) { /* a block of some other make: its markers stay as text */ }
+  }
+  return changed;
+}
+
+/* Marks the blocks of something rendered all at once: the element children of `container`, each a block or the
+   <div> around one (as on a page about to be printed). */
+function alignBlocks(container, note) {
+  const els = Array.from(container.children).filter(el => !el.classList.contains('mod-footer') && !el.classList.contains('markdown-preview-pusher'));
+  const blocks = els.map(el => {
+    const inner = el.tagName !== 'DIV' ? el : Array.from(el.children).find(c => c.tagName === 'PRE') || (el.children.length === 1 ? el.firstElementChild : el);
+    return { tag: inner.tagName, text: el.textContent, title: el.classList.contains('mod-header') };
+  });
+  blockMarks(blocks, note).forEach((marks, i) => markAligned(els[i], marks));
+}
+
+/* Live Preview: the lines of an aligned block stay ordinary lines of the editor, each with a class the snippet sets
+   (scriptorium-align-center or -right; scriptorium-align-fence on the two marker lines), and a note that is aligned
+   as a whole has a class on the editor's content. A CodeMirror extension, made when the plugin loads. */
+function alignExtension() {
+  const { StateField, RangeSetBuilder } = require('@codemirror/state');
+  const { Decoration, EditorView } = require('@codemirror/view');
+  const made = new Map();
+  const deco = cls => { if (!made.has(cls)) made.set(cls, Decoration.line({ class: cls })); return made.get(cls); };
+  const nothing = { deco: Decoration.none, note: null };
+  const build = state => {
+    const lines = [];
+    for (const line of state.doc.iterLines()) lines.push(line);
+    const plan = alignPlan(lines);
+    if (!plan.ranges.length && !plan.note.align) return nothing;
+    const builder = new RangeSetBuilder();
+    for (const r of plan.ranges) {
+      for (let k = r.open; k <= r.close; k++) {
+        const at = state.doc.line(k + 1).from;
+        builder.add(at, at, deco(`scriptorium-align scriptorium-align-${r.align}${k === r.open || k === r.close ? ' scriptorium-align-fence' : ''}`));
+      }
+    }
+    return { deco: builder.finish(), note: plan.note.align };
+  };
+  return StateField.define({
+    create: build,
+    update: (value, tr) => (tr.docChanged ? build(tr.state) : value),
+    provide: field => [
+      EditorView.decorations.from(field, value => value.deco),
+      EditorView.contentAttributes.from(field, value => (value.note ? { class: `scriptorium-align-note-${value.note}` } : {})),
+    ],
+  });
+}
+
+/* ==========================================================
    Export to PDF: the page as Reading view sets it
    ==========================================================
    Obsidian builds the page it prints in a window of its own, and not as Reading view builds a note: each block is in
@@ -533,7 +877,7 @@ function describeDownload(name, r) {
    heading. dressPrint gives the printed page the same marks: each block gets its el-<tag> class (and the note's own
    drop cap, if it has one), and the bare <h1> becomes the header block with the title in it, as in Reading view.
    The body of the print window gets the vault's mode and drop cap classes, and the drop cap's font is loaded before
-   the page is printed. The title is included by default (the plugin ticks Obsidian's option once; untick it in the
+   the page is printed. Centred and right-aligned blocks are marked there as well (alignBlocks). The title is included by default (the plugin ticks Obsidian's option once; untick it in the
    export dialogue and it stays unticked). */
 
 /* Whether el is the page Obsidian is about to print. */
@@ -612,10 +956,17 @@ class DropcapModal extends Modal {
       });
       items.push(item);
     }
+    // Centred and right-aligned text has no drop cap unless the note asks for it: saved at once, with the list still open.
+    const also = this.contentEl.createEl('label', { cls: 'scriptorium-dropcap-also' });
+    const box = also.createEl('input', { attr: { type: 'checkbox' } });
+    box.checked = noteAlign(cache && cache.frontmatter).dropcap;
+    also.createSpan({ text: 'Also on centred and right-aligned text' });
+    box.addEventListener('change', () => void this.plugin.setNoteDropcapAligned(file, box.checked));
     this.contentEl.createEl('p', {
       cls: 'scriptorium-dropcap-hint',
       text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view, where drop caps are drawn. A set ' +
-        'of images shows where it has the paragraph’s first letter.',
+        'of images shows where it has the paragraph’s first letter. Centred and right-aligned text has no drop cap ' +
+        'unless the box is ticked (“dropcap-aligned” in the properties) or its own marker line asks for one (“::: center dropcap”).',
     });
     const more = this.contentEl.createDiv({ cls: 'scriptorium-dropcap-more' });
     more.createEl('button', { text: 'Add a set of your own…' })
@@ -731,8 +1082,8 @@ class ScriptoriumSettings extends PluginSettingTab {
    small caps and half lowercase. CSS can't set hyphenation per line, hence the script. The same logic runs on
    williamliaw.com (assets/scriptorium-keep-words.js). With the drop cap set to None there are no small caps, so
    nothing is wrapped. */
-const KEEP_SEL = '.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p,' +
-                 ' .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p';
+const KEEP_SEL = '.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p > p,' +
+                 ' .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p';
 const WORD = /[\p{L}\p{M}\p{N}'’\-‐­]/u;   // letters, digits, apostrophes, and the hyphens (and soft hyphens) inside words
 
 function unwrapKept(p) {
@@ -771,7 +1122,9 @@ function keepFirstLineWords(p) {
   const block = p.parentElement;
   const none = block && block.classList.contains('scriptorium-dropcap')
     ? block.classList.contains('scriptorium-dropcap-none') : document.body.classList.contains('scriptorium-initials-none');
-  if (!p.isConnected || !p.matches(KEEP_SEL) || none) return;
+  // Nor on centred or right-aligned text, unless the writer asked for a drop cap there.
+  const aligned = block && block.classList.contains('scriptorium-align') && !block.classList.contains('scriptorium-align-dropcap');
+  if (!p.isConnected || !p.matches(KEEP_SEL) || none || aligned) return;
   const nodes = [], walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
   let n;
   while ((n = walker.nextNode())) if (!n.parentElement.closest('mjx-container, .math, code')) nodes.push(n);
@@ -3896,6 +4249,9 @@ class Scriptorium extends Plugin {
 
     // Re-check an opening paragraph whenever its box changes (first layout, pane resize, fonts arriving).
     this.kept = new Set();
+    this.sections = new WeakMap();   // a block Reading view drew -> what it was drawn with, which knows the block's lines
+    this.sizers = new Map();         // the blocks of a Reading view -> what watches them come and go (watchSizer)
+    this.plans = [];                 // the alignment of the notes drawn last, by their text (planFor)
     this.resizeObserver = new ResizeObserver(entries => {
       for (const entry of entries) {
         const p = entry.target;
@@ -3906,7 +4262,8 @@ class Scriptorium extends Plugin {
     this.registerMarkdownPostProcessor((el, ctx) => {
       const which = noteDropcap(ctx && ctx.frontmatter);      // a note's own drop cap (see "A drop cap for one note")
       const path = (ctx && ctx.sourcePath) || '';
-      if (isPrintPage(el)) return this.dressPrint(el, which, path); // Export to PDF: the whole page comes at once
+      if (isPrintPage(el)) return this.dressPrint(el, which, path, ctx && ctx.frontmatter); // Export to PDF: the whole page comes at once
+      this.align(el, ctx);              // first: a marker line of aligned text is not the paragraph's first letter
       this.mark(el, which, path);
       el.querySelectorAll(':scope > p').forEach(p => { this.kept.add(p); this.resizeObserver.observe(p); });
     });
@@ -3945,6 +4302,17 @@ class Scriptorium extends Plugin {
         return true;
       }
     });
+    // Centred and right-aligned text (see "Centred and right-aligned text"): Live Preview's lines, and the commands.
+    try { this.registerEditorExtension(alignExtension()); } catch (e) { console.error('Scriptorium: text is not aligned in Live Preview', e); }
+    for (const [id, name, kind] of [
+      ['align-center', 'Centre selection', 'center'],
+      ['align-right', 'Right-align selection', 'right'],
+      ['align-remove', 'Remove alignment', null],
+    ]) this.addCommand({ id, name, editorCallback: editor => this.alignCommand(editor, kind) });
+    for (const [id, name, on] of [
+      ['aligned-dropcap-on', 'Use a drop cap on this aligned paragraph', true],
+      ['aligned-dropcap-off', 'Remove the drop cap from this aligned paragraph', false],
+    ]) this.addCommand({ id, name, editorCheckCallback: (checking, editor) => this.alignDropcapCommand(editor, on, checking) });
     this.registerEvent(this.app.workspace.on('css-change', () => this.recheck()));
     if (document.fonts) this.registerDomEvent(document.fonts, 'loadingdone', () => this.recheck());
 
@@ -4113,11 +4481,12 @@ class Scriptorium extends Plugin {
 
   /* Export to PDF (see "Export to PDF: the page as Reading view sets it"). The returned promise is awaited by Obsidian
      before it prints: by then the drop cap's font has loaded. */
-  dressPrint(page, which, path) {
+  dressPrint(page, which, path, frontmatter) {
     const doc = page.ownerDocument, body = doc.body, s = this.settings;
     body.classList.toggle('scriptorium-fancy', s.fancyMode);
     for (const [value] of INITIALS) body.classList.toggle(`scriptorium-initials-${value}`, value === s.initials && value !== 'yinit');
     dressPrint(page, null);
+    try { alignBlocks(page, noteAlign(frontmatter)); } catch (e) { /* printed as it is */ }
     const shapes = [];
     for (const child of Array.from(page.children)) if (child.tagName === 'DIV' && !child.classList.contains('mod-header')) shapes.push(this.mark(child, which, path));
     const faces = document.getElementById('scriptorium-dropcap-fonts');   // the fonts of the writer's sets
@@ -4394,6 +4763,116 @@ class Scriptorium extends Plugin {
     return { set: name, file, mono: meta.mono };
   }
 
+  /* Marks a block that has just been rendered as centred or right-aligned, if its note says so (see "Centred and
+     right-aligned text"). Reading view gives each block its lines; anything else is rendered all at once. */
+  align(el, ctx) {
+    try {
+      const info = ctx && typeof ctx.getSectionInfo === 'function' ? ctx.getSectionInfo(el) : null;
+      if (!info) {
+        const note = noteAlign(ctx && ctx.frontmatter);
+        if (note.align || /(?:^|\n)\s*:{3,}/.test(el.textContent)) alignBlocks(el, note);
+        return;
+      }
+      this.sections.set(el, ctx);
+      markAligned(el, sectionMarks(this.planFor(info.text), info.lineStart, info.lineEnd));
+      this.watchSizer(el.parentElement);
+    } catch (e) { /* never break rendering */ }
+  }
+
+  /* The alignment of a note from its text, kept for the notes drawn last (every block of a note asks for it). */
+  planFor(text) {
+    let hit = this.plans.find(p => p.text === text);
+    if (!hit) {
+      hit = { text, plan: alignPlan(String(text).split(/\r?\n/)) };
+      this.plans.unshift(hit);
+      this.plans.length = Math.min(this.plans.length, 6);
+    }
+    return hit.plan;
+  }
+
+  /* Reading view keeps a block it has drawn for as long as the block's own text stays the same, and takes blocks
+     off the page and puts them back as the note is scrolled. A paragraph that comes to stand between two marker
+     lines (or no longer does) is therefore not drawn again: whenever the blocks of a view change, the marks are set
+     again, for all of them if the note's text has changed, else for those that came back. */
+  watchSizer(sizer) {
+    if (!sizer || this.sizers.has(sizer) || typeof MutationObserver === 'undefined') return;
+    for (const [old, was] of this.sizers) if (!old.isConnected) { was.observer.disconnect(); this.sizers.delete(old); }
+    const watch = { text: null, added: new Set(), frame: 0 };
+    watch.observer = new MutationObserver(records => {
+      for (const r of records) for (const node of r.addedNodes) watch.added.add(node);
+      if (watch.frame) return;
+      watch.frame = requestAnimationFrame(() => { watch.frame = 0; this.realign(sizer, watch); });
+    });
+    watch.observer.observe(sizer, { childList: true });
+    this.sizers.set(sizer, watch);
+  }
+
+  realign(sizer, watch) {
+    const added = watch.added, blocks = Array.from(sizer.children).filter(el => this.sections.has(el));
+    watch.added = new Set();
+    let changed = false;
+    try {
+      const lines = el => this.sections.get(el).getSectionInfo(el);
+      const first = blocks.length ? lines(blocks[0]) : null;
+      const all = !first || first.text !== watch.text;
+      if (first) watch.text = first.text;
+      for (const el of blocks) {
+        if (!all && !added.has(el)) continue;
+        const info = lines(el);
+        if (info && markAligned(el, sectionMarks(this.planFor(info.text), info.lineStart, info.lineEnd))) changed = true;
+      }
+    } catch (e) { /* never break rendering */ }
+    if (changed) this.recheck();   // an opening paragraph may have become one, or stopped being one
+  }
+
+  /* Makes edits of a note's lines (alignEdits, alignDropcapEdits) in the editor as one change, and keeps the
+     selection on the text it was on. */
+  editLines(editor, edits) {
+    if (!edits.length) return;
+    const count = editor.lineCount(), len = i => editor.getLine(i).length;
+    const changes = edits.map(e => {
+      if ('insert' in e) return e.line < count ? { from: { line: e.line, ch: 0 }, text: `${e.insert}\n` } : { from: { line: count - 1, ch: len(count - 1) }, text: `\n${e.insert}` };
+      if (!e.remove) return { from: { line: e.line, ch: 0 }, to: { line: e.line, ch: len(e.line) }, text: e.text };
+      if (e.line < count - 1) return { from: { line: e.line, ch: 0 }, to: { line: e.line + 1, ch: 0 }, text: '' };
+      return { from: e.line ? { line: e.line - 1, ch: len(e.line - 1) } : { line: 0, ch: 0 }, to: { line: e.line, ch: len(e.line) }, text: '' };
+    });
+    const at = pos => ({ line: lineAfterEdits(edits, pos.line), ch: pos.ch });
+    editor.transaction({ changes, selection: { from: at(editor.getCursor('anchor')), to: at(editor.getCursor('head')) } });
+  }
+
+  /* "Centre selection" and "Right-align selection" (kind 'center' | 'right'), and "Remove alignment" (null). */
+  alignCommand(editor, kind) {
+    const lines = editor.getValue().split('\n'), a = editor.getCursor('from'), b = editor.getCursor('to');
+    const last = b.line > a.line && b.ch === 0 ? b.line - 1 : b.line;   // a selection that ends where a line begins does not take that line
+    const edits = alignEdits(lines, a.line, last, kind);
+    if (edits.length) { this.editLines(editor, edits); return; }
+    const inBlock = alignPlan(lines).ranges.some(r => r.close >= a.line && r.open <= last);
+    new Notice(!kind ? 'This text is not centred or right-aligned.'
+      : inBlock ? `This text is already ${kind === 'center' ? 'centred' : 'right-aligned'}.` : `There is no text here to ${kind === 'center' ? 'centre' : 'right-align'}.`);
+  }
+
+  /* "Use a drop cap on this aligned paragraph" (on) and "Remove the drop cap from this aligned paragraph": offered
+     when the cursor is in an aligned block that has none of its own (or has one). */
+  alignDropcapCommand(editor, on, checking) {
+    const lines = editor.getValue().split('\n'), line = editor.getCursor('head').line;
+    const edits = alignDropcapEdits(lines, line, on);
+    if (!edits || !edits.length) return false;
+    if (checking) return true;
+    const block = alignPlan(lines).ranges.find(r => r.open <= line && r.close >= line);
+    this.editLines(editor, edits);
+    if (on && block && !block.lead) new Notice('A drop cap is drawn where a chapter opens: this text will have one when it is the first paragraph under a heading.', 8000);
+    return true;
+  }
+
+  /* Whether a note's centred and right-aligned text may have drop caps: the property "dropcap-aligned". */
+  async setNoteDropcapAligned(file, on) {
+    try {
+      await this.app.fileManager.processFrontMatter(file, fm => { if (on) fm['dropcap-aligned'] = true; else delete fm['dropcap-aligned']; });
+    } catch (e) {
+      new Notice(`Could not save this in the note’s properties: ${e.message}`);
+    }
+  }
+
   /* Saves a note's drop cap in its properties (null removes the property: the vault's drop cap). */
   async setNoteDropcap(file, which) {
     try {
@@ -4461,6 +4940,10 @@ class Scriptorium extends Plugin {
     if (this.imageFocus) this.imageFocus.unload();
     if (this.resizeObserver) this.resizeObserver.disconnect();
     if (this.kept) for (const p of this.kept) unwrapKept(p);
+    for (const [sizer, watch] of this.sizers || []) {
+      watch.observer.disconnect();
+      for (const el of Array.from(sizer.children)) markAligned(el, null);   // the markers are text again
+    }
   }
 }
 
@@ -4471,6 +4954,7 @@ Object.assign(module.exports, {
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
   noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
+  alignKind, alignMarker, noteAlign, alignPlan, sectionMarks, alignClasses, blockLines, blockMarks, alignEdits, alignDropcapEdits, applyLineEdits, lineAfterEdits, markAligned,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
   seedOf, fontFaces, setLabel, monoMask, downloadPlan, fetchDropcapSet, describeDownload, sizeText,
   RCLONE, SYNC_SENTINEL, SYNC_DEFAULTS, SYNC_TIMES, SYNC_CONFLICT, SYNC_CLIENT_STEPS, syncSettings, syncUserDir, syncPaths, syncVaultId, syncReadJson, syncWriteJson,

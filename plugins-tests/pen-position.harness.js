@@ -2,13 +2,21 @@
 // where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame but
 // for a reflow of at most three frames, which is counted), start
 // each further line at the left edge of the note's own line, and draw each equation that Live Preview typesets on that
-// very equation. Since 1.2.4 it also checks, in every case, that the handwriting of a line is never seen before the pen
+// very equation. Where the note centres text or sets it to the right (Scriptorium's "::: center" and "::: right": the
+// Scriptorium plugin and its snippet must be on), each line of handwriting must start where the note starts that line,
+// within 2 px, and the marker lines are never written. Since 1.2.4 it also checks, in every case, that the handwriting of a line is never seen before the pen
 // comes to it, that no letter is cut by the box that uncovers it (ascenders, descenders and swashes included), that
 // the note does not scroll when the run ends and the last text written is in view; and, in cases of their own, that
 // the handwriting stays on its text while the note is scrolled, that a click or a key in the note ends the run with
 // the note exactly as an uninterrupted run would leave it (plus the key), that with "Let me edit while the pen writes"
 // the writer's typing and Lagrange's edits both stand, that the chat's log keeps to its bottom while the loader
-// shows, and that hovering Lagrange's controls shows no bubble. This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
+// shows, and that hovering Lagrange's controls shows no bubble. And, for several pens at once: that two and three pens
+// do write at the same time where the edits stand apart (and one pen where they do not: in one paragraph, or a line or
+// two from each other), that every pen's handwriting begins on its own text within 2 px on every frame, that no two
+// pens' handwriting ever meets, that the note is in the end exactly what one pen leaves (the same edits are run again
+// with "Several pens at once" off) in less time, that the view does not move when the run ends, and that a key, a
+// click, typing alongside and Undo do with three pens what they do with one.
+// This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
 // `node --test`; it is a manual check, or one a machine can run through the DevTools protocol.
 //
 // To run it: open a Scriptorium vault in Obsidian (Lagrange enabled, "Show the pen" on, reduced motion off), open the
@@ -37,6 +45,11 @@
     '> [!note] A callout\n> The text of the callout goes here.',
     '| Quantity | Symbol |\n| --- | --- |\n| mass | m |\n| speed | v |',
     'The paragraph before the filler.', filler(40), 'The far paragraph, well below the fold, mentions energy once.', filler(3), 'The last paragraph of the note.',
+  ].join('\n\n') + '\n';
+  // (verse and an attribution between Scriptorium's marker lines: centred and right-aligned text)
+  const VERSE = [
+    '# Pen position check', 'A paragraph of prose stands before the verse, long enough to wrap onto a second line of the page, so that the column is plain to see.',
+    '::: center\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::', '::: right\n— William Blake\n:::', 'The paragraph after the verse.',
   ].join('\n\n') + '\n';
   const PARA = 'Energy is never lost, only moved about: what a falling stone loses in height it gains in speed, and what it gains in speed it gives up, when it lands, as heat and sound and a dent in the ground. The books balance to the last farthing, which is why the idea has outlived every theory that was built upon it, and why a perpetual motion machine is a fraud before it is switched on. Nobody has yet caught the universe cheating.';
 
@@ -79,16 +92,34 @@
     { name: 'the note is scrolled while the pen writes three lines', ops: [{ find: 'Short line here.', replace: PARA }], lines: 3, scroll: true },
     { name: 'the note is scrolled while the pen strikes and rewrites a wrapped sentence', scroll: true, ops: [{ find: 'A body at rest stays at rest, and a body in motion keeps its motion', replace: 'What is still stays still, and what moves keeps moving' }] },
     { name: 'Source mode: the note is scrolled while the pen writes', mode: 'source', scroll: true, ops: [{ find: 'Short line here.', replace: PARA }], lines: 3 },
-    { name: 'three edits far apart: the view at the end is the view that was watched', ops: [
+    // (several: false: one pen writes them in turn, which is what this case watches; the last two may be in view
+    // together, and are then written by two pens at once: see "several pens: one pen, then two" below)
+    { name: 'three edits far apart: the view at the end is the view that was watched', several: false, ops: [
       { find: 'Short line here.', replace: 'Short sentence here.' }, { find: 'mentions energy once', replace: 'speaks of energy only the one time' }, { append: 'An appended closing remark.' }] },
     { name: 'Reading view: equation', mode: 'reading', ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 1 },
+    // (aligned: each line of handwriting starts where the note starts that line; the first of them is set as said)
+    { name: 'centred verse appended (three lines, each where the note sets it)', note: VERSE, aligned: 'center', lines: 3,
+      ops: [{ append: '::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\nIn what distant deeps or skies.\n:::' }] },
+    { name: 'two centred stanzas appended (a blank line between them)', note: VERSE, aligned: 'center', lines: 3,
+      ops: [{ append: '::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\n\nIn what distant deeps or skies.\n:::' }] },
+    { name: 'a long centred line that wraps', note: VERSE, aligned: 'center', lines: 2,
+      ops: [{ append: '::: center\nWhen the stars threw down their spears and watered heaven with their tears, did he smile his work to see, did he who made the Lamb make thee?\n:::' }] },
+    { name: 'a line set to the right appended (an attribution)', note: VERSE, aligned: 'right', ops: [{ append: '::: right\n— from *Songs of Experience*, 1794\n:::' }] },
+    { name: 'a line added to a centred block', note: VERSE, aligned: 'center', ops: [{ insert_after: 'In the forests of the night;', text: '\nWhat immortal hand or eye,' }] },
+    { name: 'a line rewritten in a right-aligned block', note: VERSE, aligned: 'right', ops: [{ find: '— William Blake', replace: '— William Blake, in the year 1794' }] },
+    { name: 'prose, then centred verse, in one edit', note: VERSE, aligned: 'left', lines: 3,
+      ops: [{ append: 'A sentence of prose comes first.\n\n::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\n:::' }] },
+    { name: 'Source mode: centred verse appended (not aligned there; the markers are not written)', mode: 'source', note: VERSE,
+      ops: [{ append: '::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\n:::' }] },
   ];
 
   const path = 'Pen position check.md';
   let file = app.vault.getAbstractFileByPath(path);
   if (!file) file = await app.vault.create(path, NOTE);
   const leaf = app.workspace.getLeavesOfType('markdown')[0] || app.workspace.getLeaf(true);
-  const saved = { speed: plugin.settings.penSpeed, pen: plugin.settings.showPen, concurrent: plugin.settings.editWhileWriting, provider: plugin.settings.provider, trail: plugin.settings.penTrail };
+  const saved = { speed: plugin.settings.penSpeed, pen: plugin.settings.showPen, concurrent: plugin.settings.editWhileWriting, provider: plugin.settings.provider, trail: plugin.settings.penTrail, several: plugin.settings.severalPens, max: plugin.settings.maxPens };
+  plugin.settings.severalPens = true;
+  plugin.settings.maxPens = 3;
   plugin.settings.showPen = true;
   if (options.speed) plugin.settings.penSpeed = options.speed;
 
@@ -121,11 +152,30 @@
     }
     return { x, baseline: base.getBoundingClientRect().bottom };
   };
-  // The left edge of each line of handwriting after the first.
+  // The left edge of each line the note sets its text in, from the character at pos on: `n` lines at most, measured
+  // from the note's own lines in the page (the lines that only mark an alignment are passed over).
+  const noteLines = (cm, pos, n) => {
+    const out = [], at = cm.domAtPos(pos);
+    let el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line'), first = true;
+    for (; el && out.length < n; el = el.nextElementSibling, first = false) {
+      if (!el.classList.contains('cm-line') || /^:{3,}/.test(el.textContent.trim()) || !el.textContent.trim()) continue;
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      if (first) r.setStart(at.node, at.offset);
+      const rects = Array.from(r.getClientRects()).filter(q => q.width >= 1).sort((a, b) => a.top - b.top || a.left - b.left);
+      let top = null;
+      for (const q of rects) {
+        if (top === null || q.top - top > q.height * 0.6) { out.push(q.left); top = q.top; }
+        else out[out.length - 1] = Math.min(out[out.length - 1], q.left);
+      }
+    }
+    return out.slice(0, n);
+  };
+  // The left edge of each line of handwriting, the first included.
   const handLines = hand => {
     const lefts = new Map();
     for (const span of hand.children) {
-      if (span.classList.contains('lagrange-pen-base')) continue;
+      if (span.classList.contains('lagrange-pen-base') || span.classList.contains('lagrange-pen-lead')) continue;
       for (const r of span.getClientRects()) {
         if (r.width < 1) continue;
         const key = Math.round((r.top + r.bottom) / 2 / 4);
@@ -140,6 +190,7 @@
     if (options.only && !c.name.includes(options.only)) continue;
     const text = c.note != null ? c.note : NOTE;
     const mode = c.mode || 'live';
+    plugin.settings.severalPens = c.several !== false;
     await leaf.openFile(file, { state: { mode: 'source', source: false } });
     leaf.view.editor.setValue(text);
     await sleep(options.settle || 500);
@@ -156,7 +207,7 @@
       // where each edit's first written letter will be, in the document as it will be once the edits before it are made
       let shift = 0;
       const starts = located.located.map(e => { const s = e.from + shift + L.inkOffset(e.replace); shift += e.replace.length - (e.to - e.from); return s; });
-      const seen = { frames: 0, dx: 0, dy: 0, lineDx: 0, lines: 0, hands: 0, drawn: new Map(), unmatchedFrames: 0, early: 0, clipped: 0, clipWhy: '', segs: 0, scrolled: 0, tops: [], inked: new WeakSet(), cutWord: '' };
+      const seen = { frames: 0, dx: 0, dy: 0, lineDx: 0, lines: 0, hands: 0, set: '', rows: 0, markers: 0, drawn: new Map(), unmatchedFrames: 0, early: 0, clipped: 0, clipWhy: '', segs: 0, scrolled: 0, tops: [], inked: new WeakSet(), cutWord: '' };
       // The ink of one line of handwriting (a .lagrange-pen-seg), from the font's own measure of its glyphs, against
       // the box that uncovers it: a letter that reaches outside the box would be cut.
       const inkCheck = seg => {
@@ -203,7 +254,17 @@
             }
             const lefts = handLines(hand);
             seen.lines = Math.max(seen.lines, lefts.length);
-            if (lefts.length > 1) {
+            if (/:{3}/.test(hand.textContent)) seen.markers++;
+            if (c.aligned) {
+              // centred or right-aligned text: line for line where the note starts each of its own
+              const start = starts[Math.min(handNo, starts.length - 1)], at = cm.domAtPos(start);
+              const line = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
+              if (line) { const a = getComputedStyle(line).textAlign; seen.set = /center/.test(a) ? 'center' : /right|end/.test(a) ? 'right' : 'left'; }
+              const want = noteLines(cm, start, lefts.length);
+              seen.rows = Math.max(seen.rows, want.length);
+              if (want.length < lefts.length) seen.lineDx = Math.max(seen.lineDx, 999);
+              else if (ddx <= TOL && ddy <= TOL) for (let i = 1; i < lefts.length; i++) seen.lineDx = Math.max(seen.lineDx, Math.abs(lefts[i] - want[i]));
+            } else if (lefts.length > 1) {
               const at = cm.domAtPos(starts[Math.min(handNo, starts.length - 1)]);
               const line = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
               if (line) {
@@ -288,7 +349,9 @@
       if (expectText && !seen.frames && !c.loose) fail('no handwriting was seen');
       if (seen.dx > TOL) fail(`the handwriting begins ${seen.dx.toFixed(1)} px to the side of the text's first letter`);
       if (seen.dy > TOL) fail(`the handwriting's baseline is ${seen.dy.toFixed(1)} px off the text's`);
-      if (seen.lineDx > TOL) fail(`a later line of handwriting starts ${seen.lineDx.toFixed(1)} px from the note line's left edge`);
+      if (seen.lineDx > TOL) fail(c.aligned ? `a later line of handwriting starts ${seen.lineDx.toFixed(1)} px from where the note starts that line` : `a later line of handwriting starts ${seen.lineDx.toFixed(1)} px from the note line's left edge`);
+      if (c.aligned && seen.frames && seen.set !== c.aligned) fail(`the note sets this text ${seen.set || 'nowhere'}, not ${c.aligned}: are the Scriptorium plugin and its snippet on?`);
+      if (seen.markers) fail(`the handwriting wrote a marker line (in ${seen.markers} frames)`);
       if (c.lines && seen.lines < c.lines) fail(`the pen wrote ${seen.lines} line(s), not ${c.lines}`);
       if (c.math != null && !c.loose && drawn !== c.math) fail(`the pen drew on ${drawn} of the note's equations, not ${c.math}`);
       if (mdx > TOL) fail(`an equation was drawn ${mdx.toFixed(1)} px from where it rests`);
@@ -297,7 +360,7 @@
         const want = o.replace != null ? o.replace : o.text != null ? o.text : o.append;
         if (!c.loose && !cm.state.doc.toString().includes(want)) fail('the note does not hold the new text');
       }
-      if (document.querySelector('.lagrange-pen-unwritten, .lagrange-pen-revealing, .lagrange-pen-drawing')) fail('the pen left a mark on the note');
+      if (document.querySelector('.lagrange-pen-unwritten, [class*="lagrange-pen-revealing"], .lagrange-pen-drawing')) fail('the pen left a mark on the note');
       // one line at a time, and no letter cut
       Object.assign(out, { segs: seen.segs, early: seen.early, clipped: seen.clipped, reflowFrames: seen.reflow || 0 });
       if (seen.early) fail(`a later line of handwriting was visible before the pen came to it (in ${seen.early} frames)`);
@@ -340,6 +403,8 @@
     const fail = why => { out.ok = false; out.why.push(why); };
     try { await body(out, fail); } catch (e) { fail(String((e && e.stack) || e)); }
     plugin.settings.editWhileWriting = false;
+    plugin.settings.severalPens = true;
+    plugin.settings.maxPens = 3;
     out.why = out.why.join('; ');
     results.push(out);
     console.log(`${out.ok ? 'ok  ' : 'FAIL'} ${out.name}${out.why ? ': ' + out.why : ''}`);
@@ -479,6 +544,409 @@
     document.querySelectorAll('.notice').forEach(n => n.remove());
   });
 
+  /* ---- Several pens at once ---- */
+  // Four paragraphs of three or four lines each, and a short one: edits in different paragraphs stand well apart.
+  const MP = [
+    'Energy is never lost, only moved about: what a falling stone loses in height it gains in speed, and what it gains in speed it gives up, when it lands, as heat and sound and a dent in the ground. The books balance to the last farthing.',
+    'A body at rest stays at rest, and a body in motion keeps its motion, unless something acts on it; this much was known to Galileo, who rolled balls down smooth planes and saw that the smoother the plane, the farther they went, and guessed the rest.',
+    'The kinetic energy of a moving body grows with the square of its speed. Momentum is conserved. Nobody has yet caught the universe cheating, though many have tried, and a perpetual motion machine is a fraud before it is switched on.',
+    'A clock needs winding, and nothing that runs has ever run for nothing; jolly good, quipped the physicist, glancing gravely at the gauge, and went back to his sums, which came out as they always had.',
+  ];
+  const MULTI = ['# Pen position check', ...MP, 'The last paragraph of the note says little, and says it briefly.'].join('\n\n') + '\n';
+  const THREE = [
+    { find: 'what a falling stone loses in height it gains in speed', replace: 'what a falling stone gives up in height it wins back in speed' },
+    { find: 'this much was known to Galileo', replace: 'Galileo knew as much' },
+    { find: 'Momentum is conserved.', replace: 'Momentum, too, is conserved.' },
+  ];
+  const pensShown = () => Array.from(document.querySelectorAll('.lagrange-pen')).filter(p => p.style.display !== 'none').length;
+  // The ink of a hand that shows: the box around its words, equations and code that the pen has come to.
+  const inkBox = hand => {
+    const done = hand.classList.contains('is-done');
+    let box = null;
+    const add = r => { if (r.width < 0.5 || r.height < 0.5) return; box = box ? { left: Math.min(box.left, r.left), top: Math.min(box.top, r.top), right: Math.max(box.right, r.right), bottom: Math.max(box.bottom, r.bottom) } : { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; };
+    for (const seg of hand.querySelectorAll('.lagrange-pen-seg')) {
+      if (!done && !seg.classList.contains('is-writing') && !seg.classList.contains('is-written')) continue;
+      const r = document.createRange();
+      r.selectNodeContents(seg);
+      for (const q of r.getClientRects()) add(q);
+    }
+    for (const el of hand.querySelectorAll('.lagrange-pen-math, .lagrange-pen-code')) if (done || el.classList.contains('is-on')) add(el.getBoundingClientRect());
+    return box;
+  };
+  /* Runs ops on `note` (Live Preview) and watches every frame. o: {several (default true), pens (the setting), scroll,
+     during(cm): called once two pens are out}. -> what was seen: {text, ms, pens (the most at once), hands, lanes (what
+     the rule gives for these edits on this page), perHand: [{edit, dx, dy, frames, reflow}], meets (frames in which two
+     hands' ink met), gap (the least clear height between two hands' ink, px), endJump, res}. */
+  const penRun = async (note, ops, o) => {
+    o = o || {};
+    plugin.settings.severalPens = o.several !== false;
+    plugin.settings.maxPens = o.pens || 3;
+    await leaf.openFile(file, { state: { mode: 'source', source: false } });
+    leaf.view.editor.setValue(note);
+    await sleep(options.settle || 500);
+    leaf.view.editor.setCursor(0, 0);
+    leaf.view.editor.cm.scrollDOM.scrollTop = 0;
+    await sleep(options.settle || 500);
+    const view = leaf.view, cm = view.editor.cm;
+    const parsed = L.parseAgentReply('```lagrange-edits\n' + JSON.stringify(ops) + '\n```').ops;
+    const now = L.locateOps(cm.state.doc.toString(), parsed);
+    if (now.skipped.length || now.located.length !== ops.length) throw new Error('the edits could not be located: ' + JSON.stringify(now.skipped));
+    // what the rule gives for these edits here (the note is scrolled as the run would scroll it)
+    const lanes = o.several === false ? null : await L.penWave(cm, now.located.map(e => ({ from: e.from, to: e.to, replace: e.replace })), plugin.settings.maxPens, () => true);
+    await sleep(200);
+    const inks = now.located.map(e => e.replace.slice(L.inkOffset(e.replace)).replace(/^\s+/, '').slice(0, 24));
+    const seen = { pens: 0, hands: 0, meets: 0, gap: Infinity, tops: [], frames: 0, scrolled: 0, typewriter: 0, drawing: 0, long: 0, strokes: 0, strokeOff: 0, strokeRun: 0, moved: 0, y0: null };
+    const recs = new Map(), perHand = [];
+    const settle = rec => { const run = rec.off.splice(0); if (run.length <= 3) rec.reflow += run.length; else for (const [a, b] of run) { rec.dx = Math.max(rec.dx, a); rec.dy = Math.max(rec.dy, b); } };
+    let on = true, called = false, last = performance.now();
+    const sample = () => {
+      if (!on) return;
+      const t = performance.now();
+      if (t - last > 34) seen.long++;
+      last = t;
+      seen.frames++;
+      const doc = cm.state.doc.toString();
+      const hands = Array.from(document.querySelectorAll('.lagrange-pen-hand')).filter(h => getComputedStyle(h).opacity === '1');
+      seen.pens = Math.max(seen.pens, pensShown());
+      seen.hands = Math.max(seen.hands, hands.length);
+      if (Array.from(document.querySelectorAll('.lagrange-typewriter')).some(p => p.style.display !== 'none')) seen.typewriter++;
+      if (document.querySelector('.lagrange-pen-drawing')) seen.drawing++;
+      const boxes = [];
+      for (const hand of hands) {
+        let rec = recs.get(hand);
+        if (!rec) { rec = { edit: -1, dx: 0, dy: 0, frames: 0, reflow: 0, off: [] }; recs.set(hand, rec); perHand.push(rec); }
+        const h = handStart(hand);
+        // the edit whose text this hand is on: the nearest of those now in the note
+        let best = null;
+        if (h) inks.forEach((ink, i) => {
+          const p = ink ? doc.indexOf(ink) : -1, g = p >= 0 ? glyphAt(cm, p) : null;
+          if (!g) return;
+          const d = Math.hypot(h.x - g.x, h.baseline - g.baseline);
+          if (!best || d < best.d) best = { i, d, ddx: Math.abs(h.x - g.x), ddy: Math.abs(h.baseline - g.baseline) };
+        });
+        if (best) {
+          rec.frames++;
+          if (rec.edit < 0) rec.edit = best.i;
+          if (best.ddx > TOL || best.ddy > TOL) rec.off.push([best.ddx, best.ddy]);
+          else { settle(rec); rec.dx = Math.max(rec.dx, best.ddx); rec.dy = Math.max(rec.dy, best.ddy); }
+        }
+        const b = inkBox(hand);
+        if (b) boxes.push(b);
+      }
+      for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j];
+        const clear = Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom), side = Math.max(a.left, b.left) - Math.min(a.right, b.right);
+        if (clear < 0 && side < 0) seen.meets++;
+        seen.gap = Math.min(seen.gap, clear);
+      }
+      // The strokes that strike words out lie on those words, wherever the note has moved them to (another pen's
+      // edit above pushes them down): the middle of each stroke is in one of the struck lines. Up to three frames in
+      // a row off them are let pass, as a reflow.
+      const gone = Array.from(cm.contentDOM.querySelectorAll('.lagrange-pen-gone')).flatMap(el => Array.from(el.getClientRects()));
+      let off = 0;
+      if (gone.length) for (const p of document.querySelectorAll('.lagrange-pen-strike path')) {
+        const r = p.getBoundingClientRect(), y = (r.top + r.bottom) / 2;
+        if (p.style.opacity === '0' || r.width < 2) continue;
+        seen.strokes++;
+        if (!gone.some(g => y >= g.top - 1 && y <= g.bottom + 1 && r.left >= g.left - 8 && r.left <= g.right + 8)) off++;
+      }
+      seen.strokeRun = off ? seen.strokeRun + 1 : 0;
+      if (seen.strokeRun > 3) seen.strokeOff++;
+      // how far the last edit's text has been pushed down the page since the pens set out (what is above it grew)
+      if (o.watch) {
+        const p = doc.indexOf(o.watch), c = p >= 0 ? cm.coordsAtPos(p, 1) : null;
+        if (c) { const y = c.top + cm.scrollDOM.scrollTop; if (seen.y0 === null) seen.y0 = y; seen.moved = Math.max(seen.moved, y - seen.y0); }
+      }
+      // (the note is scrolled down by three lines and back again, over 0.8 s from the first hand's appearing: by the
+      // clock, so that a slow machine scrolls as far in fewer frames)
+      if (o.scroll && hands.length && !seen.back) {
+        if (seen.s0 == null) { seen.s0 = t; seen.base = cm.scrollDOM.scrollTop; }
+        const u = (t - seen.s0) / 800;
+        cm.scrollDOM.scrollTop = seen.base + (u < 1 ? Math.round(96 * (1 - Math.abs(2 * u - 1))) : 0);
+        if (u < 1) seen.scrolled++; else seen.back = true;
+      }
+      if (o.during && !called && seen.pens >= 2 && document.querySelector('.lagrange-pen-seg.is-writing')) { called = true; try { o.during(cm); } catch (e) { console.error(e); } }
+      seen.tops.push(cm.scrollDOM.scrollTop);
+      const y = textAt();
+      if (y !== null) seen.textY = y;
+      setTimeout(() => requestAnimationFrame(sample), 0);
+    };
+    // where the text last written (the last edit's, in the order of the note) stands in the window
+    const textAt = () => {
+      const ink = inks[inks.length - 1], p = ink ? cm.state.doc.toString().indexOf(ink) : -1, c = p >= 0 ? cm.coordsAtPos(p, 1) : null;
+      return c ? c.top : null;
+    };
+    requestAnimationFrame(sample);
+    const t0 = performance.now();
+    const res = await plugin.applyEdits(view, now.located, now.skipped, null, null);
+    const ms = Math.round(performance.now() - t0);
+    const endTop = cm.scrollDOM.scrollTop, lastTop = seen.tops.length ? seen.tops[seen.tops.length - 1] : endTop, endY = textAt();
+    await frame(); await frame();
+    const nextTop = cm.scrollDOM.scrollTop, nextY = textAt();
+    await sleep(700);
+    on = false;
+    for (const rec of perHand) { settle(rec); delete rec.off; }
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+    const restTop = cm.scrollDOM.scrollTop, restY = textAt();
+    return {
+      // (the text last written has not moved in the window: where the editor comes to know the height of something
+      // above it better as the run ends, the scroll offset has to change for the text to stay, see the cases above)
+      endMove: seen.textY == null || restY == null ? null : +Math.max(Math.abs((endY == null ? restY : endY) - seen.textY), Math.abs((nextY == null ? restY : nextY) - seen.textY), Math.abs(restY - seen.textY)).toFixed(1),
+      cm, res, ms, lanes, perHand, text: cm.state.doc.toString(), pens: seen.pens, hands: seen.hands, meets: seen.meets, gap: seen.gap, frames: seen.frames, long: seen.long,
+      scrolled: seen.scrolled, typewriter: seen.typewriter, drawing: seen.drawing, strokes: seen.strokes, strokeOff: seen.strokeOff, moved: seen.moved,
+      endJump: +Math.max(Math.abs(endTop - lastTop), Math.abs(nextTop - lastTop), Math.abs(restTop - lastTop)).toFixed(1),
+      left: document.querySelectorAll('.lagrange-pen-hand, .lagrange-pen-unwritten, .lagrange-pen-gone, .lagrange-pen-drawing, [class*="lagrange-pen-revealing"]').length,
+    };
+  };
+  // What every run of several pens must show, whatever it writes.
+  const penChecks = (r, n, ops, out, fail) => {
+    Object.assign(out, { pens: r.pens, lanes: r.lanes ? r.lanes.map(l => l.length).join('+') : '', ms: r.ms, frames: r.frames, longFrames: r.long, gap: r.gap === Infinity ? null : +r.gap.toFixed(1), endJump: r.endJump, endMove: r.endMove,
+      dx: +Math.max(0, ...r.perHand.map(h => h.dx)).toFixed(2), dy: +Math.max(0, ...r.perHand.map(h => h.dy)).toFixed(2), reflowFrames: r.perHand.reduce((a, h) => a + h.reflow, 0) });
+    if (!r.lanes || r.lanes.length !== n) fail(`the rule gives ${r.lanes ? r.lanes.length : 0} pen(s) for these edits on this page, not ${n}: is the window too small? (the harness is made for an editor about 680 px high and 460 px wide)`);
+    if (r.pens !== n) fail(`${r.pens} pen(s) were out at once, not ${n}`);
+    if (r.res.applied.length !== ops.length || r.res.skipped.length) fail(`${r.res.applied.length} edits made, ${r.res.skipped.length} skipped`);
+    const hands = r.perHand.filter(h => h.frames);
+    if (hands.length < ops.length) fail(`handwriting was seen on its text for ${hands.length} of ${ops.length} edits`);
+    if (new Set(hands.map(h => h.edit)).size < Math.min(hands.length, ops.length)) fail('two pens wrote on the same text');
+    for (const h of hands) {
+      if (h.dx > TOL) fail(`the handwriting of edit ${h.edit + 1} begins ${h.dx.toFixed(1)} px to the side of its text's first letter`);
+      if (h.dy > TOL) fail(`the baseline of edit ${h.edit + 1}'s handwriting is ${h.dy.toFixed(1)} px off its text's`);
+    }
+    if (r.meets) fail(`two pens' handwriting met (in ${r.meets} frames)`);
+    if (r.strokeOff) fail(`a stroke that strikes words out was off its words (in ${r.strokeOff} frames)`);
+    if (r.left) fail('the pens left a mark on the note');
+    if (r.endMove != null ? r.endMove > 1 : r.endJump > 1) fail(`the view moved when the run ended: the text last written by ${r.endMove} px, the scroll offset by ${r.endJump} px`);
+  };
+  const afterThree = t => t.replace(THREE[0].find, THREE[0].replace).replace(THREE[1].find, THREE[1].replace).replace(THREE[2].find, THREE[2].replace);
+
+  await extra('several pens: three pens: three edits in three paragraphs are written at once, each hand on its own text, and the note is what one pen leaves, sooner', async (out, fail) => {
+    const r = await penRun(MULTI, THREE);
+    penChecks(r, 3, THREE, out, fail);
+    if (r.hands < 2) fail('no two hands were on the page at the same time');
+    const one = await penRun(MULTI, THREE, { several: false });
+    Object.assign(out, { msOnePen: one.ms });
+    if (one.pens !== 1) fail(`with “Several pens at once” off, ${one.pens} pens were out`);
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+    if (r.text !== afterThree(MULTI)) fail('the note does not hold the three edits');
+    if (!(r.ms < one.ms)) fail(`three pens took ${r.ms} ms, one pen ${one.ms} ms`);
+  });
+
+  await extra('several pens: two pens: two edits in two paragraphs; and three edits with “Pens at most” at 2 (the third waits its turn)', async (out, fail) => {
+    const two = THREE.slice(0, 2);
+    const r = await penRun(MULTI, two);
+    penChecks(r, 2, two, out, fail);
+    const one = await penRun(MULTI, two, { several: false });
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+    if (!(r.ms < one.ms)) fail(`two pens took ${r.ms} ms, one pen ${one.ms} ms`);
+    Object.assign(out, { msOnePen: one.ms });
+    const capped = await penRun(MULTI, THREE, { pens: 2 });
+    out.capped = capped.pens;
+    if (capped.pens !== 2) fail(`with “Pens at most” at 2, ${capped.pens} pens were out at once`);
+    if (capped.text !== afterThree(MULTI)) fail('with “Pens at most” at 2, the note does not hold the three edits');
+    if (capped.meets) fail('with “Pens at most” at 2, two pens’ handwriting met');
+  });
+
+  await extra('several pens: one pen where the edits are too near: two in one paragraph, and one in the very next line', async (out, fail) => {
+    const NEAR = ['# Pen position check', MP[0], 'A short line.\nAnother short line, right under it.\nAnd a third.', MP[2]].join('\n\n') + '\n';
+    const samePara = [{ find: 'A body at rest stays at rest', replace: 'What is still stays still' }, { find: 'and guessed the rest.', replace: 'and guessed what remained.' }];
+    const a = await penRun(MULTI, samePara);
+    Object.assign(out, { pens: a.pens, lanes: a.lanes ? a.lanes.length : 0, ms: a.ms });
+    if (a.lanes) fail('the rule gives several pens to two edits in one paragraph');
+    if (a.pens !== 1) fail(`${a.pens} pens were out for two edits in one paragraph`);
+    if (a.text !== MULTI.replace(samePara[0].find, samePara[0].replace).replace(samePara[1].find, samePara[1].replace)) fail('the note does not hold the two edits');
+    const nextLine = [{ find: 'A short line.', replace: 'A short line, rewritten.' }, { find: 'Another short line, right under it.', replace: 'Another, right under it.' }, { find: 'And a third.', replace: 'And a third, too.' }];
+    const b = await penRun(NEAR, nextLine);
+    out.pensNextLine = b.pens;
+    if (b.lanes) fail('the rule gives several pens to edits in lines that follow one another');
+    if (b.pens !== 1) fail(`${b.pens} pens were out for edits in lines that follow one another`);
+    if (b.res.applied.length !== 3) fail('the three edits were not all made');
+    if (a.meets || b.meets) fail('handwriting met');
+  });
+
+  await extra('several pens: two pens and a wait: two edits in one paragraph go to one pen, in turn, while another pen writes further down', async (out, fail) => {
+    const ops = [{ find: 'A body at rest stays at rest', replace: 'What is still stays still' }, { find: 'and guessed the rest.', replace: 'and guessed what remained.' }, { find: 'jolly good, quipped the physicist', replace: 'very well, said the physicist' }];
+    const r = await penRun(MULTI, ops);
+    penChecks(r, 2, ops, out, fail);
+    if (!r.lanes || r.lanes.map(l => l.length).join('+') !== '2+1') fail(`the lanes are ${r.lanes ? r.lanes.map(l => l.length).join('+') : 'none'}, not 2+1`);
+    const one = await penRun(MULTI, ops, { several: false });
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+  });
+
+  await extra('several pens: three pens, and the first puts two lines in above the others while they strike and write: strokes and hands go down with their words', async (out, fail) => {
+    const ops = [
+      { insert_after: 'Energy is never lost, only moved about:', text: ' nothing is ever paid out that was not first paid in, and the ledger of the world, kept since the beginning, has never once been found a penny short;' },
+      THREE[1], { find: 'Nobody has yet caught the universe cheating', replace: 'No one has yet caught the universe out' },
+    ];
+    const r = await penRun(MULTI, ops, { watch: 'Nobody has yet caught the universe cheating' });
+    penChecks(r, 3, ops, out, fail);
+    Object.assign(out, { strokes: r.strokes, moved: +r.moved.toFixed(1) });
+    if (!r.strokes) fail('no stroke was seen on struck words');
+    if (!(r.moved > 20)) fail(`the words below the first edit moved down by ${r.moved.toFixed(1)} px only: the case shows nothing`);
+    const one = await penRun(MULTI, ops, { several: false });
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+  });
+
+  await extra('several pens: six edits over two screens are written in two rounds of three pens, with one scroll between them', async (out, fail) => {
+    const MORE = [
+      'Heat is motion that has lost its way: the stone that lands is still, but the ground it struck is a little warmer, and the air a little louder, than they were before it fell; nothing was mislaid.',
+      'A pendulum trades height for speed and speed for height, over and over, and would do so for ever if the air and the pivot took no toll; they do, and so the swings grow shorter by degrees.',
+      'Friction is no thief, only a spendthrift, turning the motion we can see into motion we cannot; the sum never changes, and a careful enough accountant can always find the missing part.',
+      'So the oldest rule of the workshop, that nothing is to be had for nothing, turned out to be a law of nature, and the dream of an engine that feeds itself was put away with the rest.',
+    ];
+    const LONG6 = ['# Pen position check', ...MP, 'A short paragraph stands between the two halves of the note.', ...MORE, filler(4), 'The last paragraph of the note says little, and says it briefly.'].join('\n\n') + '\n';
+    const ops = THREE.concat([
+      { find: 'they do, and so the swings grow shorter by degrees', replace: 'they do, and the swings die away' },
+      { find: 'only a spendthrift', replace: 'only a spender' },
+      { find: 'was put away with the rest', replace: 'was laid to rest' },
+    ]);
+    const r = await penRun(LONG6, ops);
+    penChecks(r, 3, ops, out, fail);
+    out.hands = r.perHand.filter(h => h.frames).length;
+    const one = await penRun(LONG6, ops, { several: false });
+    Object.assign(out, { msOnePen: one.ms });
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+    if (!(r.ms < one.ms)) fail(`the pens took ${r.ms} ms, one pen ${one.ms} ms`);
+    const cm = r.cm, at = cm.coordsAtPos(cm.state.doc.toString().indexOf('was laid to rest'), 1), sr = cm.scrollDOM.getBoundingClientRect();
+    if (!at || at.top < sr.top - 1 || at.bottom > sr.bottom + 1) fail('the last text written is not in view when the run ends');
+  });
+
+  await extra('several pens: one pen, then two: an edit that stands alone, then two far below it that are in view together; the view at the end is the view that was watched', async (out, fail) => {
+    const r = await penRun(NOTE, OPS3);
+    const hands = r.perHand.filter(h => h.frames);
+    Object.assign(out, { pens: r.pens, ms: r.ms, hands: hands.length, endJump: r.endJump, endMove: r.endMove, dx: +Math.max(0, ...hands.map(h => h.dx)).toFixed(2), dy: +Math.max(0, ...hands.map(h => h.dy)).toFixed(2), gap: r.gap === Infinity ? null : +r.gap.toFixed(1) });
+    if (r.lanes) fail('the rule gives several pens to edits that are not in view together');
+    if (r.pens > 2) fail(`${r.pens} pens were out at once`);
+    if (r.pens < 2) fail('the last two edits were not written at once: is the window too small? (they are some ten lines apart, at the end of the note)');
+    if (hands.length < 3) fail(`handwriting was seen on its text for ${hands.length} of 3 edits`);
+    for (const h of hands) if (h.dx > TOL || h.dy > TOL) fail(`the handwriting of edit ${h.edit + 1} is ${h.dx.toFixed(1)} px to the side of its text, ${h.dy.toFixed(1)} px off its baseline`);
+    if (r.meets) fail(`two pens' handwriting met (in ${r.meets} frames)`);
+    if (r.left) fail('the pens left a mark on the note');
+    // (the first edit's paragraph is far above by then, and the editor only guesses at its height when the run is
+    // made one undo step: the scroll offset may change by a line for the text in view to stay where it is)
+    if (r.endMove == null || r.endMove > 1) fail(`the text last written moved by ${r.endMove} px when the run ended (the scroll offset by ${r.endJump} px)`);
+    if (!same(r.text, afterOps(NOTE))) fail('the note does not hold the three edits');
+    const cm = r.cm, at = cm.coordsAtPos(cm.state.doc.toString().indexOf('An appended closing remark.'), 1), sr = cm.scrollDOM.getBoundingClientRect();
+    if (!at || at.top < sr.top - 1 || at.bottom > sr.bottom + 1) fail('the last text written is not in view when the run ends');
+    const one = await penRun(NOTE, OPS3, { several: false });
+    Object.assign(out, { msOnePen: one.ms });
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+    if (one.pens !== 1) fail(`with “Several pens at once” off, ${one.pens} pens were out`);
+  });
+
+  await extra('several pens: three pens, the note scrolled while they write: every hand stays on its text', async (out, fail) => {
+    const r = await penRun(MULTI, THREE, { scroll: true });
+    penChecks(r, 3, THREE, out, fail);
+    out.scrolled = r.scrolled;
+    if (r.scrolled < 10) fail(`the note was scrolled for ${r.scrolled} frames only`);
+    if (r.text !== afterThree(MULTI)) fail('the note does not hold the three edits');
+  });
+
+  await extra('several pens: three pens: prose, an equation and code are written at once (the pen, the note’s own equation, the typewriter)', async (out, fail) => {
+    const ops = [THREE[0], { find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }, { find: 'and went back to his sums', replace: 'and went back to `sum(forces)`' }];
+    const NOTE3 = ['# Pen position check', MP[0], MP[2], MP[3], MP[1]].join('\n\n') + '\n';
+    const r = await penRun(NOTE3, ops);
+    penChecks(r, 3, ops, out, fail);
+    Object.assign(out, { typewriter: r.typewriter, drawing: r.drawing });
+    if (!r.typewriter) fail('the typewriter was not seen');
+    if (!r.drawing) fail('the note’s equation was not drawn');
+    const one = await penRun(NOTE3, ops, { several: false });
+    if (r.text !== one.text) fail('the note is not what one pen leaves');
+  });
+
+  // Opens MULTI with the cursor after `caret`, starts a run of THREE and resolves when three pens are out and writing.
+  const beginThree = async caret => {
+    plugin.settings.severalPens = true;
+    plugin.settings.maxPens = 3;
+    await leaf.openFile(file, { state: { mode: 'source', source: false } });
+    leaf.view.editor.setValue(MULTI);
+    await sleep(options.settle || 500);
+    const ed = leaf.view.editor, cm = ed.cm;
+    ed.focus();
+    ed.setCursor(ed.offsetToPos(MULTI.indexOf(caret) + caret.length));
+    await sleep(300);
+    const parsed = L.parseAgentReply('```lagrange-edits\n' + JSON.stringify(THREE) + '\n```').ops;
+    const now = L.locateOps(cm.state.doc.toString(), parsed);
+    const run = plugin.applyEdits(leaf.view, now.located, now.skipped, null, null);
+    let pens = 0;
+    for (let i = 0; i < 900 && !(pensShown() >= 3 && document.querySelector('.lagrange-pen-seg.is-writing')); i++) { await frame(); pens = Math.max(pens, pensShown()); }
+    return { ed, cm, run, pens: Math.max(pens, pensShown()) };
+  };
+
+  await extra('several pens: three pens, a key in the note: every pen stops, the note is as an uninterrupted run leaves it, then the key lands; one undo step', async (out, fail) => {
+    const caret = 'says it briefly.';
+    const { ed, cm, run, pens } = await beginThree(caret);
+    out.pens = pens;
+    if (pens !== 3) fail(`${pens} pens were out when the key was pressed, not 3`);
+    cm.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', bubbles: true, cancelable: true }));
+    if (cm.state.doc.toString() !== afterThree(MULTI)) fail('the note is not what an uninterrupted run leaves, right after the key');
+    if (overlays() || penShown()) fail('a pen or its handwriting is still on the page right after the key');
+    if (document.querySelector('[class*="lagrange-pen-revealing"]')) fail('the editor is still marked as showing a pen’s text');
+    cm.dispatch(cm.state.replaceSelection('X'), { userEvent: 'input.type' });   // what the key then does
+    const res = await run;
+    await sleep(300);
+    const want = afterThree(MULTI).replace(caret, caret + 'X');
+    if (cm.state.doc.toString() !== want) fail('the key did not land at the cursor, after the edits');
+    if (res.ended !== 'key' || res.applied.length !== 3 || res.skipped.length) fail(`the run reports ended=${res.ended}, ${res.applied.length} made, ${res.skipped.length} skipped`);
+    const rec = plugin.edits[plugin.edits.length - 1];
+    plugin.undoEdit(rec);
+    await sleep(150);
+    if (cm.state.doc.toString() !== MULTI.replace(caret, caret + 'X')) fail('Undo did not take back exactly the run');
+    plugin.redoEdit(rec);
+    await sleep(150);
+    if (cm.state.doc.toString() !== want) fail('Redo did not make the run again');
+    // and the editor's own undo: Lagrange's Redo, then its Undo, then the key, then the run, which is one step
+    for (let i = 0; i < 4; i++) ed.undo();
+    await sleep(150);
+    if (cm.state.doc.toString() !== MULTI) fail('the run is not one step of the editor’s own undo');
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('several pens: three pens, a click in the note: every pen stops, every edit is made, and the text under the pointer has not moved', async (out, fail) => {
+    const { cm, run, pens } = await beginThree('# Pen position check');
+    out.pens = pens;
+    const word = 'says little';
+    const at = cm.coordsAtPos(cm.state.doc.toString().indexOf(word) + 5, 1);
+    if (!at) throw new Error('the word to click is not on screen');
+    const x = at.left, y = (at.top + at.bottom) / 2, el = document.elementFromPoint(x, y) || cm.contentDOM;
+    const init = { clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+    el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, isPrimary: true }, init)));
+    if (cm.state.doc.toString() !== afterThree(MULTI)) fail('the note is not what an uninterrupted run leaves, right after the pointer went down');
+    if (overlays() || penShown()) fail('a pen or its handwriting is still on the page right after the click');
+    const under = cm.posAtCoords({ x, y });
+    out.underPointer = cm.state.doc.toString().slice(under - 5, under + 6);
+    if (out.underPointer !== word) fail(`the text under the pointer moved: now “${out.underPointer}”`);
+    el.dispatchEvent(new MouseEvent('mousedown', init));
+    el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, init, { buttons: 0 })));
+    const res = await run;
+    await sleep(200);
+    if (res.ended !== 'click' || res.applied.length !== 3) fail(`the run reports ended=${res.ended}, ${res.applied.length} made`);
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('several pens: three pens and “Let me edit while the pen writes”: typing above them all goes in at once, the pens go on, and Undo takes back theirs alone', async (out, fail) => {
+    plugin.settings.editWhileWriting = true;
+    const { cm, run, pens } = await beginThree('says it briefly.');
+    out.pens = pens;
+    for (const ch of ' Typed meanwhile.') { cm.dispatch(cm.state.replaceSelection(ch), { userEvent: 'input.type' }); await sleep(30); }
+    // and a line at the very top, so that every pen's text moves down under it
+    cm.dispatch({ changes: { from: 0, to: 0, insert: 'A line typed at the very top.\n\n' }, userEvent: 'input.type' });
+    await sleep(120);
+    const stillWriting = Boolean(document.querySelector('.lagrange-pen-hand')) || penShown();
+    const res = await run;
+    await sleep(500);
+    if (!stillWriting) fail('the pens stopped');
+    if (res.ended) fail(`the run was ended (${res.ended})`);
+    const typed = t => 'A line typed at the very top.\n\n' + t.replace('says it briefly.', 'says it briefly. Typed meanwhile.');
+    if (cm.state.doc.toString() !== typed(afterThree(MULTI))) fail('the note does not hold both the typing and the three edits');
+    if (res.applied.length !== 3 || res.skipped.length || !res.touched) fail(`the run reports ${res.applied.length} made, ${res.skipped.length} skipped, touched=${res.touched}`);
+    if (overlays()) fail('the pens left a mark on the note');
+    const rec = plugin.edits[plugin.edits.length - 1];
+    plugin.undoEdit(rec);
+    await sleep(150);
+    if (cm.state.doc.toString() !== typed(MULTI)) fail('Undo did not take back exactly Lagrange’s edits');
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
   await extra('the chat’s log keeps to its bottom when a message is sent and while the loader shows', async (out, fail) => {
     plugin.settings.provider = 'demo';
     const chat = await plugin.activateView(false);
@@ -559,6 +1027,8 @@
   });
 
   plugin.settings.penSpeed = saved.speed;
+  plugin.settings.severalPens = saved.several;
+  plugin.settings.maxPens = saved.max;
   plugin.settings.editWhileWriting = saved.concurrent;
   plugin.settings.provider = saved.provider;
   plugin.settings.showPen = saved.pen;

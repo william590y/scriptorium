@@ -42,6 +42,7 @@ The Typewriter theme and manuscript CSS snippet are enabled in the configuration
 - `## Chapter heading` creates a centered small-cap chapter heading.
 - `### Section heading` creates a smaller section heading.
 - `> Quotation` creates an italic quotation.
+- `::: center` and `:::` on lines of their own, around some lines, centre them (verse, an epigraph); `::: right` sets them to the right (a signature). Or select the text and run **Scriptorium: Centre selection**, **Right-align selection** or **Remove alignment**. Centred and right-aligned text has no drop cap unless you ask for one (`::: center dropcap`).
 - `---` creates an ornamental scene break.
 - `[^1]` with `[^1]: The note.` creates a footnote, set in the margin in Reading view when there is room.
 - `> [!margin]` followed by `> Text` creates an unnumbered marginal note beside the paragraph that follows it.

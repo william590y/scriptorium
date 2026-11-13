@@ -715,3 +715,226 @@ test('a family that is there but draws upright text leaning is reported; a famil
   assert.equal(S.uprightMissing(doc([], []), 'Cormorant Garamond'), null, 'not installed at all: nothing to say');
   assert.equal(S.uprightMissing({ createElement: () => { throw new Error('no canvas'); } }, 'EB Garamond'), null);
 });
+
+/* ---------- centred and right-aligned text ---------- */
+
+const VERSE = ['Tyger Tyger, burning bright,', 'In the forests of the night;'];
+const PROSE = 'The chapter begins here, in prose.';
+const plan = text => S.alignPlan(text.split('\n'));
+const marks = (text, from, to) => S.sectionMarks(plan(text), from, to === undefined ? from : to);
+
+test('aligned text: the marker lines are read, in Pandoc’s forms too, and nothing else is one', () => {
+  for (const [line, want] of [
+    ['::: center', { align: 'center', dropcap: false }], [':::center', { align: 'center', dropcap: false }], ['::: centre', { align: 'center', dropcap: false }],
+    ['::: Centered', { align: 'center', dropcap: false }], [':::: right', { align: 'right', dropcap: false }], ['  ::: right  ', { align: 'right', dropcap: false }],
+    ['::: center dropcap', { align: 'center', dropcap: true }], ['::: right drop-cap', { align: 'right', dropcap: true }],
+    ['::: {.center}', { align: 'center', dropcap: false }], ['::: {.center .dropcap}', { align: 'center', dropcap: true }], ['::: center :::', { align: 'center', dropcap: false }],
+    [':::', { close: true }], ['::::: ', { close: true }],
+    ['::: note', null], ['::: rightly so', null], ['::: right-hand', null], [':: center', null], ['text ::: center', null], ['    ::: center', null], ['', null],
+  ]) assert.deepEqual(S.alignMarker(line), want, JSON.stringify(line));
+  assert.equal(S.alignKind(' Centre '), 'center');
+  assert.equal(S.alignKind('left'), null);
+  assert.deepEqual(S.noteAlign({ align: 'Right', 'dropcap-aligned': true }), { align: 'right', dropcap: true });
+  assert.deepEqual(S.noteAlign({ align: 'justify', 'dropcap-aligned': 'no' }), { align: null, dropcap: false });
+  assert.deepEqual(S.noteAlign(null), { align: null, dropcap: false });
+});
+
+test('aligned text: a block runs from its opening marker to its closing one; a block that is not closed aligns nothing', () => {
+  const p = plan(['## Verse', '', '::: center', ...VERSE, ':::', '', '::: right', '— Blake', ':::', '', PROSE].join('\n'));
+  assert.deepEqual(p.ranges.map(r => [r.align, r.open, r.close]), [['center', 2, 5], ['right', 7, 9]]);
+  assert.equal(plan(['::: center', ...VERSE, '', PROSE].join('\n')).ranges.length, 0, 'never closed');
+  assert.equal(plan(['Some text', '::: center', ...VERSE, ':::'].join('\n')).ranges.length, 0, 'the opening marker is a line of the paragraph above it');
+  assert.equal(plan(['::: center', ...VERSE, ':::', 'more text'].join('\n')).ranges.length, 0, 'the closing marker has text against it');
+  assert.equal(plan(['# Title', '::: center', ...VERSE, ':::', '## Next'].join('\n')).ranges.length, 1, 'a heading may stand against either marker');
+  assert.deepEqual(plan(['::: center', 'one', '', '::: right', 'two', ':::'].join('\n')).ranges.map(r => [r.align, r.open, r.close]), [['right', 3, 5]], 'a second opening marker starts afresh');
+  assert.equal(plan(['```', '::: center', 'code', ':::', '```'].join('\n')).ranges.length, 0, 'markers in a code block are code');
+  assert.deepEqual(plan(['::: center', '```', ':::', '```', 'verse', ':::'].join('\n')).ranges.map(r => [r.open, r.close]), [[0, 5]], 'and a code block inside an aligned block is skipped');
+  assert.equal(plan(['::: note', 'text', ':::'].join('\n')).ranges.length, 0, 'another kind of container is not ours');
+  // the properties: where the note begins, and what they say
+  const fm = plan(['---', 'align: centre', 'dropcap-aligned: true', 'dropcap: goudy', '---', '::: right', '— Blake', ':::'].join('\n'));
+  assert.equal(fm.body, 5);
+  assert.deepEqual(fm.note, { align: 'center', dropcap: true });
+  assert.deepEqual(fm.ranges.map(r => [r.align, r.dropcap, r.own, r.open]), [['right', true, false, 5]], 'the first line after the properties starts a block; the note’s drop caps are the block’s');
+  assert.deepEqual(plan('---\nalign: "right"  # set to the right\n---\ntext').note, { align: 'right', dropcap: false });
+  assert.deepEqual(plan('align: center\n\ntext').note, { align: null, dropcap: false }, 'not in the properties: only a line of text');
+});
+
+test('aligned text: each block of the note gets its marks; the marker lines are not shown', () => {
+  const text = ['## Verse', '', '::: center', ...VERSE, '', ...VERSE, ':::', '', '::: right', '', '— Blake', '', ':::', '', PROSE].join('\n');
+  assert.equal(marks(text, 0), null, 'the heading');
+  assert.deepEqual(marks(text, 2, 4), { align: 'center', dropcap: false, first: true, last: false, fence: false, opens: false }, 'the first stanza, with the opening marker on it');
+  assert.deepEqual(marks(text, 6, 8), { align: 'center', dropcap: false, first: false, last: true, fence: false, opens: true }, 'the last stanza, with the closing marker on it');
+  assert.deepEqual(marks(text, 10), { align: 'right', dropcap: false, first: true, last: false, fence: true, opens: false }, 'a marker that is a paragraph of its own');
+  assert.deepEqual(marks(text, 12), { align: 'right', dropcap: false, first: false, last: false, fence: false, opens: false });
+  assert.deepEqual(marks(text, 14), { align: 'right', dropcap: false, first: false, last: true, fence: true, opens: true });
+  assert.equal(marks(text, 16), null, 'the prose after it');
+  assert.deepEqual(S.alignClasses(marks(text, 6, 8)), ['scriptorium-align', 'scriptorium-align-center', 'scriptorium-opens']);
+  assert.deepEqual(S.alignClasses(marks(text, 14)), ['scriptorium-align', 'scriptorium-align-right', 'scriptorium-align-fence', 'scriptorium-opens']);
+  assert.deepEqual(S.alignClasses(null), []);
+  // a note aligned as a whole: every block after the properties, and a block of its own alignment inside it
+  const whole = ['---', 'align: center', '---', 'One.', '', '::: right', 'Two.', ':::'].join('\n');
+  assert.equal(marks(whole, 0, 2), null);
+  assert.deepEqual(S.alignClasses(marks(whole, 3)), ['scriptorium-align', 'scriptorium-align-center']);
+  assert.deepEqual(S.alignClasses(marks(whole, 5, 7)), ['scriptorium-align', 'scriptorium-align-right']);
+});
+
+test('aligned text and drop caps: aligned blocks under a heading are passed over, and the first paragraph after them opens the chapter', () => {
+  const lead = text => plan(text).ranges.map(r => r.lead);
+  const block = (kind, ...lines) => [`::: ${kind}`, ...lines, ':::', ''];
+  assert.deepEqual(lead(['## Verse', '', ...block('center', ...VERSE), ...block('right', '— Blake'), PROSE].join('\n')), [true, true], 'a poem and the name under it');
+  assert.deepEqual(lead([...block('center', ...VERSE), PROSE].join('\n')), [true], 'at the top of a note');
+  assert.deepEqual(lead(['---', 'dropcap: goudy', '---', ...block('center', ...VERSE), PROSE].join('\n')), [false], 'not under properties, where the snippet opens no chapter either');
+  assert.deepEqual(lead(['###### Subtitle', ...block('center', ...VERSE)].join('\n')), [true]);
+  assert.deepEqual(lead(['### A smaller heading', '', ...block('center', ...VERSE)].join('\n')), [false], 'only where a chapter opens: headings 1, 2 and 6');
+  assert.deepEqual(lead(['Title', '=====', '', ...block('center', ...VERSE)].join('\n')), [true], 'a heading underlined');
+  assert.deepEqual(lead(['## Verse', '', PROSE, '', ...block('center', ...VERSE)].join('\n')), [false], 'after the opening paragraph');
+  assert.deepEqual(lead(['## Verse', '', '> An epigraph,', '> in prose.', '', ...block('right', '— Its author'), PROSE].join('\n')), [true], 'the name under an epigraph');
+  assert.deepEqual(lead(['## Verse', '', '> [!note]', '> A callout.', '', ...block('right', '— Its author')].join('\n')), [false], 'a callout is no epigraph');
+  assert.deepEqual(lead(['## Verse', '', '> One.', '', '> Two.', '', ...block('right', '— Its author')].join('\n')), [false], 'one quotation, not two');
+  assert.deepEqual(lead(['## Verse', '', '---', '', ...block('center', ...VERSE)].join('\n')), [false], 'a rule is not a heading');
+  // which block carries the mark: the last one of the run, whichever of its blocks holds the closing marker
+  const text = ['## Verse', '', ...block('center', ...VERSE), ...block('right', '— Blake'), PROSE].join('\n');
+  assert.equal(marks(text, 2, 5).opens, true);
+  assert.equal(marks(text, 7, 9).opens, true);
+  // suppression is by class: an aligned block has no .scriptorium-align-dropcap unless asked
+  assert.ok(!S.alignClasses(marks(text, 2, 5)).includes('scriptorium-align-dropcap'));
+});
+
+test('aligned text and drop caps: “dropcap” on a block, or “dropcap-aligned” on the note, asks for the drop cap; the paragraph after it then has none', () => {
+  const block = (open, ...lines) => [open, ...lines, ':::', ''];
+  const own = ['## Verse', '', ...block('::: center dropcap', ...VERSE), PROSE].join('\n');
+  assert.deepEqual(plan(own).ranges.map(r => [r.dropcap, r.own, r.lead]), [[true, true, true]]);
+  assert.deepEqual(S.alignClasses(marks(own, 2, 5)), ['scriptorium-align', 'scriptorium-align-center', 'scriptorium-align-dropcap'], 'it is the opening paragraph itself: nothing opens after it');
+  // its marker on a paragraph of its own: that (unseen) block is what the opening paragraph follows
+  const apart = ['## Verse', '', '::: center dropcap', '', ...VERSE, '', ':::', '', PROSE].join('\n');
+  assert.deepEqual(S.alignClasses(marks(apart, 2)), ['scriptorium-align', 'scriptorium-align-center', 'scriptorium-align-dropcap', 'scriptorium-align-fence', 'scriptorium-opens']);
+  assert.equal(marks(apart, 4, 5).opens, false);
+  assert.equal(marks(apart, 7).opens, false, 'the prose after it is not the opening');
+  // after a block that keeps its drop cap, the next aligned block is not at the opening either
+  const two = ['## Verse', '', ...block('::: center dropcap', ...VERSE), ...block('::: right', '— Blake'), PROSE].join('\n');
+  assert.deepEqual(plan(two).ranges.map(r => r.lead), [true, false]);
+  // a block without a drop cap first, then one with: the second is the opening
+  const then = ['## Verse', '', ...block('::: right', '— A dedication'), ...block('::: center dropcap', ...VERSE), PROSE].join('\n');
+  assert.deepEqual(plan(then).ranges.map(r => [r.lead, r.dropcap]), [[true, false], [true, true]]);
+  assert.equal(marks(then, 2, 4).opens, true);
+  assert.equal(marks(then, 6, 9).opens, false);
+  // the whole note
+  const note = ['---', 'dropcap-aligned: true', '---', '## Verse', '', ...block('::: center', ...VERSE), PROSE].join('\n');
+  assert.deepEqual(plan(note).ranges.map(r => [r.dropcap, r.own]), [[true, false]]);
+  assert.ok(S.alignClasses(marks(note, 5, 8)).includes('scriptorium-align-dropcap'));
+  assert.ok(!S.alignClasses(marks(note, 5, 8)).includes('scriptorium-opens'));
+});
+
+test('aligned text: a page rendered all at once (Export to PDF) is read from its blocks', () => {
+  assert.deepEqual(S.blockLines('H2', 'The Tyger'), ['## The Tyger']);
+  assert.deepEqual(S.blockLines('DIV', 'Of Gardens', true), ['# Of Gardens']);
+  assert.deepEqual(S.blockLines('P', '::: center\nTyger Tyger\n:::\n'), ['::: center', 'Tyger Tyger', ':::']);
+  assert.deepEqual(S.blockLines('BLOCKQUOTE', 'An epigraph,\nin prose.'), ['> An epigraph,', '> in prose.']);
+  assert.deepEqual(S.blockLines('PRE', '::: center\ncode\n:::'), ['<pre>'], 'code is never read for markers');
+  assert.deepEqual(S.blockLines('HR', ''), ['<hr>']);
+  const p = text => ({ tag: 'P', text });
+  const page = [{ tag: 'DIV', text: 'Of Tygers', title: true }, p('::: center\nTyger Tyger, burning bright,\nIn the forests of the night;'), p('What immortal hand or eye,\nCould frame thy fearful symmetry?\n:::'),
+    p('::: right\n— Blake\n:::'), p(PROSE), p('::: center dropcap'), p('Verse again.'), p(':::'), { tag: 'PRE', text: ':::' }];
+  const got = S.blockMarks(page).map(m => S.alignClasses(m).join(' ').replace(/scriptorium-/g, ''));
+  assert.deepEqual(got, ['', 'align align-center', 'align align-center opens', 'align align-right opens', '',
+    'align align-center align-dropcap align-fence', 'align align-center align-dropcap', 'align align-center align-dropcap align-fence', '']);
+  const m = S.blockMarks(page);
+  assert.deepEqual([m[1].first, m[1].last, m[2].first, m[2].last, m[3].first, m[3].last], [true, false, false, true, true, true]);
+  // the note's own alignment comes with the page (its properties are not on it)
+  assert.deepEqual(S.blockMarks([p('One.'), { tag: 'H2', text: 'Two' }], { align: 'right', dropcap: false }).map(x => x.align), ['right', 'right']);
+  assert.deepEqual(S.blockMarks([p('One.')]), [null]);
+});
+
+test('aligned text: marks are classes on the block, set and taken away again', () => {
+  const classes = new Set(['el-p']);
+  const el = { tagName: 'DIV', firstElementChild: null, textContent: '', classList: { contains: c => classes.has(c), toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) } };
+  assert.equal(S.markAligned(el, { align: 'center', dropcap: false, first: false, last: true, fence: false, opens: true }), true);
+  assert.deepEqual([...classes].sort(), ['el-p', 'scriptorium-align', 'scriptorium-align-center', 'scriptorium-opens']);
+  assert.equal(S.markAligned(el, { align: 'center', dropcap: false, first: false, last: true, fence: false, opens: true }), false, 'nothing changed');
+  assert.equal(S.markAligned(el, { align: 'right', dropcap: true, first: false, last: false, fence: false, opens: false }), true);
+  assert.deepEqual([...classes].sort(), ['el-p', 'scriptorium-align', 'scriptorium-align-dropcap', 'scriptorium-align-right']);
+  assert.equal(S.markAligned(el, null), true);
+  assert.deepEqual([...classes], ['el-p']);
+});
+
+test('aligned text: the commands put the selection’s paragraphs between markers, change them, and take them out again exactly', () => {
+  const note = ['---', 'dropcap: goudy', '---', '## Verse', 'Tyger Tyger, burning bright,', 'In the forests of the night;', '', 'What immortal hand or eye,', 'Could frame thy fearful symmetry?', '', PROSE, ''];
+  const run = (lines, from, to, kind) => S.applyLineEdits(lines, S.alignEdits(lines, from, to, kind));
+  // the cursor in a paragraph: the whole paragraph, and no further than the heading above it
+  const one = run(note, 5, 5, 'center');
+  assert.deepEqual(one.slice(3, 9), ['## Verse', '::: center', 'Tyger Tyger, burning bright,', 'In the forests of the night;', ':::', '']);
+  assert.deepEqual(plan(one.join('\n')).ranges.map(r => [r.align, r.open, r.close]), [['center', 4, 7]], 'what the command writes is a block');
+  assert.deepEqual(run(one, 6, 6, null), note, 'and “Remove alignment” gives the note back exactly');
+  // a selection over two paragraphs (and the blank lines at its ends do not count)
+  const two = run(note, 4, 9, 'right');
+  assert.deepEqual(two.slice(4, 12), ['::: right', 'Tyger Tyger, burning bright,', 'In the forests of the night;', '', 'What immortal hand or eye,', 'Could frame thy fearful symmetry?', ':::', '']);
+  assert.deepEqual(run(two, 4, 4, null), note, 'from a marker line too');
+  // every round trip: any one line, either alignment
+  for (let i = 3; i < note.length; i++) for (const kind of ['center', 'right']) {
+    const there = run(note, i, i, kind);
+    if (/\S/.test(note[i])) {
+      assert.equal(there.length, note.length + 2, `line ${i}`);
+      assert.equal(plan(there.join('\n')).ranges.length, 1, `line ${i}`);
+      assert.deepEqual(run(there, S.lineAfterEdits(S.alignEdits(note, i, i, kind), i), S.lineAfterEdits(S.alignEdits(note, i, i, kind), i), null), note, `line ${i}`);
+    } else assert.deepEqual(there, note, 'a blank line: nothing to align');
+  }
+  // the last line of a note without a line break at its end
+  const bare = ['One.', '', 'Two.'];
+  assert.deepEqual(run(bare, 2, 2, 'center'), ['One.', '', '::: center', 'Two.', ':::']);
+  assert.deepEqual(run(run(bare, 2, 2, 'center'), 3, 3, null), bare);
+  // text that is aligned already: the other alignment changes the marker and keeps what else it says; the same one changes nothing
+  assert.deepEqual(S.alignEdits(one, 5, 5, 'right'), [{ line: 4, text: '::: right' }]);
+  assert.deepEqual(S.alignEdits(['::: {.centre .dropcap}', 'verse', ':::'], 1, 1, 'right'), [{ line: 0, text: '::: {.right .dropcap}' }]);
+  assert.deepEqual(S.alignEdits(one, 5, 5, 'center'), []);
+  assert.deepEqual(S.alignEdits(note, 5, 5, null), [], 'nothing to remove');
+  assert.deepEqual(S.alignEdits(note, 0, 1, 'center'), [], 'the properties are not text');
+  // a heading that stands against the paragraph above it: the opening marker needs a blank line, which is made
+  const tight = ['Some prose.', '## Verse', 'A line.'];
+  assert.deepEqual(run(tight, 1, 1, 'center'), ['Some prose.', '', '::: center', '## Verse', 'A line.', ':::']);
+  assert.equal(plan(run(tight, 1, 1, 'center').join('\n')).ranges.length, 1);
+  // where the selection's lines are afterwards
+  const edits = S.alignEdits(note, 5, 5, 'center');
+  assert.deepEqual([S.lineAfterEdits(edits, 3), S.lineAfterEdits(edits, 4), S.lineAfterEdits(edits, 5), S.lineAfterEdits(edits, 6)], [3, 5, 6, 8]);
+  const out = S.alignEdits(one, 5, 5, null);
+  assert.deepEqual([S.lineAfterEdits(out, 4), S.lineAfterEdits(out, 5), S.lineAfterEdits(out, 7), S.lineAfterEdits(out, 8)], [4, 4, 6, 6]);
+});
+
+test('aligned text: the commands for a drop cap write “dropcap” on the block’s marker and take it off again', () => {
+  const lines = ['## Verse', '', '::: center', ...VERSE, ':::', '', PROSE];
+  const on = S.alignDropcapEdits(lines, 3, true);
+  assert.deepEqual(on, [{ line: 2, text: '::: center dropcap' }]);
+  const with_ = S.applyLineEdits(lines, on);
+  assert.deepEqual(S.alignDropcapEdits(with_, 4, true), [], 'it has one already');
+  assert.deepEqual(S.applyLineEdits(with_, S.alignDropcapEdits(with_, 5, false)), lines, 'on and off again: the note as it was');
+  assert.deepEqual(S.alignDropcapEdits(lines, 3, false), []);
+  assert.equal(S.alignDropcapEdits(lines, 7, true), null, 'not in an aligned block');
+  assert.deepEqual(S.alignDropcapEdits(['::: {.right}', 'x', ':::'], 1, true), [{ line: 0, text: '::: {.right .dropcap}' }]);
+  assert.deepEqual(S.alignDropcapEdits(['::: {.right .dropcap}', 'x', ':::'], 1, false), [{ line: 0, text: '::: {.right}' }]);
+  assert.deepEqual(S.alignDropcapEdits(['::: center :::', 'x', ':::'], 1, true), [{ line: 0, text: '::: center dropcap' }]);
+});
+
+test('aligned text: the snippet sets it, shows no marker, gives it no drop cap unless asked, and opens the chapter after it', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8');
+  assert.match(css, /\.scriptorium-align-center[^{]*\{\s*text-align: center !important;/);
+  assert.match(css, /\.scriptorium-align-right[^{]*\{\s*text-align: right !important;/);
+  assert.match(css, /\.is-live-preview \.cm-line\.scriptorium-align-center,[^{]*\{\s*text-align: center;/);
+  assert.match(css, /\.is-live-preview \.cm-line\.scriptorium-align-right,[^{]*\{\s*text-align: right;/);
+  assert.match(css, /\.scriptorium-align-fence,\s*\.markdown-rendered span\.scriptorium-fence \{\s*display: none;/);
+  assert.match(css, /\.el-p\.scriptorium-align:not\(\.scriptorium-align-dropcap\) > p::first-letter \{[^}]*float: none !important;[^}]*font: inherit !important;/);
+  assert.match(css, /\.el-p\.scriptorium-align:not\(\.scriptorium-align-dropcap\) > p::first-line \{[^}]*font-variant-caps: normal !important;/);
+  assert.match(css, /\.el-p\.scriptorium-align:not\(\.scriptorium-align-dropcap\) > p::before \{\s*content: none !important;/, 'nor a drop cap that is an image');
+  assert.match(css, /\.el-p\.scriptorium-align-dropcap:not\(\.scriptorium-dropcap-none\) > p::first-letter,[^{]*\{\s*float: none;/, 'a drop cap that was asked for stands on its line');
+  assert.match(css, /\.scriptorium-align-dropcap\.scriptorium-dropcap-image > p::before,[^{]*\{\s*float: none;\s*position: absolute;/, 'and so does one that is an image');
+  // every rule for a chapter opening takes .scriptorium-opens as it takes a heading
+  assert.doesNotMatch(css, /:is\(\.mod-header, \.el-h1, \.el-h2, \.el-h6\)/);
+  const single = css.split('\n').filter(l => /\.markdown-rendered \.el-h6 \+ \.el-p > p/.test(l));
+  assert.ok(single.length >= 5);
+  for (const l of single) assert.ok(css.includes(l.replace('.el-h6 + .el-p', '.scriptorium-opens + .el-p')), l);
+});
+
+test('aligned text: the plugin registers its commands by id, and everything that must travel is in the plugin and the snippet', () => {
+  const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
+  for (const id of ['align-center', 'align-right', 'align-remove', 'aligned-dropcap-on', 'aligned-dropcap-off']) assert.ok(src.includes(`'${id}'`), id);
+  for (const name of ['Centre selection', 'Right-align selection', 'Remove alignment', 'Use a drop cap on this aligned paragraph', 'Remove the drop cap from this aligned paragraph']) assert.ok(src.includes(name), name);
+  assert.match(src, /Also on centred and right-aligned text/);
+});

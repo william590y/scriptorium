@@ -1182,6 +1182,154 @@ test('penLines and penPace: three lines of a long edit, fewer late in a long run
   assert.equal(L.sanitizeSettings({ penLines: 2.5 }).penLines, 3);
 });
 
+test('penLanes: edits that stand apart on the page are written at once, each by a pen; edits too near one another wait for the pen that is there', () => {
+  const LH = 24, GAP = Math.max(L.PEN_GAP_LINES * LH, L.PEN_GAP_PX);
+  const page = { top: 100, bottom: 700, lineHeight: LH, width: 600 };                 // room for three pens
+  const e = (top, para, o) => Object.assign({ top, bottom: top + LH, para, paraEnd: para, grow: 0 }, o);
+  const none = { lanes: [], count: 0 };
+  const lanes = (edits, pens, pg) => L.penLanes(edits, pg || page, { pens: pens == null ? 3 : pens });
+  // three edits in three paragraphs, well apart: a pen each, from the top of the page down
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)]), { lanes: [[0], [1], [2]], count: 3 });
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)]), { lanes: [[0], [1]], count: 2 });
+  // one pen is the pen as it always was: no lanes
+  assert.deepEqual(lanes([e(150, 3)]), none);
+  assert.deepEqual(lanes([]), none);
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)], 1), none, '“Several pens at once” is off');
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)], 0), none);
+  assert.deepEqual(L.penLanes([e(150, 3), e(320, 5)], page), none, 'no setting, no pens');
+  assert.deepEqual(L.penLanes([e(150, 3), e(320, 5)], null, { pens: 3 }), none, 'no page');
+  // “Pens at most”: the edits past the last pen's wait for the next round
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)], 2), { lanes: [[0], [1]], count: 2 });
+  // two edits in one paragraph go to one pen, however far apart they are in it; alone, they are no lanes at all
+  assert.deepEqual(lanes([e(150, 3), e(400, 3)]), none);
+  assert.deepEqual(lanes([e(150, 3), e(400, 3), e(600, 9)]), { lanes: [[0, 1], [2]], count: 3 });
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(420, 5)]), { lanes: [[0], [1, 2]], count: 3 });
+  // an edit that runs over several paragraphs holds them all
+  assert.deepEqual(lanes([e(150, 3, { paraEnd: 5, bottom: 150 + 4 * LH }), e(400, 5), e(600, 9)]), { lanes: [[0, 1], [2]], count: 3 });
+  // different paragraphs, but fewer than PEN_GAP_LINES clear lines between them: one pen, the second after the first
+  assert.equal(L.PEN_GAP_LINES, 2.5);
+  assert.equal(L.PEN_GAP_PX, 76);
+  assert.equal(GAP, 76, 'in type as small as this the gap is the pen’s own height: more than two and a half lines');
+  const below = 150 + LH;                                                             // where the first edit ends
+  assert.deepEqual(lanes([e(150, 3), e(below + GAP - 1, 5)]), none);
+  assert.deepEqual(lanes([e(150, 3), e(below + GAP, 5)]), { lanes: [[0], [1]], count: 2 }, 'exactly that many clear lines will do');
+  assert.deepEqual(lanes([e(150, 3), e(below + LH, 4), e(500, 7)]), { lanes: [[0, 1], [2]], count: 3 }, 'the very next line: it waits for the pen above it');
+  // the distance is counted from where the lane's words end, whichever of its edits reaches lowest
+  assert.deepEqual(lanes([e(150, 3, { bottom: 150 + 5 * LH }), e(180, 3), e(150 + 5 * LH + GAP - 1, 5), e(600, 9)]), { lanes: [[0, 1, 2], [3]], count: 4 });
+  // only what is in view: the first edit that is not ends the list, and it and all after it wait
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(800, 7)]), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3), e(800, 5), e(500, 7)]), none);
+  assert.deepEqual(lanes([e(50, 3), e(320, 5), e(500, 7)]), none, 'the first is above the page');
+  assert.deepEqual(lanes([e(150, 3), e(700 - LH + 1, 5)]), none, 'the second ends below the page');
+  assert.deepEqual(lanes([e(150, 3), e(700 - LH, 5)]), { lanes: [[0], [1]], count: 2 });
+  // an edit that cannot be measured (off screen, in a table) ends the list too
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), null, e(600, 9)]), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3), null, e(600, 9)]), none);
+  assert.deepEqual(lanes([null, e(320, 5), e(600, 9)]), none);
+  // an edit pushes down what stands below it: text that would leave the page that way waits
+  assert.deepEqual(lanes([e(150, 3, { grow: 4 * LH }), e(320, 5), e(600, 9)]), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3, { grow: 2 * LH }), e(320, 5), e(600, 9)]), { lanes: [[0], [1], [2]], count: 3 });
+  assert.deepEqual(lanes([e(150, 3), e(640, 5, { grow: 3 * LH })]), none, 'nor may its own text leave the page as it grows');
+  assert.deepEqual(lanes([e(150, 3, { grow: -500 }), e(320, 5)]), { lanes: [[0], [1]], count: 2 }, 'text that shrinks pushes nothing');
+  // never more pens than one for every PEN_LANE_PX of the page, nor than PEN_MAX
+  assert.equal(L.PEN_LANE_PX, 180);
+  assert.equal(L.PEN_MAX, 4);
+  const four = [e(150, 3), e(320, 5), e(500, 7), e(660, 9), e(820, 11)];
+  const tall = { top: 100, bottom: 100 + 4 * L.PEN_LANE_PX + 100, lineHeight: LH, width: 600 };
+  assert.deepEqual(lanes(four, 4, tall), { lanes: [[0], [1], [2], [3]], count: 4 });
+  assert.deepEqual(lanes(four, 9, tall), { lanes: [[0], [1], [2], [3]], count: 4 });
+  assert.deepEqual(lanes(four, 3, tall), { lanes: [[0], [1], [2]], count: 3 }, 'four only when the setting says so');
+  assert.deepEqual(lanes(four, 4), { lanes: [[0], [1], [2]], count: 3 }, 'and only on a tall page');
+  assert.deepEqual(lanes(four, 4, { top: 100, bottom: 100 + 2 * L.PEN_LANE_PX, lineHeight: LH, width: 600 }), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)], 3, { top: 100, bottom: 100 + 2 * L.PEN_LANE_PX - 1, lineHeight: LH, width: 600 }), none, 'a short pane: one pen');
+  // when every pen has its lane, an edit near the last one still joins it; the next one apart waits
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(340, 5), e(600, 9)], 2), { lanes: [[0], [1, 2]], count: 3 });
+  // a narrow column is written by one pen
+  assert.equal(L.PEN_MIN_WIDTH, 440);
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)], 3, Object.assign({}, page, { width: L.PEN_MIN_WIDTH - 1 })), none);
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)], 3, Object.assign({}, page, { width: L.PEN_MIN_WIDTH })), { lanes: [[0], [1]], count: 2 });
+  // the gap is counted in the page's own lines
+  assert.deepEqual(lanes([e(150, 3), e(150 + LH + 2.5 * 40 - 1, 5)], 3, Object.assign({}, page, { lineHeight: 40 })), none);
+  assert.deepEqual(lanes([e(150, 3), e(150 + LH + 2.5 * 40, 5)], 3, Object.assign({}, page, { lineHeight: 40 })), { lanes: [[0], [1]], count: 2 });
+  // pure: what it is given is left as it was
+  const given = [e(150, 3), e(320, 5), e(500, 7)], copy = JSON.stringify(given);
+  lanes(given);
+  assert.equal(JSON.stringify(given), copy);
+  // every edit is in exactly one lane, in order, and the lanes go down the page
+  const many = lanes([e(150, 3), e(160, 3), e(320, 5), e(330, 6), e(520, 9), e(530, 9)]);
+  assert.deepEqual(many, { lanes: [[0, 1], [2, 3], [4, 5]], count: 6 });
+  assert.deepEqual(many.lanes.flat(), [0, 1, 2, 3, 4, 5]);
+});
+
+test('textLines: about how many lines a piece of text takes, for the pens’ planning', () => {
+  // type of 20 px: about 9 px a character
+  assert.equal(L.textLines('', 0, 460, 20), 1);
+  assert.equal(L.textLines('A short line.', 0, 460, 20), 1);
+  assert.equal(L.textLines('x'.repeat(51), 0, 460, 20), 1);
+  assert.equal(L.textLines('x'.repeat(52), 0, 460, 20), 2);
+  assert.equal(L.textLines('x'.repeat(100), 0, 460, 20), 2);
+  assert.equal(L.textLines('x'.repeat(100), 100, 460, 20), 3, 'set from part of the way into its first line');
+  assert.equal(L.textLines('one\n\nthree', 0, 460, 20), 3, 'a line of the note is a line of the page, an empty one too');
+  assert.equal(L.textLines('one\n' + 'x'.repeat(60), 400, 460, 20), 3, 'the indent is the first line’s alone');
+  assert.equal(L.textLines(null, 0, 460, 20), 1);
+  assert.equal(L.textLines('x'.repeat(100), 0, 0, 20), Math.ceil(100 / 8), 'a column with no width is taken as eight characters wide');
+});
+
+test('penRoom: how many lines the pen needs under an edit’s start (an edit low on the screen with less room than that is brought to the middle first)', () => {
+  const W = 460, F = 20;                                 // about 51 characters to a line
+  assert.equal(L.penRoom('Short sentence here.', 3, W, F), 1);
+  assert.equal(L.penRoom('x'.repeat(120), 3, W, F), 3, 'three lines of text');
+  assert.equal(L.penRoom('x'.repeat(600), 3, W, F), 3, 'a long text: only the lines the pen writes');
+  assert.equal(L.penRoom('x'.repeat(600), 5, W, F), 5);
+  assert.equal(L.penRoom('x'.repeat(600), undefined, W, F), 3);
+  assert.equal(L.penRoom('\n\n' + 'x'.repeat(600), 3, W, F), 5, 'and the empty lines it opens with');
+  const code = '\n\nThe distance, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```';
+  assert.equal(L.penRoom(code, 3, W, F), 8, 'a code block: every line of it (two empty lines, a sentence, an empty line, the fence and its code)');
+  assert.equal(L.penRoom('A span of `code` in a sentence.', 3, W, F), 1, 'a code span is in its line');
+  const long = '```js\n' + Array.from({ length: 40 }, (_, i) => `line${i}();`).join('\n') + '\n```';
+  assert.equal(L.penRoom(long, 3, W, F), 3 + 8, 'a long block: no more than the pen types of it');
+  assert.equal(L.penRoom('Force is the rate of change of momentum:\n\n$$F = \\frac{dp}{dt}$$', 3, W, F), 3);
+  assert.equal(L.penRoom('\n\n$$\n\\int_0^\\infty e^{-x^2}\\,dx\n$$\n\nwhich is the sum of all of it, and of ' + 'x'.repeat(300), 3, W, F), 8, 'a displayed equation takes room of its own');
+  assert.equal(L.penRoom('', 3, W, F), 1);
+  assert.equal(L.penRoom(null, 3, W, F), 1);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /return c\.top \+ penRoom\(text, settings && settings\.penLines, box\.width, size\) \* line <= s\.bottom;/);
+});
+
+test('Several pens at once: on by default, three pens at most, both settings; the pen says how many it has, and each pen shows its own text', () => {
+  assert.equal(L.DEFAULT_SETTINGS.severalPens, true);
+  assert.equal(L.DEFAULT_SETTINGS.maxPens, 3);
+  assert.equal(L.sanitizeSettings({ severalPens: false }).severalPens, false);
+  assert.equal(L.sanitizeSettings({ severalPens: 'no' }).severalPens, true);
+  for (const n of [2, 3, 4]) assert.equal(L.sanitizeSettings({ maxPens: n }).maxPens, n);
+  for (const n of [0, 1, 5, 2.5, '3', null]) assert.equal(L.sanitizeSettings({ maxPens: n }).maxPens, 3, String(n));
+  assert.ok(L.PEN_STAGGER_MS >= 150 && L.PEN_STAGGER_MS <= 300, 'the pens set out a moment after one another');
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /setName\('Several pens at once'\)/);
+  assert.match(js, /setName\('Pens at most'\)/);
+  assert.match(js, /const showPens = valued\(pens, s\.maxPens/, 'the slider’s value is shown beside it');
+  assert.match(js, /pens: this\.settings\.severalPens \? this\.settings\.maxPens : 1/, 'the run is told how many pens it may use');
+  assert.match(js, /pens: PEN_MAX,/, 'and the pen says how many it has');
+  assert.match(js, /opts\.pens > 1 && opts\.pen\.pens > 1 && !prefersReducedMotion\(win\)/, 'one pen with reduced motion, and with a pen that writes one edit at a time');
+  // every wait and every trail of a sheet runs from one animation frame, and the sheet is measured once in it
+  const pen = js.slice(js.indexOf('==== LAGRANGE PEN (replaceable) ===='), js.indexOf('==== END LAGRANGE PEN ===='));
+  assert.equal(pen.split('requestAnimationFrame(').length - 1, 2, 'the pen asks for a frame in one place only (runFrame, and onFrame which starts it)');
+  assert.match(pen, /if \(S\.inFrame && S\.o\) return S\.o;/);
+  // a pen's own change moves the places the other pens hold, and spoils none of them
+  assert.match(pen, /if \(p\.view === update\.view && p !== owner\) p\.map\(tr\.changes, true\)/);
+  // finish() ends every edit being written
+  assert.match(pen, /for \(const me of all\) \{ try \{ me\.finish\(\); \}/);
+  // each pen's unwritten text is its own, and shows when that pen is done
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  for (let i = 0; i < L.PEN_MAX; i++) {
+    assert.ok(css.includes(`.lagrange-pen-revealing-${i} .lagrange-pen-unwritten.lagrange-pen-of-${i}`), `pen ${i}`);
+    assert.ok(css.includes(`.cm-editor:not(.lagrange-pen-revealing-${i}) .lagrange-pen-of-${i}`), `pen ${i}: the boxes of its lines`);
+  }
+  assert.ok(!css.includes(`lagrange-pen-of-${L.PEN_MAX}`) && !css.includes(`lagrange-pen-revealing-${L.PEN_MAX}`));
+  assert.doesNotMatch(css, /\.lagrange-pen-revealing[ ,{]/, 'no rule shows every pen’s text at once');
+  assert.doesNotMatch(js, /'lagrange-pen-revealing'/);
+});
+
 test('trailBands: the newest ink is the darkest and widest, old ink is dropped, and the strokes join up', () => {
   assert.deepEqual(L.trailBands([], 1000, 500, 5), []);
   assert.deepEqual(L.trailBands([{ x: 0, y: 0, t: 990 }], 1000, 500, 5), []);
@@ -1637,7 +1785,7 @@ test('Editing while the pen writes: off by default, a setting, and a run never l
   // text the pen has yet to write is unseen, and so are the boxes around it (a code block's tint, a code span's)
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   assert.match(css, /\.cm-line\.lagrange-pen-unwritten-line \{[^}]*background-color: transparent !important/);
-  assert.match(css, /span:has\(> \.lagrange-pen-unwritten\):not\(\.lagrange-pen-unwritten\) \{[^}]*background-color: transparent !important/);
+  assert.match(css, /span:has\(> \.lagrange-pen-of-3\):not\(\.lagrange-pen-unwritten\) \{[^}]*background-color: transparent !important/);
 });
 
 test('Rewind: a turn during which the writer typed is not taken for Lagrange’s alone', () => {
@@ -1654,4 +1802,618 @@ test('Undo records: one that no longer fits the editor’s text is forgotten, no
   assert.match(js, /this\.edits = this\.edits\.filter\(r => !lost\.includes\(r\)\)/);
   // the handwriting's font is waited for before the hand is measured
   assert.match(js, /doc\.fonts\.load\(font\)/);
+});
+
+
+// ---------- Centred and right-aligned text (Scriptorium's "::: center" and "::: right") ----------
+
+test('every system prompt tells the model how text is centred, to centre verse always, and to ask for no drop cap there', () => {
+  const note = { title: 'Verse' }, clip = { text: 'Some text.', clipped: false, total: 10 };
+  const prompts = {
+    'chat (with the pen)': L.chatSystemPrompt(note, clip, true), 'chat (talk only)': L.chatSystemPrompt(note, clip, false),
+    'chat (no note)': L.chatSystemPrompt(null, null, true), revise: L.REVISE_SYSTEM, proofread: L.PROOFREAD_SYSTEM,
+  };
+  for (const [name, text] of Object.entries(prompts)) assert.ok(text.includes(L.ALIGN_STYLE), name);
+  const a = L.ALIGN_STYLE;
+  assert.match(a, /"::: center"/);
+  assert.match(a, /"::: right"/);
+  assert.match(a, /":::" on a line of its own/);
+  assert.match(a, /blank line before the opening marker and after the closing one/);
+  assert.match(a, /Always centre poetry and verse/);
+  assert.match(a, /epigraph/);
+  assert.match(a, /attribution or a signature[^.]*to the right with "::: right" when the writer asks/);
+  assert.match(a, /never write "dropcap" on a marker line[^.]*unless the writer asks for a drop cap/);
+  assert.match(a, /never use HTML or a callout to align text/);
+  // the proofreader is told that the markers are syntax, before it is told what to reply with
+  assert.ok(L.PROOFREAD_SYSTEM.indexOf(L.ALIGN_STYLE) < L.PROOFREAD_SYSTEM.indexOf('Reply with only a JSON array'));
+  // and the instruction is one constant, in each prompt once
+  for (const text of Object.values(prompts)) assert.equal(text.split(L.ALIGN_STYLE).length, 2);
+});
+
+test('the pen and aligned text: a marker line is no text (the pen starts after it, and never writes one)', () => {
+  for (const line of ['::: center', ':::center', '::: right', '::: centre dropcap', '::: {.center .dropcap}', ':::', '  :::: ', '::: right :::']) assert.ok(L.ALIGN_MARK.test(line), line);
+  for (const line of ['::: note', ':: center', 'a ::: center', '::: rightly', 'Tyger Tyger', '']) assert.ok(!L.ALIGN_MARK.test(line), line);
+  assert.equal(L.inkOffset('::: center\nTyger Tyger'), 11);
+  assert.equal(L.inkOffset('\n\n::: right\n— Blake\n:::'), 12);
+  assert.equal(L.inkOffset('\n:::\n\n::: right\n— Blake\n:::'), 16, 'one block is closed and another opened');
+  assert.equal(L.inkOffset('::: center\n## A heading'), 14, 'and then what opens a block, as ever');
+  assert.equal(L.inkOffset('\n:::'), 4, 'a closing marker alone: nothing to write');
+  assert.equal(L.inkOffset('::: note\ntext'), 0, 'another kind of container is text');
+  assert.equal(L.inkOffset(':::: not a marker line'), 0);
+  const show = segs => segs.map(g => (g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  assert.equal(show(L.penScript('::: center\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::', 80)), 'Tyger Tyger, burning bright, In the forests of the night;');
+  assert.equal(show(L.penScript('Prose first.\n\n::: right\n— Blake\n:::', 80)), 'Prose first. — Blake');
+  assert.equal(show(L.penScript('a ::: b', 80)), 'a ::: b', 'colons inside a line are text');
+  assert.deepEqual(L.penScript(':::', 80), []);
+});
+
+// ---------------------------------------------------------------- looking at the page
+// A page as measurePage records it (what a real page measures like is checked in Obsidian itself; here, what is
+// made of the measurements).
+const PAGE = { width: 836, height: 1969, column: { left: 38, width: 760 }, theme: 'dark', font: 'EB Garamond', size: 22, margin: false };
+const BLOCKS = [
+  { kind: 'title', text: 'Look check', top: 32, bottom: 75, align: 'center', font: 'EB Garamond', size: 35.6, lines: 1 },
+  { kind: 'heading', level: 6, text: 'A synthetic note', from: 5, to: 5, top: 80, bottom: 143, align: 'center', font: 'EB Garamond', size: 26.4, italic: true, lines: 1 },
+  { kind: 'paragraph', text: 'Quietly the compositor sets his stick, and the first line falls into small capitals.', from: 10, to: 10, top: 288, bottom: 416,
+    align: 'left', font: 'EB Garamond', size: 22, lines: 4, dropcap: { letter: 'Q', font: 'Scriptorium Yinit', size: 80.7, deep: 3 }, firstLineCaps: true,
+    math: ['e^{i\\pi} + 1 = 0'], notes: [{ label: '1', where: 'margin' }] },
+  { kind: 'paragraph', text: 'A second paragraph follows.', from: 12, to: 12, top: 415, bottom: 511, align: 'justify', font: 'EB Garamond', size: 22, lines: 3 },
+  { kind: 'heading', level: 2, text: 'A displayed equation', from: 14, to: 14, top: 566, bottom: 605, align: 'center', font: 'EB Garamond', size: 32.2, smallCaps: true, lines: 1 },
+  { kind: 'math', text: '', from: 16, to: 18, top: 643, bottom: 710, align: 'center', math: ['\\int_0^1 x^2 \\, dx = \\frac{1}{3}'] },
+  { kind: 'picture', text: '', from: 26, to: 26, top: 906, bottom: 1041, align: 'center', images: [{ alt: 'A synthetic plate', width: 240, height: 135 }] },
+  { kind: 'heading', level: 3, text: 'A list and a table', from: 28, to: 28, top: 1096, bottom: 1134, align: 'center', font: 'EB Garamond', size: 29, lines: 1 },
+  { kind: 'code', language: 'js', text: 'const look = 1;', from: 39, to: 41, top: 1431, bottom: 1532, align: 'left', font: 'Scriptorium Mono', size: 18.5, lines: 2, overflow: 212, scrolls: true },
+  { kind: 'heading', level: 2, text: 'The second chapter', from: 45, to: 45, top: 1647, bottom: 1686, align: 'center', font: 'EB Garamond', size: 32.2, lines: 1 },
+  { kind: 'paragraph', text: 'Second chapters open with a drop cap too.', from: 47, to: 47, top: 1724, bottom: 1788, align: 'left', font: 'EB Garamond', size: 22, lines: 2, dropcap: { letter: 'S', image: true, size: 91 } },
+];
+const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+function lookOf(over) {
+  const look = Object.assign({ spec: { target: 'note' }, label: 'the whole note', title: 'Look check', path: 'Look check.md', page: PAGE, blocks: BLOCKS,
+    pictures: [{ mediaType: 'image/png', data: PNG_B64, width: 836, height: 1536, top: 0, bottom: 1536 }, { mediaType: 'image/png', data: PNG_B64, width: 836, height: 433, top: 1536, bottom: 1969 }],
+    more: 0, remarks: [], problem: '' }, over);
+  look.description = L.describeLook(look, L.LOOK_DESCRIPTION_CHARS);
+  return look;
+}
+
+test('Look contract: a reply’s look block is read in its several shapes, and comes out of the prose', () => {
+  const a = L.parseLookReply('Let me see how it sits.\n\n```lagrange-look\n{"target": "section", "heading": "De litteris"}\n```');
+  assert.equal(a.text, 'Let me see how it sits.');
+  assert.deepEqual(a.look, { target: 'section', heading: 'De litteris' });
+  assert.equal(a.open, false);
+  assert.deepEqual(L.parseLookReply('No block here: a plain answer.'), { text: 'No block here: a plain answer.', look: null, open: false });
+  // every target the contract names
+  const of = body => L.parseLookReply(`x\n\n${FENCE}lagrange-look\n${body}\n${FENCE}`).look;
+  assert.deepEqual(of('{"target": "note"}'), { target: 'note' });
+  assert.deepEqual(of('{"target": "view"}'), { target: 'view' });
+  assert.deepEqual(of('{"target": "passage", "near": "sets his stick"}'), { target: 'passage', near: 'sets his stick' });
+  assert.deepEqual(of('{"target": "lines", "from": 12, "to": 40}'), { target: 'lines', from: 12, to: 40 });
+  // and what models write instead
+  assert.deepEqual(of('{"target":"viewport"}'), { target: 'view' });
+  assert.deepEqual(of('{"heading": "## De litteris"}'), { target: 'section', heading: 'De litteris' });
+  assert.deepEqual(of('{"lines": [40, 12]}'), { target: 'lines', from: 12, to: 40 });
+  assert.deepEqual(of('{"lines": "12-40"}'), { target: 'lines', from: 12, to: 40 });
+  assert.deepEqual(of('{"target": "lines", "from": 7}'), { target: 'lines', from: 7, to: 7 });
+  assert.deepEqual(of('[{"target": "note"}]'), { target: 'note' });
+  assert.deepEqual(of('{"target": "note", "heading": "ignored"}'), { target: 'note' });
+  assert.deepEqual(of('note'), { target: 'note' });
+  assert.deepEqual(of('the whole note'), { target: 'note' });
+  assert.deepEqual(of('section: De litteris'), { target: 'section', heading: 'De litteris' });
+  assert.deepEqual(of('lines 12-40'), { target: 'lines', from: 12, to: 40 });
+  // a block that says nothing readable still gets a look: the whole note if it is short, else what is on screen
+  for (const junk of ['', '{}', '{"target": "section"}', 'whatever you think best', '{"target": "lines", "from": 0, "to": -3}']) assert.deepEqual(of(junk), { target: 'auto' }, junk);
+  // tags instead of a fence; a block still streaming is kept out of the prose
+  assert.deepEqual(L.parseLookReply('See.\n<lagrange-look>{"target": "view"}</lagrange-look>').look, { target: 'view' });
+  const streaming = L.parseLookReply('Let me look.\n\n```lagrange-look\n{"target": "no');
+  assert.equal(streaming.text, 'Let me look.');
+  assert.equal(streaming.open, true);
+  // with an edits block in the same reply: the look comes out, the edits stay for parseAgentReply
+  const both = L.parseLookReply('Done, and checking.\n\n```lagrange-edits\n[{"append": "A line."}]\n```\n\n```lagrange-look\n{"target": "note"}\n```');
+  assert.deepEqual(both.look, { target: 'note' });
+  const edits = L.parseAgentReply(both.text);
+  assert.equal(edits.text, 'Done, and checking.');
+  assert.deepEqual(edits.ops, [{ op: 'append', text: 'A line.', reason: '' }]);
+  // the edits block alone is read as before
+  assert.deepEqual(L.splitAgentReply('A.\n\n```lagrange-edits\n[]\n```'), L.splitBlocks('A.\n\n```lagrange-edits\n[]\n```', 'lagrange-edits'));
+  assert.equal(L.lookLabel({ target: 'note' }), 'the whole note');
+  assert.equal(L.lookLabel({ target: 'view' }), 'what is on screen');
+  assert.equal(L.lookLabel({ target: 'section', heading: 'De litteris' }), 'the section “De litteris”');
+  assert.equal(L.lookLabel({ target: 'lines', from: 3, to: 9 }), 'lines 3 to 9');
+  assert.match(L.lookLabel({ target: 'passage', near: 'sets his stick' }), /^the passage near “sets his stick”$/);
+});
+
+test('Look contract: the chat prompt names it when looking is on and a note is open, and only then', () => {
+  const note = { title: 'Tides', text: 'The sea.' }, clip = L.clipText(note.text, 1000);
+  const on = L.chatSystemPrompt(note, clip, true, true);
+  assert.ok(on.includes(L.CHAT_LOOK));
+  assert.match(on, /```lagrange-look\n\{"target": "note"\}\n```/);
+  for (const target of ['"target": "view"', '"target": "section", "heading"', '"target": "passage", "near"', '"target": "lines", "from": 12, "to": 40']) assert.ok(on.includes(target), target);
+  assert.match(on, /at most twice for one message/);
+  assert.equal(L.LOOKS_PER_MESSAGE, 2);
+  assert.match(on, /A reply may hold an edits block and, after it, a look block: your pen writes the edits first, and the look then shows the page as it stands after them/);
+  assert.ok(on.indexOf('lagrange-edits') < on.indexOf('lagrange-look') && on.indexOf('lagrange-look') < on.indexOf('<note>'), 'after the pen’s contract, before the note');
+  const talk = L.chatSystemPrompt(note, clip, false, true);
+  assert.ok(talk.includes(L.CHAT_LOOK));
+  assert.doesNotMatch(talk, /your pen writes the edits first/);
+  for (const off of [L.chatSystemPrompt(note, clip, true, false), L.chatSystemPrompt(note, clip, true), L.chatSystemPrompt(null, null, true, true)]) assert.doesNotMatch(off, /lagrange-look/);
+});
+
+test('Look settings: on by default; pictures where the model takes them, words otherwise, on a phone, in the demo and when turned off', () => {
+  assert.equal(L.DEFAULT_SETTINGS.lookAtPage, true);
+  assert.equal(L.DEFAULT_SETTINGS.lookPictures, 'auto');
+  assert.equal(L.sanitizeSettings({ lookAtPage: false }).lookAtPage, false);
+  assert.equal(L.sanitizeSettings({ lookAtPage: 'no' }).lookAtPage, true);
+  assert.equal(L.sanitizeSettings({ lookPictures: 'sometimes' }).lookPictures, 'auto');
+  for (const v of L.LOOK_PICTURES) assert.equal(L.sanitizeSettings({ lookPictures: v }).lookPictures, v);
+  const s = over => Object.assign({}, L.DEFAULT_SETTINGS, over);
+  const takes = over => L.picturesSupported(s(over));
+  assert.equal(takes({ provider: 'claude-code' }), true);
+  assert.equal(takes({ provider: 'codex' }), true);
+  for (const m of L.ANTHROPIC_MODELS) assert.equal(takes({ provider: 'anthropic', anthropicModel: m.id }), true, m.id);
+  assert.equal(takes({ provider: 'anthropic', anthropicModel: 'custom', anthropicCustomModel: 'claude-opus-4-8' }), true);
+  assert.equal(takes({ provider: 'anthropic', anthropicModel: 'custom', anthropicCustomModel: 'claude-2.1' }), false);
+  for (const m of ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-5', 'gpt-5.2-mini', 'o3', 'o4-mini']) assert.equal(takes({ provider: 'openai-api', openaiPlatformModel: m }), true, m);
+  for (const m of ['gpt-3.5-turbo', 'o1-mini', 'o3-mini', 'gpt-4o-audio-preview', 'text-embedding-3-large', '']) assert.equal(takes({ provider: 'openai-api', openaiPlatformModel: m }), false, m);
+  for (const m of ['llava:13b', 'llama3.2-vision', 'qwen2.5vl:7b', 'gemma3:12b', 'minicpm-v']) assert.equal(takes({ provider: 'openai', openaiModel: m }), true, m);
+  for (const m of ['llama3.1', 'qwen2.5:14b', 'mistral', '']) assert.equal(takes({ provider: 'openai', openaiModel: m }), false, m);
+  assert.equal(takes({ provider: 'demo' }), false);
+  const sends = (over, desktop, session) => L.lookSendsPictures(s(over), desktop, session);
+  assert.equal(sends({ provider: 'anthropic' }, true), true);
+  assert.equal(sends({ provider: 'anthropic' }, false), false, 'no picture is taken on a phone or tablet');
+  assert.equal(sends({ provider: 'anthropic', lookPictures: 'off' }, true), false);
+  assert.equal(sends({ provider: 'openai', openaiModel: 'llama3.1' }, true), false);
+  assert.equal(sends({ provider: 'openai', openaiModel: 'llama3.1', lookPictures: 'on' }, true), true, 'the writer says the model takes them');
+  assert.equal(sends({ provider: 'demo', lookPictures: 'on' }, true), false);
+  // a provider that has turned pictures down this session is not sent them again
+  const mine = s({ provider: 'openai', openaiModel: 'llama3.1', lookPictures: 'on' });
+  assert.equal(L.providerKey(mine), 'openai:llama3.1');
+  assert.equal(sends(mine, true, { noPictures: { 'openai:llama3.1': true } }), false);
+  assert.equal(sends(mine, true, { noPictures: { 'openai:llava': true } }), true);
+  assert.equal(L.providerKey(s({ provider: 'openai-api', openaiPlatformModel: 'gpt-5' })), 'openai:gpt-5');
+  assert.equal(L.providerKey(s({ provider: 'claude-code' })), 'claude-code');
+  assert.equal(L.providerKey(s({ provider: 'codex', codexModel: 'gpt-5' })), 'codex:gpt-5');
+  // the setting, its neighbour and what they promise are in the settings page; the command is registered
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /setName\('Let Lagrange look at the rendered page'\)/);
+  assert.match(js, /setName\('Pictures of the page'\)/);
+  assert.match(js, /to the provider chosen above ` \+\n\s*'and to no one else\. It does so only while Lagrange is answering a message of yours/);
+  assert.match(js, /Off: the page is never rendered or captured\./);
+  assert.match(js, /id: 'show-page',\n\s*name: 'Show Lagrange the rendered page'/);
+  assert.match(js, /if \(!this\.settings\.lookAtPage\) throw new LagrangeError\('looking at the page is turned off/, 'nothing is rendered with the setting off');
+});
+
+test('Look caps: a picture is no wider than LOOK_WIDTH, a look no more than LOOK_PAGES pictures, cut where blocks end', () => {
+  assert.equal(L.lookScale(836), 1);
+  assert.equal(L.lookScale(L.LOOK_WIDTH), 1);
+  assert.equal(L.lookScale(2048), 0.5);
+  assert.ok(L.LOOK_WIDTH <= 1568 && L.LOOK_HEIGHT <= 1568, 'within the long edge Claude’s standard tier takes without shrinking the page');
+  assert.equal(L.LOOK_PAGES, 4);
+  // a short page is one picture
+  assert.deepEqual(L.lookPages(0, 900, [100, 400], 1536, 4, 50), { pages: [{ top: 0, bottom: 900 }], more: 0 });
+  // a longer one is cut at the last block that begins in the second half of the picture
+  const two = L.lookPages(0, 1969, BLOCKS.map(b => b.top), 1536, 4, 50);
+  assert.deepEqual(two, { pages: [{ top: 0, bottom: 1431 }, { top: 1431, bottom: 1969 }], more: 0 });
+  // a block taller than a picture is cut through, and the next picture begins a little before the cut
+  const tall = L.lookPages(0, 4000, [], 1536, 4, 50);
+  assert.deepEqual(tall.pages.map(p => [p.top, p.bottom]), [[0, 1536], [1486, 3022], [2972, 4000]]);
+  assert.equal(tall.more, 0);
+  // the cap: four pictures, and how many more the rest would have taken
+  const long = L.lookPages(0, 20000, [], 1536, 4, 0);
+  assert.equal(long.pages.length, 4);
+  assert.equal(long.pages[3].bottom, 4 * 1536);
+  assert.equal(long.more, Math.ceil(20000 / 1536) - 4);
+  for (const p of L.lookPages(120, 9000, [500, 2000, 2100, 5000, 7777], 1536, 4, 60).pages) assert.ok(p.bottom - p.top <= 1536 && p.bottom > p.top);
+  // a note too long to render whole is rendered around the part asked for, front matter kept, cut at blank lines
+  const para = n => `Paragraph ${n}. ${'word '.repeat(40).trim()}`;
+  const text = `---\ndropcap: goudy\n---\n${Array.from({ length: 400 }, (_, i) => para(i + 1)).join('\n\n')}\n`;
+  assert.deepEqual(L.lookSource('short', 1, 1000), { text: 'short', shift: 0, cut: false });
+  const part = L.lookSource(text, 603, 6000);            // line 603 is paragraph 301
+  assert.equal(part.cut, true);
+  assert.ok(part.text.length <= 6000 + 30);
+  assert.ok(part.text.startsWith('---\ndropcap: goudy\n---\n'));
+  assert.match(part.text, /Paragraph 301\./);
+  assert.doesNotMatch(part.text, /Paragraph 1\./);
+  const lines = part.text.split('\n'), all = text.split('\n');
+  const k = lines.findIndex(l => l.startsWith('Paragraph 301.'));
+  assert.equal(all[k + part.shift], lines[k], 'a line of the part, plus the shift, is that line of the note');
+  assert.match(lines[3], /^Paragraph \d+\./, 'the part begins with a whole paragraph');
+});
+
+test('Look: the source lines of each rendered block, from Obsidian’s sections', () => {
+  const S = spec => spec.split(' ').map(x => { const [type, a, b] = x.split(/[:-]/); return { type, from: Number(a), to: Number(b) }; });
+  // (the pairs below were read off Obsidian 1.15: its parser's sections against its renderer's elements)
+  assert.deepEqual(L.alignSections(S('heading:0-0 paragraph:2-2 paragraph:4-4'), ['h1', 'p', 'p']), [{ from: 1, to: 1 }, { from: 3, to: 3 }, { from: 5, to: 5 }]);
+  assert.deepEqual(L.alignSections(S('yaml:0-2 thematicBreak:4-4 paragraph:6-6'), ['pre', 'hr', 'p']), [{ from: 1, to: 3 }, { from: 5, to: 5 }, { from: 7, to: 7 }]);
+  // a comment, a footnote's definition and a link's definition render nothing; the footnotes come last, as one section
+  assert.deepEqual(L.alignSections(S('paragraph:0-0 comment:6-8 paragraph:10-10'), ['p', 'p']), [{ from: 1, to: 1 }, { from: 11, to: 11 }]);
+  assert.deepEqual(L.alignSections(S('paragraph:0-0 footnoteDefinition:2-2 paragraph:4-4 text:5-5 element:5-5'), ['p', 'p', 'section']), [{ from: 1, to: 1 }, { from: 5, to: 5 }, null]);
+  assert.deepEqual(L.alignSections(S('paragraph:0-0 definition:2-2 paragraph:4-4'), ['p', 'p']), [{ from: 1, to: 1 }, { from: 5, to: 5 }]);
+  assert.deepEqual(L.alignSections(S('math:0-4 callout:6-7 code:9-11 html:13-13'), ['div', 'div', 'pre', 'center']).map(r => r.from), [1, 7, 10, 14]);
+  // where they do not go together, nothing is said: an HTML block with blank lines in it is one element, three sections
+  assert.equal(L.alignSections(S('html:0-0 paragraph:2-2 html:4-4 paragraph:6-6'), ['div', 'p']), null);
+  assert.equal(L.alignSections(S('heading:0-0 paragraph:2-2'), ['p', 'h1']), null);
+  assert.equal(L.alignSections(S('paragraph:0-0'), ['p', 'p']), null);
+  assert.equal(L.alignSections(null, ['p']), null);
+  assert.deepEqual(L.alignSections([], []), []);
+});
+
+test('Look: the part of the page a look is of', () => {
+  const at = (spec, ctx) => { const r = L.lookRange(spec, BLOCKS, ctx || {}); return [BLOCKS[r.first].text || BLOCKS[r.first].kind, BLOCKS[r.last].text || BLOCKS[r.last].kind, r.remark]; };
+  assert.deepEqual(at({ target: 'note' }), ['Look check', 'Second chapters open with a drop cap too.', '']);
+  assert.deepEqual(at({ target: 'auto' }), ['Look check', 'Second chapters open with a drop cap too.', '']);
+  // a section runs to the next heading of its level or above; one under it is part of it
+  assert.deepEqual(at({ target: 'section', heading: 'A displayed equation' }), ['A displayed equation', 'const look = 1;', '']);
+  assert.deepEqual(at({ target: 'section', heading: 'a list AND a table' }), ['A list and a table', 'const look = 1;', '']);
+  assert.deepEqual(at({ target: 'section', heading: 'second chapter' }), ['The second chapter', 'Second chapters open with a drop cap too.', '']);
+  assert.deepEqual(at({ target: 'section', heading: 'Look check' }), ['Look check', 'Second chapters open with a drop cap too.', ''], 'the title is the whole note');
+  const missing = at({ target: 'section', heading: 'No such heading' });
+  assert.equal(missing[0], 'Look check');
+  assert.match(missing[2], /No heading reads “No such heading”, so this is the whole note\./);
+  // lines: the blocks that hold them; between blocks, the block that follows
+  assert.deepEqual(at({ target: 'lines', from: 10, to: 14 }), ['Quietly the compositor sets his stick, and the first line falls into small capitals.', 'A displayed equation', '']);
+  assert.deepEqual(at({ target: 'lines', from: 17, to: 17 }), ['math', 'math', '']);
+  assert.deepEqual(at({ target: 'lines', from: 20, to: 22 }), ['picture', 'picture', '']);
+  assert.deepEqual(at({ target: 'lines', from: 900, to: 950 }), ['Second chapters open with a drop cap too.', 'Second chapters open with a drop cap too.', '']);
+  // a passage comes with its neighbours
+  assert.deepEqual(at({ target: 'passage', near: 'second paragraph' }, { near: { from: 12, to: 12 } }), ['Quietly the compositor sets his stick, and the first line falls into small capitals.', 'A displayed equation', '']);
+  assert.match(at({ target: 'passage', near: 'not in the note' }, { near: null })[2], /not found in the note/);
+  // what is on screen: by lines in the editor, by the first and last block's words in Reading view
+  assert.deepEqual(at({ target: 'view' }, { seen: { from: 26, to: 41 } }), ['picture', 'const look = 1;', '']);
+  assert.deepEqual(at({ target: 'view' }, { seen: { texts: ['A  second paragraph follows.', 'A displayed equation', '∫x²dx', '', 'A list and a table'] } }), ['A second paragraph follows.', 'A list and a table', '']);
+  // (a block without words, at either end of what is in sight, is placed by its neighbours: here the equation and the picture)
+  assert.deepEqual(at({ target: 'view' }, { seen: { texts: ['', 'A list and a table'] } }), ['picture', 'A list and a table', '']);
+  assert.deepEqual(at({ target: 'view' }, { seen: { texts: ['A displayed equation', '∫x²dx', ''] } }), ['A displayed equation', 'picture', '']);
+  assert.match(at({ target: 'view' }, { seen: { texts: ['words that are nowhere on the page'] } })[2], /could not be told/);
+  assert.match(at({ target: 'view' }, { seen: null })[2], /could not be told/);
+  // a page whose lines cannot be told (see alignSections) shows the whole note, and says so
+  const unlined = BLOCKS.map(b => Object.assign({}, b, { from: undefined, to: undefined }));
+  assert.match(L.lookRange({ target: 'lines', from: 10, to: 14 }, unlined, {}).remark, /could not be matched to the note’s lines/);
+  assert.equal(L.lookRange({ target: 'note' }, [], {}), null);
+  assert.deepEqual(L.passageLines('one\ntwo words here\nthree', 'words here'), { from: 2, to: 2 });
+  assert.deepEqual(L.passageLines('one\ntwo words\nhere three', 'words\nhere'), { from: 2, to: 3 });
+  assert.equal(L.passageLines('one\ntwo', 'absent'), null);
+  assert.equal(L.headingLine('# One\n\ntext\n\n## The *second* chapter ##\n', 'The second chapter'), 5);
+  assert.equal(L.headingLine('# One\n', 'Two'), 0);
+});
+
+test('Look fallback: the page in words says what was measured, block by block, within its length', () => {
+  const look = lookOf({});
+  const d = look.description.split('\n');
+  assert.match(d[0], /^The page: “Look check”, set as in Reading view \(dark theme\); pane 836 px wide; text column 760 px wide, 38 px from the left; body text EB Garamond 22 px\.$/);
+  assert.equal(d.length, 1 + BLOCKS.length);
+  assert.match(d[1], /^1\. title: “Look check” \| centred \| EB Garamond 35\.6 px \| 1 line \| picture 1$/);
+  assert.match(d[2], /^2\. heading 6, line 5: “A synthetic note” \| centred \| EB Garamond 26\.4 px italic \| 1 line/);
+  // alignment, the drop cap and which, the first line, the font and size, the lines, the mathematics as its source, the note in the margin
+  assert.equal(d[3], '3. paragraph, line 10: “Quietly the compositor sets his stick, … mall capitals.” | flush left | drop cap “Q” (Scriptorium Yinit, 80.7 px, 3 lines deep) | ' +
+    'first line in small capitals | EB Garamond 22 px | 4 lines | math $e^{i\\pi} + 1 = 0$ | footnote 1 in the margin | picture 1');
+  assert.match(d[4], /justified \| EB Garamond 22 px \| 3 lines/);
+  assert.match(d[5], /heading 2, line 14: “A displayed equation” \| centred \| EB Garamond 32\.2 px small capitals/);
+  assert.equal(d[6], '6. math, lines 16–18 | centred | math $\\int_0^1 x^2 \\, dx = \\frac{1}{3}$ | picture 1');
+  assert.equal(d[7], '7. picture, line 26 | centred | picture “A synthetic plate” 240×135 px | picture 1');
+  assert.match(d[9], /^9\. code \(js\), lines 39–41: “const look = 1;” \| flush left \| Scriptorium Mono 18\.5 px \| 2 lines \| 212 px too wide for its column \(it scrolls\) \| picture 1$/);
+  assert.match(d[10], /heading 2, line 45: “The second chapter” .* picture 2$/);
+  assert.match(d[11], /drop cap “S” \(a picture, 91 px\)/);
+  // a page with notes in the margin says so; one picture needs no "picture 1"
+  assert.match(lookOf({ page: Object.assign({}, PAGE, { margin: true, theme: 'light' }) }).description, /\(light theme\)[^\n]*\nFootnotes and margin notes are set in the right margin/);
+  assert.doesNotMatch(lookOf({ pictures: [look.pictures[0]] }).description, /picture 1$/m);
+  // the cap: the blocks that do not fit are counted, not listed
+  const many = Array.from({ length: 300 }, (_, i) => Object.assign({}, BLOCKS[3], { text: `Paragraph number ${i + 1} of a long note, which goes on.`, from: i * 2 + 1, to: i * 2 + 1 }));
+  const long = L.describeLook(Object.assign({}, look, { blocks: many }), L.LOOK_DESCRIPTION_CHARS);
+  assert.ok(long.length <= L.LOOK_DESCRIPTION_CHARS, `${long.length} characters`);
+  const last = /… and (\d+) more blocks, not described\.$/.exec(long);
+  assert.ok(last);
+  assert.equal(long.split('\n').length - 2 + Number(last[1]), 300);
+  // other kinds of block
+  const kinds = L.describeLook(Object.assign({}, look, { pictures: [], blocks: [
+    { kind: 'list', items: 3, text: 'First item', from: 30, to: 32, align: 'left', font: 'EB Garamond', size: 22, lines: 3 },
+    { kind: 'table', rows: 3, cols: 2, text: 'Left Right', from: 34, to: 37, align: 'left', font: 'EB Garamond', size: 22 },
+    { kind: 'callout', callout: 'note', text: 'A callout', align: 'justify', font: 'EB Garamond', size: 19.8, lines: 2 },
+    { kind: 'callout', callout: 'margin', inMargin: true, text: 'A marginal note', align: 'justify', font: 'EB Garamond', size: 18.7, lines: 1 },
+    { kind: 'picture', text: '', align: 'full', images: [{ alt: '', width: 760, height: 400, remote: true }, { alt: 'gone', width: 24, height: 24, broken: true }] },
+    { kind: 'rule', text: '' },
+  ] }), 6000).split('\n');
+  assert.match(kinds[1], /^1\. list of 3 items, lines 30–32: “First item” \| flush left/);
+  assert.match(kinds[2], /^2\. table, 3 rows by 2, lines 34–37/);
+  assert.match(kinds[3], /^3\. callout \(note\): “A callout” \| justified/);
+  assert.match(kinds[4], /^4\. margin note: “A marginal note” \| set in the margin \|/);
+  assert.match(kinds[5], /the full width of the column \| picture 760×400 px \(from the web: a grey box in the picture of the page\) \| picture “gone” 24×24 px \(did not load\)/);
+  assert.equal(kinds[6], '6. rule');
+});
+
+test('Look message: pictures and words for a model that takes pictures, words alone otherwise; the pictures are not kept', () => {
+  const look = lookOf({});
+  const m = L.lookMessage(look, { left: 1 });
+  assert.equal(m.content.length, 3);
+  assert.deepEqual(m.content.slice(0, 2), [{ type: 'image', mediaType: 'image/png', data: PNG_B64 }, { type: 'image', mediaType: 'image/png', data: PNG_B64 }]);
+  const text = m.content[2].text;
+  assert.match(text, /^<rendered_page>\nThe page of “Look check” as Reading view renders it: the whole note\. The note’s properties are left out\. 2 pictures of it are attached, in reading order\. What follows was measured on the page\.\n\nThe page: /);
+  assert.ok(text.includes(look.description));
+  assert.match(text, /<\/rendered_page>\n\nThat is your look at the page\. You may look once more for this message, if you need another part of it\. Now carry on with your reply to the writer\.$/);
+  // in words alone, for a provider that turns the pictures down, and for the conversation afterwards
+  assert.equal(typeof m.alt, 'string');
+  assert.match(m.alt, /It could not be shown to you as a picture: here it is in words, as measured on the page\./);
+  assert.ok(m.alt.includes(look.description));
+  assert.equal(typeof m.kept, 'string');
+  assert.match(m.kept, /2 pictures of it were shown to you at this point; they are not kept in the conversation\./);
+  assert.ok(!m.kept.includes(PNG_B64) && !m.alt.includes(PNG_B64));
+  assert.match(L.lookMessage(look, { left: 0 }).content[2].text, /You cannot look again for this message\. Now carry on/);
+  // a look without pictures (a phone, a model that reads text only, "Never"): one text, the same three times
+  const words = L.lookMessage(lookOf({ pictures: [] }), { left: 1 });
+  assert.equal(typeof words.content, 'string');
+  assert.match(words.content, /There is no picture of it: here it is in words, as measured on the page\./);
+  assert.equal(words.alt, words.content);
+  assert.equal(words.kept, words.content);
+  assert.match(L.lookMessage(lookOf({ pictures: [], problem: 'the page could not be drawn' }), { left: 0 }).content, /No picture of it could be taken \(the page could not be drawn\), so here it is in words/);
+  // more pages than one look holds; a remark about what is shown instead of what was asked
+  const capped = L.lookMessage(lookOf({ more: 5, remarks: ['No heading reads “X”, so this is the whole note.'] }), { left: 1 }).content[2].text;
+  assert.match(capped, /They are the first 2 of 7 pages of it: look at a section, a passage or a range of lines to see further on\./);
+  assert.match(capped, /\nNo heading reads “X”, so this is the whole note\.\n\nThe page: /);
+  // the writer's own showing of the page goes with their message
+  const shown = L.lookMessage(look, { by: 'writer', text: 'Why is the title so large?' });
+  assert.match(shown.content[2].text, /<\/rendered_page>\n\nThe writer has shown you the page as it is rendered, above\. Their message:\n\nWhy is the title so large\?$/);
+  assert.match(shown.kept, /Their message:\n\nWhy is the title so large\?$/);
+  // a look that could not be had: the model is told, and carries on from the source
+  const failed = L.lookMessage(null, { left: 1, failed: 'the note is no longer open.' });
+  assert.equal(failed.content, failed.kept);
+  assert.match(failed.content, /^<rendered_page>\nThe page could not be looked at: the note is no longer open\.\n<\/rendered_page>\n\nCarry on with your reply to the writer from the note’s source/);
+  // the helpers the providers use
+  const msgs = [{ role: 'user', content: 'Is it centred?' }, { role: 'assistant', content: 'Let me look.' }, { role: 'user', content: m.content, alt: m.alt }];
+  assert.equal(L.messagePictures(msgs).length, 2);
+  assert.equal(L.messagePictures(msgs.slice(0, 2)).length, 0);
+  assert.match(L.messageText(msgs[2]), /^\[Picture 1 of the page is attached\.\]\n\n\[Picture 2 of the page is attached\.\]\n\n<rendered_page>/);
+  assert.equal(L.messageText(msgs[0]), 'Is it centred?');
+  assert.deepEqual(L.withoutPictures(msgs), [msgs[0], msgs[1], { role: 'user', content: m.alt }]);
+  assert.equal(L.lookCaption(look), 'The whole note, in 2 pictures and its measurements');
+  assert.equal(L.lookCaption(lookOf({ more: 3 })), 'The whole note, in 2 pictures (the first 2 of 5 pages) and its measurements');
+  assert.equal(L.lookCaption(lookOf({ pictures: [], label: 'the section “De litteris”' })), 'The section “De litteris”, in words');
+  assert.match(L.lookRecipient(baseSettings()), /^A look goes to Anthropic \(Claude Sonnet 5\.5\) with the conversation, and to no one else\.$/);
+  assert.match(L.lookRecipient(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai', openaiModel: 'llava', openaiBaseUrl: 'http://localhost:11434/v1' })), /your server at http:\/\/localhost:11434\/v1 \(llava\)/);
+  assert.match(L.lookRecipient(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'demo' })), /nothing is sent anywhere/);
+});
+
+// One turn with a look, as the chat sends it: the question, the reply that asks to look, the look.
+function lookTurn(over) {
+  const m = L.lookMessage(lookOf(over || {}), { left: 1 });
+  return { m, messages: [
+    { role: 'user', content: 'Is the title centred?' },
+    { role: 'assistant', content: 'Let me look.\n\n```lagrange-look\n{"target": "note"}\n```' },
+    { role: 'user', content: m.content, alt: m.alt },
+  ] };
+}
+
+test('Look, Anthropic: the pictures go as base64 image blocks before the words; other messages are untouched', async () => {
+  const { m, messages } = lookTurn();
+  let body;
+  const res = await L.streamAnthropic(baseSettings(), { system: 'S', messages, cache: true }, {
+    fetch: async (url, init) => { body = JSON.parse(init.body); return streamResponse([ANTHROPIC_STREAM]); },
+  }, {});
+  assert.equal(res.text, 'Ink on “paper”.');
+  assert.equal(body.messages.length, 3);
+  assert.equal(body.messages[0].content, 'Is the title centred?');
+  assert.equal(body.messages[1].content, messages[1].content);
+  assert.deepEqual(body.messages[2].content.slice(0, 2), [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_B64 } },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_B64 } },
+  ]);
+  assert.deepEqual(body.messages[2].content[2], { type: 'text', text: m.content[2].text });
+  assert.deepEqual(Object.keys(body.messages[2]), ['role', 'content'], 'the words-only form stays at home');
+  assert.deepEqual(body.cache_control, { type: 'ephemeral' });
+  assert.equal(body.system, 'S');
+  // a JPEG says so
+  const jpeg = L.anthropicMessages([{ role: 'user', content: [{ type: 'image', mediaType: 'image/jpeg', data: 'AAAA' }, { type: 'text', text: 't' }] }]);
+  assert.equal(jpeg[0].content[0].source.media_type, 'image/jpeg');
+});
+
+test('Look, OpenAI and compatible servers: image_url parts; a server that turns pictures down is sent the words, and the session remembers', async () => {
+  const chunks = ['data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'];
+  const { m, messages } = lookTurn();
+  const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai', openaiBaseUrl: 'http://localhost:11434/v1', openaiModel: 'llava' });
+  const calls = [];
+  const run = (fetch, session) => L.complete(s, { system: 'S', messages }, {
+    fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return fetch ? fetch(JSON.parse(init.body)) : streamResponse(chunks); },
+  }, session);
+  const session = {};
+  const res = await run(null, session);
+  assert.equal(res.text, 'ok');
+  assert.equal(res.picturesRefused, false);
+  assert.deepEqual(calls[0].messages[0], { role: 'system', content: 'S' });
+  assert.equal(calls[0].messages[1].content, 'Is the title centred?');
+  assert.deepEqual(calls[0].messages[3].content.slice(0, 2), [
+    { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_B64}` } },
+    { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_B64}` } },
+  ]);
+  assert.deepEqual(calls[0].messages[3].content[2], { type: 'text', text: m.content[2].text });
+  assert.equal(session.noPictures, undefined);
+  // a model that reads text only: 400, then the same turn in words
+  calls.length = 0;
+  const picky = body => (JSON.stringify(body).includes('image_url') ? jsonResponse(400, { error: { message: 'this model does not support image input' } }) : streamResponse(chunks));
+  const again = await run(picky, session);
+  assert.equal(again.text, 'ok');
+  assert.equal(again.picturesRefused, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].messages[3].content, m.alt);
+  assert.deepEqual(session.noPictures, { 'openai:llava': true });
+  assert.equal(L.lookSendsPictures(Object.assign({}, s, { lookPictures: 'on' }), true, session), false, 'the next look is in words from the start');
+  // a 400 for another reason, with no pictures in the request, is still an error; so is one that the words do not cure
+  await assert.rejects(L.complete(s, { system: 'S', messages: messages.slice(0, 1) }, { fetch: async () => jsonResponse(400, { error: { message: 'bad request' } }) }, {}), L.LagrangeError);
+  calls.length = 0;
+  await assert.rejects(run(() => jsonResponse(400, { error: { message: 'context length exceeded' } }), {}), L.LagrangeError);
+  assert.equal(calls.length, 2, 'tried once more in words, and no further');
+  // OpenAI's own API takes the same parts
+  calls.length = 0;
+  const api = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai-api', openaiPlatformKey: 'sk-x', openaiPlatformModel: 'gpt-5' });
+  await L.complete(api, { system: 'S', messages }, { fetch: async (url, init) => { calls.push(JSON.parse(init.body)); return streamResponse(chunks); } }, {});
+  assert.equal(calls[0].messages[3].content[0].type, 'image_url');
+});
+
+test('Look, Claude subscription: the pictures go in on stdin as image blocks, with no tool turned on and nothing written to disk', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const exe = fakeCli(dir, 'claude', `
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  const a = process.argv.slice(2);
+  const tools = a[a.indexOf('--tools') + 1] === '' && a.includes('--no-session-persistence') && a[a.indexOf('--setting-sources') + 1] === '' && a.includes('--strict-mcp-config');
+  const format = a.includes('--input-format') ? a[a.indexOf('--input-format') + 1] : 'text';
+  let said;
+  if (format === 'stream-json') {
+    const lines = input.trim().split('\\n'), msg = JSON.parse(lines[0]);
+    const c = msg.message.content;
+    said = [lines.length, msg.type, msg.message.role, c.map(p => p.type).join('+'), c[0].source.type, c[0].source.media_type, c[0].source.data.length, c[c.length - 1].text.includes('<conversation_so_far>') && c[c.length - 1].text.includes('[Picture 1 of the page is attached.]') && c[c.length - 1].text.includes('<rendered_page>')].join(' ');
+  } else said = 'text ' + input.includes('[Picture') + ' ' + input.includes('It could not be shown to you as a picture');
+  console.log(JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: (tools ? 'tools off; ' : 'TOOLS ON; ') + said } } }));
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: 'x' }));
+});`);
+  const { messages } = lookTurn();
+  const before = fs.readdirSync(require('node:os').tmpdir()).filter(f => f.startsWith('lagrange-look-')).length;
+  const res = await L.streamClaudeCode({ claudeCodePath: exe, claudeCodeModel: 'haiku' }, { system: 'S', messages }, {}, {});
+  assert.equal(res.text, `tools off; 1 user user image+image+text base64 image/png ${PNG_B64.length} true`);
+  assert.equal(res.picturesRefused, false);
+  assert.equal(fs.readdirSync(require('node:os').tmpdir()).filter(f => f.startsWith('lagrange-look-')).length, before, 'no picture file is written for Claude Code');
+  // without pictures it is run as before: plain text on stdin, no input format
+  const plain = await L.streamClaudeCode({ claudeCodePath: exe, claudeCodeModel: 'haiku' }, { system: 'S', messages: messages.slice(0, 1) }, {}, {});
+  assert.equal(plain.text, 'tools off; text false false');
+  // a Claude Code that does not know the input format: the page goes in words, and the session remembers
+  const old = fakeCli(dir, 'claude-old', `
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  if (process.argv.includes('--input-format')) { console.error("error: unknown option '--input-format'"); process.exit(1); }
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: 'in words: ' + input.includes('It could not be shown to you as a picture') + ' ' + input.includes('[Picture') }));
+});`);
+  const session = {};
+  const r = await L.streamClaudeCode({ claudeCodePath: old, claudeCodeModel: '' }, { system: 'S', messages }, {}, session);
+  assert.equal(r.text, 'in words: true false');
+  assert.equal(r.picturesRefused, true);
+  assert.deepEqual(session.noPictures, { 'claude-code': true });
+  const one = JSON.parse(L.claudeCodeInput([{ role: 'user', content: 'Hello' }], [{ mediaType: 'image/jpeg', data: 'AAAA' }]));
+  assert.deepEqual(one, { type: 'user', message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } }, { type: 'text', text: 'Hello' }] } });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('Look, ChatGPT subscription: the pictures are files in a folder of their own, attached with -i, read-only, and deleted afterwards', { skip: !posix }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lagrange-cli-'));
+  const exe = fakeCli(dir, 'codex', `
+const fs = require('fs'), path = require('path');
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  const a = process.argv.slice(2);
+  const files = a.map((x, i) => (x === '-i' ? a[i + 1] : null)).filter(Boolean);
+  const ok = a[0] === 'exec' && a.includes('--ephemeral') && a[a.indexOf('-s') + 1] === 'read-only' && a[a.length - 1] === '-';
+  const first = files.length ? a.indexOf('-i') < a.indexOf('-C') : null;   // each -i is followed by another option, never by the prompt's "-"
+
+  const png = files.every(f => fs.readFileSync(f).subarray(1, 4).toString() === 'PNG');
+  const home = files.length ? path.dirname(files[0]) : '';
+  const mode = home ? (fs.statSync(home).mode & 0o777).toString(8) : '';
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ ok, first, n: files.length, names: files.map(f => path.basename(f)), png, home, mode, same: files.every(f => path.dirname(f) === home), marks: input.includes('[Picture 2 of the page is attached.]') }) } }));
+  console.log(JSON.stringify({ type: 'turn.completed' }));
+});`);
+  const { messages } = lookTurn();
+  const res = await L.streamCodex({ codexPath: exe, codexModel: '' }, { system: 'S', messages }, {}, {});
+  const seen = JSON.parse(res.text);
+  assert.deepEqual({ ok: seen.ok, first: seen.first, n: seen.n, names: seen.names, png: seen.png, same: seen.same, marks: seen.marks },
+    { ok: true, first: true, n: 2, names: ['page-1.png', 'page-2.png'], png: true, same: true, marks: true });
+  assert.match(path.basename(seen.home), /^lagrange-look-/);
+  assert.equal(seen.mode, '700', 'only this user can read the folder');
+  assert.equal(fs.existsSync(seen.home), false, 'the folder and the pictures are deleted when Codex has finished');
+  assert.equal(res.picturesRefused, false);
+  // without pictures: no -i, no folder
+  const plain = JSON.parse((await L.streamCodex({ codexPath: exe, codexModel: '' }, { system: 'S', messages: messages.slice(0, 1) }, {}, {})).text);
+  assert.deepEqual([plain.ok, plain.first, plain.n, plain.home], [true, null, 0, '']);
+  // a Codex that will not take them: the words go instead, and the folder is still deleted
+  const picky = fakeCli(dir, 'codex-picky', `
+let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+  const a = process.argv.slice(2);
+  if (a.includes('-i')) { require('fs').writeFileSync(${JSON.stringify(path.join(dir, 'where'))}, require('path').dirname(a[a.indexOf('-i') + 1])); console.error("error: unexpected argument '-i' found"); process.exit(2); }
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'in words: ' + input.includes('It could not be shown to you as a picture') } }));
+});`);
+  const session = {};
+  const r = await L.streamCodex({ codexPath: picky, codexModel: 'gpt-5' }, { system: 'S', messages }, {}, session);
+  assert.equal(r.text, 'in words: true');
+  assert.equal(r.picturesRefused, true);
+  assert.deepEqual(session.noPictures, { 'codex:gpt-5': true });
+  assert.equal(fs.existsSync(fs.readFileSync(path.join(dir, 'where'), 'utf8')), false);
+  // stopped while Codex runs: the folder is deleted all the same
+  const slow = fakeCli(dir, 'codex-slow', `const a = process.argv.slice(2); require('fs').writeFileSync(${JSON.stringify(path.join(dir, 'where2'))}, require('path').dirname(a[a.indexOf('-i') + 1])); setInterval(() => {}, 1000);`);
+  const ac = new AbortController(); setTimeout(() => ac.abort(), 300);
+  await assert.rejects(L.streamCodex({ codexPath: slow, codexModel: '' }, { system: 'S', messages }, { signal: ac.signal }, {}), e => e.name === 'AbortError');
+  assert.equal(fs.existsSync(fs.readFileSync(path.join(dir, 'where2'), 'utf8')), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('Look, Demo: the demo asks to look when the message is about how the page looks, and then reports what was measured', async () => {
+  const note = { title: 'Lorem Ipsum', text: LOREM };
+  const ask = L.demoChatReply('How does the page look? Is the title centred?', note, true, true);
+  assert.deepEqual(L.parseLookReply(ask).look, { target: 'note' });
+  assert.match(L.parseLookReply(ask).text, /Let me look at the page of \*\*Lorem Ipsum\*\*/);
+  for (const q of ['Is the heading centered?', 'does the drop cap come out right', 'What is in the margin?']) assert.ok(L.parseLookReply(L.demoChatReply(q, note, true, true)).look, q);
+  // not when looking is off, when no note is open, or when the message is about something else
+  assert.equal(L.parseLookReply(L.demoChatReply('How does the page look?', note, true, false)).look, null);
+  assert.equal(L.parseLookReply(L.demoChatReply('How does the page look?', null, true, true)).look, null);
+  assert.equal(L.parseLookReply(L.demoChatReply('What is this note about?', note, true, true)).look, null);
+  assert.ok(L.parseAgentReply(L.demoChatReply('Fix the typography.', note, true, true)).ops.length > 0, 'the demo still edits');
+  const said = L.demoLookReply(lookOf({}));
+  assert.match(said, /^\*Demo mode: this is what was measured on the page, not a model’s reading of it\.\* I looked at the page of \*\*Look check\*\* \(the whole note\): 11 blocks, among them 4 headings and 3 paragraphs, in a column 760 px wide\./);
+  assert.match(said, /The title, “Look check”, is centred\./);
+  assert.match(said, /2 paragraphs open with a drop cap: “Q”, “S”\./);
+  assert.match(said, /1 block is too wide for the column \(code\)\./);
+  assert.match(L.demoLookReply(null), /could not be looked at/);
+  // through the demo provider, as a turn's second reply
+  const res = await L.complete(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'demo' }), { purpose: 'proofread', system: '', messages: lookTurn().messages, demo: () => said }, {});
+  assert.equal(res.text, said);
+});
+
+test('Look: the page is drawn from markup an XML parser takes, with nothing left to fetch', () => {
+  assert.equal(L.xmlSafe('a\u0000b\u000Bc\u000Cd￾e\tf\ng'), 'abcde\tf\ng');
+  assert.equal(L.xmlSafe('Quietly “é” 𝑒 — ok'), 'Quietly “é” 𝑒 — ok');
+  assert.equal(L.xmlSafe('lone \uD800 surrogate'), 'lone  surrogate');
+  assert.equal(L.xmlSafe(null), '');
+  const svg = L.pageSvg('<html xmlns="http://www.w3.org/1999/xhtml"><body>a\u000Cb</body></html>', 835.5, 1968.2, '22px');
+  assert.equal(svg, '<svg xmlns="http://www.w3.org/2000/svg" width="836" height="1969" viewBox="0 0 836 1969" style="font-size:22px">' +
+    '<foreignObject x="0" y="0" width="836" height="1969"><html xmlns="http://www.w3.org/1999/xhtml"><body>ab</body></html></foreignObject></svg>');
+  assert.doesNotMatch(L.pageSvg('<p/>', 10, 10, '16px" onload="x'), /onload="/);
+  assert.deepEqual(L.cssUrls('@font-face { font-family: MJX; src: url("/lib/mathjax/a.woff2") format("woff2"), url(b.woff); }'),
+    [{ whole: 'url("/lib/mathjax/a.woff2")', url: '/lib/mathjax/a.woff2' }, { whole: 'url(b.woff)', url: 'b.woff' }]);
+  assert.deepEqual(L.cssUrls("--scriptorium-dropcap-light: url('app://x/a b.png'); mask: url(#clip); background: url(data:image/png;base64,AAAA)"),
+    [{ whole: "url('app://x/a b.png')", url: 'app://x/a b.png' }]);
+  assert.deepEqual(L.cssUrls(''), []);
+  // the page is set in a page of its own, never in the note's view, and no Electron or Node module takes its picture
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  const section = js.slice(js.indexOf(' * 7. The page as rendered'), js.indexOf(' * 8. The chat view'));
+  assert.ok(section.length > 5000);
+  assert.doesNotMatch(section, /nodeModule\(|require\(|capturePage|setViewState|createLeaf|\.dispatch\(/);
+  assert.match(section, /position:fixed;left:-100000px/);
+  assert.match(section, /animation: none !important/);
+  // a picture from the web is not fetched again: only the vault's own files and Obsidian's are read
+  assert.match(section, /const local = url => \/\^\(\?:app\|capacitor\|file\|blob\):\/i\.test\(url\)/);
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /\.lagrange-look-thumb img \{[^}]*object-fit: cover/);
+  assert.match(css, /\.lagrange-look-modal \{/);
+});
+
+// Live, only when asked (LAGRANGE_LIVE_CLI=1): the real tools are shown a picture through Lagrange. Uses a little of the plan.
+test('live: the real Claude Code and Codex read a picture handed to them as a look hands it', { skip: process.env.LAGRANGE_LIVE_CLI !== '1' || !process.env.LAGRANGE_LIVE_PICTURE }, async () => {
+  // LAGRANGE_LIVE_PICTURE: a PNG that shows a number; LAGRANGE_LIVE_ANSWER: the number
+  const data = fs.readFileSync(process.env.LAGRANGE_LIVE_PICTURE).toString('base64');
+  const messages = [{ role: 'user', content: [{ type: 'image', mediaType: 'image/png', data }, { type: 'text', text: 'What number is written in the picture? Reply with only the number.' }], alt: 'There is no picture.' }];
+  const want = new RegExp(process.env.LAGRANGE_LIVE_ANSWER || '\\d');
+  const c = await L.streamClaudeCode({ claudeCodePath: '', claudeCodeModel: 'haiku' }, { system: 'You are terse.', messages }, {}, {});
+  assert.match(c.text, want);
+  assert.equal(c.picturesRefused, false);
+  const x = await L.streamCodex({ codexPath: '', codexModel: '' }, { system: 'You are terse.', messages }, {}, {});
+  assert.match(x.text, want);
+  assert.equal(x.picturesRefused, false);
+});
+
+test('A look at the page: Scriptorium’s marks for aligned text go where Reading view has them, and hidden marker lines are not read out', () => {
+  // Written all at once, a block carries Scriptorium's alignment marks itself; Reading view has them on the <div>
+  // around the block, which is where the snippet's rules for drop caps look. Every one of Scriptorium's marks moves.
+  const sc = fs.readFileSync(path.join(ROOT, 'vault', '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
+  const list = /const ALIGN_CLASSES = \[([^\]]+)\]/.exec(sc);
+  assert.ok(list, 'Scriptorium lists its alignment classes');
+  const marks = list[1].split(',').map(c => c.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.ok(marks.includes('scriptorium-align-center') && marks.includes('scriptorium-opens'));
+  assert.deepEqual(L.frameMarks(marks), marks, 'each of them is moved to the frame');
+  assert.deepEqual(L.frameMarks(['scriptorium-align', 'has-list-bullet', 'scriptorium-dropcap-goudy', 'scriptorium-aligned', 'scriptorium-opens-x', 'math']), ['scriptorium-align']);
+  assert.deepEqual(L.frameMarks([]), []);
+  assert.deepEqual(L.frameMarks(null), []);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /for \(const c of frameMarks\(Array\.from\(el\.classList\)\)\) \{ block\.classList\.add\(c\); el\.classList\.remove\(c\); \}/);
+  // the description gives a block's words as shown (Scriptorium hides the "::: center" lines), and takes a drop cap's letter from them
+  assert.match(js, /text: tidy\(shown\(el\)\)\.slice\(0, 200\)/);
+  assert.match(js, /exec\(shown\(p\)\)/);
 });

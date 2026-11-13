@@ -383,6 +383,8 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
   color: var(--text-accent);
 }
 .scriptorium-dropcap-hint { margin: 0.8em 0 0; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.scriptorium-dropcap-also { display: flex; align-items: center; gap: 0.5em; margin: 0.8em 0 0; cursor: pointer; }
+.scriptorium-dropcap-also input { margin: 0; flex: none; }
 .scriptorium-setup-mono { display: block; margin: 0 0 10px; font-size: var(--font-ui-small); }
 .scriptorium-dropcap-modal .scriptorium-dropcap-list { max-height: 55vh; overflow-y: auto; }
 .scriptorium-dropcap-list button.scriptorium-dropcap-choice.is-missing { font-style: italic; color: var(--text-muted); }
