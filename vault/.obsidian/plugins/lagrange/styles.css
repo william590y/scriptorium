@@ -772,4 +772,8 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
 .lagrange-pen-trail { mix-blend-mode: multiply; }
 body.theme-dark .lagrange-pen-trail { mix-blend-mode: screen; }
 .lagrange-pen-gone { color: var(--lagrange-muted); }
+/* A diagram that an edit brings (a TikZJax figure, an Excalidraw drawing) is unseen from the moment the note draws
+   it until the pen draws it: main.js marks the ones it has dealt with (data-lagrange-seen). */
+.lagrange-pen-figures :is(.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg):not([data-lagrange-seen]) { opacity: 0 !important; }
+.lagrange-pen-figures svg[data-lagrange-seen] svg { opacity: 1 !important; }
 /* ==== END LAGRANGE PEN ==== */

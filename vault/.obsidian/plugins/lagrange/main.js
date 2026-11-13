@@ -1398,6 +1398,30 @@ function plainInline(text) {
   return t.replace(/[\uE100-\uE1FF]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE100));
 }
 
+/* ---- Diagrams ----
+   Two community plugins draw diagrams in a note, and the pen draws what they render instead of writing its source:
+   TikZJax sets a ```tikz code block as a figure (for technical and mathematical figures), and Excalidraw shows an
+   embedded drawing, ![[Name.excalidraw]] (free-form sketches). Both put an <svg> in the note in Live Preview.
+   figureKinds(text) -> {tikz, sketch}: how many of each a piece of Markdown holds. withoutFigures(text): the text
+   with them taken out, which is what is left for the pen to write by hand. Pure. */
+const TIKZ_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*tikz[ \t]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
+const SKETCH_EMBED = /!\[\[[^\]\n]*\.excalidraw(?:\.md)?(?:[|#][^\]\n]*)?\]\]/g;
+function figureKinds(text) {
+  const t = String(text == null ? '' : text);
+  return { tikz: (t.match(TIKZ_FENCE) || []).length, sketch: (t.match(SKETCH_EMBED) || []).length };
+}
+function withoutFigures(text) {
+  return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(SKETCH_EMBED, '');
+}
+
+/* The order in which the pen draws a figure's parts: shapes first, in the order the figure has them (which is the
+   order TikZ and Excalidraw drew them in), then its labels. parts: [{text: boolean}] -> their indexes. Pure. */
+function figureOrder(parts) {
+  const shapes = [], labels = [];
+  (parts || []).forEach((p, i) => (p && p.text ? labels : shapes).push(i));
+  return shapes.concat(labels);
+}
+
 /* (plain: the text is written as Live Preview shows it, without its Markdown marks; see plainInline) */
 function penScript(replacement, limit, plain) {
   const max = limit || 48;
@@ -3943,6 +3967,99 @@ function createPen(app, settings) {
   };
   /* Draws one of the note's own equations where it stands, as drawGlyph draws each symbol; one too long for that is
      uncovered from left to right under the nib. It is in the pen's ink while it is drawn, then turns to the note's. */
+  /* The diagrams the note has drawn for an edit (see "Diagrams"): the <svg>s that were not there before. They are
+     unseen from the moment they come (the styles: .lagrange-pen-figures, until an svg is marked data-lagrange-seen),
+     so a figure never pops in ahead of the pen. TikZJax compiles a figure before it shows it, which takes a moment,
+     and longer the first time in a session: the pen waits for as many figures as the edit holds, for at most `wait` ms. */
+  const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg';
+  const figureList = view => Array.from(view.contentDOM.querySelectorAll(FIGURES)).filter(svg => !svg.parentElement.closest('svg'));
+  const awaitFigures = async (L, view, want, wait) => {
+    const until = L.win.performance.now() + wait;
+    for (;;) {
+      const found = figureList(view).filter(svg => !svg.hasAttribute('data-lagrange-seen'));
+      if (found.length >= want || L.win.performance.now() > until) return found;
+      await pause(L, 80);
+    }
+  };
+  const FIGURE_STYLES = ['opacity', 'fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset', 'clipPath'];
+  const figureParts = svg => Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text, foreignObject, image'))
+    .filter(n => !n.closest('defs, mask, clipPath, marker, metadata, pattern, symbol') && !(n.tagName.toLowerCase() !== 'text' && n.closest('text')));
+  const restoreFigure = svg => {
+    svg.setAttribute('data-lagrange-seen', '');
+    svg.removeAttribute('data-lagrange-drawing');
+    svg.style.clipPath = '';
+    for (const n of figureParts(svg)) for (const p of FIGURE_STYLES) n.style[p] = '';
+  };
+  /* Draws a figure where the note has it: each line of it is drawn along its length under the nib, in the figure's
+     own order, and filled when it is closed; then its labels are uncovered from left to right. A figure of very
+     many parts is uncovered from left to right as a whole. data-lagrange-drawn counts the parts drawn so far. */
+  const drawFigure = async (L, svg, k) => {
+    const win = L.win;
+    const parts = figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
+    const order = figureOrder(parts.map(n => ({ text: /^(text|foreignObject|image)$/i.test(n.tagName) })));
+    const at = n => { const r = rel(L, n.getBoundingClientRect()); return { x: r.left, y: r.top + r.height * 0.6 }; };
+    if (!parts.length || parts.length > 220) {
+      svg.style.clipPath = 'inset(0 100% 0 0)';
+      svg.setAttribute('data-lagrange-seen', '');
+      const r0 = rel(L, svg.getBoundingClientRect());
+      await fly(L, r0.left, r0.top + r0.height * 0.5, 280 * k, 6);
+      await tween(L, Math.min(3200, Math.max(600, r0.width * 6)) * k, t => {
+        const r = rel(L, svg.getBoundingClientRect());
+        svg.style.clipPath = `inset(0 ${((1 - t) * 100).toFixed(1)}% 0 0)`;
+        place(L, r.left + r.width * t, r.top + r.height * (0.5 + 0.35 * Math.sin(t * 40)));
+      });
+      svg.style.clipPath = '';
+      return;
+    }
+    for (const n of parts) n.style.opacity = '0';
+    svg.setAttribute('data-lagrange-drawing', '');
+    svg.setAttribute('data-lagrange-seen', '');
+    svg.setAttribute('data-lagrange-drawn', '0');
+    const each = Math.max(70, Math.min(520, 6500 / parts.length));
+    let drawn = 0;
+    for (const i of order) {
+      const n = parts[i];
+      if (!svg.isConnected) break;
+      const label = /^(text|foreignObject|image)$/i.test(n.tagName);
+      let len = 0;
+      try { len = !label && n.getTotalLength ? n.getTotalLength() : 0; } catch (e) { len = 0; }
+      const start = at(n);
+      if (len) {
+        try { const q0 = new win.DOMPoint(n.getPointAtLength(0).x, n.getPointAtLength(0).y).matrixTransform(n.getScreenCTM()), o = org(L); start.x = q0.x - o.x; start.y = q0.y - o.y; } catch (e) { /* its box */ }
+      }
+      if (!L.pos || Math.hypot(start.x - L.pos.x, start.y - L.pos.y) > 5) await fly(L, start.x, start.y, Math.min(200, each) * k, 4);
+      if (len) {
+        const cs = win.getComputedStyle(n), bare = cs.stroke === 'none' || parseFloat(cs.strokeWidth) === 0;
+        n.style.fillOpacity = '0';
+        if (bare) { n.style.stroke = cs.fill && cs.fill !== 'none' ? cs.fill : 'currentColor'; n.style.strokeWidth = '0.6'; }
+        n.style.strokeDasharray = `${len} ${len}`;
+        n.style.strokeDashoffset = String(len);
+        n.style.opacity = '';
+        await tween(L, Math.max(each * 0.6, Math.min(each * 2.2, len * 3)) * k, t => {
+          n.style.strokeDashoffset = (len * (1 - t)).toFixed(2);
+          try {
+            let q = n.getPointAtLength(len * t);
+            q = new win.DOMPoint(q.x, q.y).matrixTransform(n.getScreenCTM());
+            const o = org(L);
+            place(L, q.x - o.x, q.y - o.y);
+          } catch (e) { /* the nib stays */ }
+        });
+        for (const p of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) n.style[p] = '';
+      } else {
+        n.style.clipPath = 'inset(-20% 100% -20% -10%)';
+        n.style.opacity = '';
+        await tween(L, each * k, t => {
+          n.style.clipPath = `inset(-20% ${((1 - t) * 100).toFixed(1)}% -20% -10%)`;
+          const r = rel(L, n.getBoundingClientRect());
+          place(L, r.left + r.width * t, r.top + r.height * 0.7 + Math.sin(t * 12) * 1.5);
+        });
+        n.style.clipPath = '';
+      }
+      svg.setAttribute('data-lagrange-drawn', String(++drawn));
+    }
+    svg.removeAttribute('data-lagrange-drawing');
+  };
+
   const drawInPlace = async (L, box, k) => {
     const win = L.win, glyphs = mathGlyphs(box);
     if (!box.isConnected) return;
@@ -4080,7 +4197,7 @@ function createPen(app, settings) {
       const ink = [];                                   // the strokes that strike the old words out
       const claimed = new Set();                        // the note's own equations the pen has taken to draw
       const ctx = context();
-      let hand = null, cleared = false, S = null, L = null, skipped = null;
+      let hand = null, cleared = false, S = null, L = null, skipped = null, figuring = false;
       let inkG = null;                                  // the strokes' group, moved with the words they strike
       let keep = null;                                  // how what is drawn stays on its text: {read(), write()}, see keepUp
       const live = { read() { if (keep) keep.read(); }, write() { if (keep) keep.write(); } };
@@ -4105,6 +4222,13 @@ function createPen(app, settings) {
       const clear = instant => {
         if (cleared) return;
         cleared = true;
+        if (figuring) {
+          // every figure of this edit is shown as the note has it, whether the pen had drawn it or not
+          figuring = false;
+          for (const svg of figureList(view)) if (svg.hasAttribute('data-lagrange-drawing') || !svg.hasAttribute('data-lagrange-seen')) restoreFigure(svg);
+          if (L) { L.figures = Math.max(0, (L.figures || 0) - 1); if (!L.figures) view.dom.classList.remove('lagrange-pen-figures'); }
+          // (one that the note draws after the pen has gone is shown by the styles again, the class being off)
+        }
         keep = null;
         if (S) S.live.delete(live);
         tracked.delete(at);
@@ -4248,6 +4372,16 @@ function createPen(app, settings) {
           const maths = mathSegments(text).filter(g => g.type === 'math');
           const mj = maths.length ? await mathReady(L) : null;
           const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
+          // Diagrams in the text (Live Preview draws them): those already in the note are marked as seen, and the
+          // ones this edit brings stay unseen until the pen draws them.
+          const figs = live ? figureKinds(text) : { tikz: 0, sketch: 0 };
+          const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch;
+          if (wantFigures) {
+            for (const svg of figureList(view)) svg.setAttribute('data-lagrange-seen', '');
+            L.figures = (L.figures || 0) + 1;
+            view.dom.classList.add('lagrange-pen-figures');
+            figuring = true;
+          }
           if (!at.dirty) {
             const old = view.state.doc;
             const startsLine = at.from === 0 || old.sliceString(at.from - 1, at.from) === '\n';
@@ -4284,7 +4418,7 @@ function createPen(app, settings) {
             if (rows.length > mayWrite || rows.more) out.push({ type: 'text', text: ' …' });
             return out;
           };
-          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite), live)).filter(g => {
+          const script = (!first ? [] : rows.length ? byRow() : penScript(wantFigures ? withoutFigures(text) : text, Math.min(520, 150 * mayWrite), live)).filter(g => {
             if (g.type !== 'math') return true;
             const i = inNote.indexOf(bare(g.source));
             if (i < 0) return true;
@@ -4546,10 +4680,16 @@ function createPen(app, settings) {
           view.dom.style.setProperty('--lagrange-pen-reveal', `${fade}ms`);
           view.dom.classList.add(`lagrange-pen-revealing-${slot}`);
           if (hand) { hand.style.transition = `opacity ${fade}ms ease`; hand.style.opacity = '0'; }
-          if (targets.length) {
+          if (targets.length || wantFigures) {
             await pause(L, fade * 0.6);
             // Then the equations, each where the note has it.
             for (const t of targets.slice(0, SCRIPT_EQUATIONS)) await drawInPlace(L, t.el, k);
+            // And the diagrams: the note draws them (TikZJax after it has compiled one), and the pen draws each in its place.
+            if (wantFigures) {
+              const found = await awaitFigures(L, view, wantFigures, figs.tikz ? 15000 : 6000);
+              for (const svg of found) await drawFigure(L, svg, k);
+              if (found.length < wantFigures) console.debug(`Lagrange: ${wantFigures - found.length} of ${wantFigures} diagram(s) of this edit were not drawn by the note in time (the plugin is off, the figure has an error, or the cursor is in its source), so the pen did not draw them.`);
+            }
             await flyOff();
             await pause(L, 380 * k);                      // the finished equation is looked at for a moment
           } else if (!hand) {
@@ -7552,4 +7692,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

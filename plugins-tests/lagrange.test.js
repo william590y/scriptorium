@@ -2482,3 +2482,17 @@ test('A look: the properties are said to be on the page when the view shows them
   // a look never waits without end on Obsidian's promise for mathematics (it does not settle in a session that has typeset none)
   assert.match(js, /host\.querySelector\('\.math'\)\) await Promise\.race\(\[obsidian\.finishRenderMath\(\), sleep\(3000, signal\)\]\)/);
 });
+
+test('Diagrams: TikZ figures and Excalidraw drawings in an edit are told from the text the pen writes, and drawn shapes first', () => {
+  const tikz = '```tikz\n\\begin{document}\n\\begin{tikzpicture}\n\\draw (0,0) circle (1);\n\\end{tikzpicture}\n\\end{document}\n```';
+  assert.deepEqual(L.figureKinds(`Before.\n\n${tikz}\n\nAfter.`), { tikz: 1, sketch: 0 });
+  assert.deepEqual(L.figureKinds(`${tikz}\n\n~~~tikz\nx\n~~~\n\n![[Orbit.excalidraw]] and ![[Sub/Two.excalidraw.md|300]]`), { tikz: 2, sketch: 2 });
+  assert.deepEqual(L.figureKinds('```python\nprint(1)\n```\n\n![[photo.png]] and the word tikz'), { tikz: 0, sketch: 0 });
+  assert.deepEqual(L.figureKinds(null), { tikz: 0, sketch: 0 });
+  assert.equal(L.withoutFigures(`Before.\n\n${tikz}\n\nAfter ![[Orbit.excalidraw]] it.`), 'Before.\n\n\n\nAfter  it.');
+  assert.equal(L.withoutFigures('```python\nprint(1)\n```'), '```python\nprint(1)\n```', 'other code is still typed');
+  assert.deepEqual(L.figureOrder([{ text: false }, { text: true }, { text: false }, { text: true }, { text: false }]), [0, 2, 4, 1, 3], 'labels last, each kind in the figure’s own order');
+  assert.deepEqual(L.figureOrder([]), []);
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /\.lagrange-pen-figures :is\(\.block-language-tikz svg, \.excalidraw-embedded-img svg, svg\.excalidraw-svg\):not\(\[data-lagrange-seen\]\) \{ opacity: 0 !important; \}/);
+});
