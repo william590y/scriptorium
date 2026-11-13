@@ -200,8 +200,68 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 .lagrange-turn-open { white-space: pre-wrap; }
 .lagrange-turn-open:empty { display: none; }
 .lagrange-turn-body.markdown-rendered { font-size: 1em; line-height: 1.45; }
-.lagrange-turn-body > div > :first-child { margin-top: 0; }
-.lagrange-turn-body > div > :last-child { margin-bottom: 0; }
+.lagrange-turn-body > div > .lagrange-turn-part:first-child > :first-child { margin-top: 0; }
+.lagrange-turn-body > div > .lagrange-turn-part:last-child > :last-child { margin-bottom: 0; }
+/* a line under something the chat shows as its source (a diagram whose plugin is off, a block it will not run) */
+.lagrange-view .lagrange-chat-degraded { color: var(--lagrange-muted); font-style: italic; font-size: 0.85em; }
+/* pictures and video in a message, of the vault or attached: within the panel, never taller than most of it */
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(img, video) { max-width: 100%; height: auto; max-height: 60vh; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) .internal-embed { max-width: 100%; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(.block-language-tikz, .mermaid, .excalidraw-svg, .internal-embed) svg { max-width: 100%; height: auto; }
+
+/* Attachments. In the sent message: pictures and video as they are, files as chips. */
+.lagrange-attached { display: flex; flex-direction: column; align-items: flex-start; gap: 0.45em; margin-top: 0.45em; max-width: 100%; min-width: 0; }
+.lagrange-turn--user > .lagrange-attached:first-child { margin-top: 0; }
+.lagrange-view :is(img.lagrange-attached-image, video.lagrange-attached-video) {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  height: auto;
+  border: 1px solid var(--lagrange-line);
+  border-radius: 2px;
+  background: var(--lagrange-wash, transparent);
+}
+.lagrange-view video.lagrange-attached-video { width: 100%; max-height: 300px; }
+/* A chip: a small picture or a sign, the name, the kind and size; in the tray, a button that takes it off. */
+.lagrange-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0.25em 0.4em 0.25em 0.3em;
+  border: 1px solid var(--lagrange-line);
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+.lagrange-chip-thumb {
+  flex: none;
+  width: 2.4em;
+  height: 2.4em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 2px;
+  color: var(--lagrange-muted);
+}
+.lagrange-chip-thumb :is(img, video) { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+.lagrange-chip-thumb svg { width: 1.3em; height: 1.3em; }
+.lagrange-chip-words { min-width: 0; flex: 1 1 auto; line-height: 1.2; }
+.lagrange-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.92em; }
+.lagrange-chip-kind { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.78em; color: var(--lagrange-muted); }
+.lagrange-view button.lagrange-chip-remove { flex: none; width: 1.6em; height: 1.6em; padding: 0; color: var(--lagrange-muted); }
+.lagrange-view button.lagrange-chip-remove:is(:hover, :focus-visible) { color: var(--lagrange-rubric); }
+.lagrange-view button.lagrange-chip-remove svg { width: 0.95em; height: 0.95em; }
+/* The tray above the box: what is attached to the message being written. It scrolls when there is much. */
+.lagrange-tray { display: flex; flex-direction: column; gap: 0.3em; max-height: 9.5em; overflow-y: auto; margin-bottom: 0.4em; }
+.lagrange-tray.is-empty { display: none; }
+.lagrange-view button.lagrange-attach { flex: none; align-self: center; width: 1.7em; height: 1.7em; padding: 0; margin-left: -0.2em; color: var(--lagrange-muted); }
+.lagrange-view button.lagrange-attach:is(:hover, :focus-visible) { color: var(--lagrange-rubric); }
+.lagrange-view button.lagrange-attach svg { width: 1.05em; height: 1.05em; }
+.lagrange-view input.lagrange-attach-input { display: none; }
+/* while something that can be attached is dragged over the panel */
+.lagrange-view.is-dropping .lagrange-compose { outline: 1px dashed var(--lagrange-rubric); outline-offset: -3px; }
 .lagrange-turn-body p { margin: 0.45em 0; text-align: start; hyphens: auto; }
 .lagrange-turn-body :is(ul, ol) { padding-inline-start: 1.15em; margin: 0.45em 0; }
 .lagrange-turn-body li { margin-inline-start: 0; text-align: start; }

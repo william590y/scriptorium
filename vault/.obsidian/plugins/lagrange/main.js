@@ -1118,7 +1118,11 @@ function messageText(m) {
   if (typeof m.content === 'string') return m.content;
   if (!Array.isArray(m.content)) return '';
   let k = 0;
-  return m.content.map(p => (p && p.type === 'image' ? `[Picture ${++k} of the page is attached.]` : (p && typeof p.text === 'string' ? p.text : ''))).filter(Boolean).join('\n\n');
+  return m.content.map(p => {
+    if (p && p.type === 'image') return p.label ? `[Attached picture ${++k}: ${p.label}.]` : `[Picture ${++k} of the page is attached.]`;
+    if (p && p.type === 'document') return p.alt || `[The PDF “${p.name || 'document'}” was attached; its text could not be taken.]`;
+    return p && typeof p.text === 'string' ? p.text : '';
+  }).filter(Boolean).join('\n\n');
 }
 
 /* The pictures in a list of messages, in order: [{mediaType, data}]. */
@@ -1134,23 +1138,30 @@ function withoutPictures(messages) {
 }
 
 /* The messages as the Messages API takes them: text as it is, a picture as an image block with its bytes in base64
-   (pictures first, then the words about them, which is the order Claude reads best). */
+   (pictures first, then the words about them, which is the order Claude reads best), an attached PDF as a document
+   block. */
 function anthropicMessages(messages) {
   return (messages || []).map(m => ({
     role: m.role,
     content: !Array.isArray(m.content) ? m.content : m.content.map(p => (p.type === 'image'
       ? { type: 'image', source: { type: 'base64', media_type: p.mediaType || 'image/png', data: p.data } }
-      : { type: 'text', text: p.text })),
+      : p.type === 'document'
+        ? { type: 'document', source: { type: 'base64', media_type: p.mediaType || 'application/pdf', data: p.data }, title: p.name || 'document' }
+        : { type: 'text', text: p.text })),
   }));
 }
 
-/* The messages as chat completions take them: a picture is an image_url part holding a data URL. */
+/* The messages as chat completions take them: a picture is an image_url part holding a data URL, an attached PDF a
+   file part holding one (OpenAI's own API takes it; a server that does not turns the request down, and the PDF goes
+   again as its text: see streamOpenAI). */
 function openaiMessages(messages) {
   return (messages || []).map(m => ({
     role: m.role,
     content: !Array.isArray(m.content) ? m.content : m.content.map(p => (p.type === 'image'
       ? { type: 'image_url', image_url: { url: `data:${p.mediaType || 'image/png'};base64,${p.data}` } }
-      : { type: 'text', text: p.text })),
+      : p.type === 'document'
+        ? { type: 'file', file: { filename: p.name || 'document.pdf', file_data: `data:${p.mediaType || 'application/pdf'};base64,${p.data}` } }
+        : { type: 'text', text: p.text })),
   }));
 }
 
@@ -2325,6 +2336,7 @@ async function streamAnthropic(s, req, hooks, session) {
     system: req.system,
     messages: anthropicMessages(req.messages),
   };
+  let picturesRefused = false;
   if (req.cache) body.cache_control = { type: 'ephemeral' };   // reuses the note across turns of one conversation
   const headers = {
     'content-type': 'application/json',
@@ -2357,6 +2369,12 @@ async function streamAnthropic(s, req, hooks, session) {
     } else if (effort && res.status === 400 && /effort|output_config/i.test(said)) {
       forgetEffort(session, `anthropic:${model}`);
       effort = '';
+    // A model that will not take the pictures or the PDF attached (a custom ID for a text-only model, a file it
+    // cannot read) says so: what was attached goes again in words.
+    } else if (!picturesRefused && res.status === 400 && hasBinaryParts(req.messages) && /image|picture|document|pdf|media|vision|multimodal/i.test(said)) {
+      forgetPictures(session, `anthropic:${model}`);
+      body.messages = anthropicMessages(withoutPictures(req.messages));
+      picturesRefused = true;
     } else {
       throw httpError('anthropic', res, text, model);
     }
@@ -2366,7 +2384,7 @@ async function streamAnthropic(s, req, hooks, session) {
     const delta = applyAnthropicEvent(st, ev);
     if (delta && hooks.onText) hooks.onText(delta, st.text);
   });
-  return { text: st.text, stopReason: st.stopReason, stopDetails: st.stopDetails, model: st.model || model, fallbackTo: st.fallbackTo };
+  return { text: st.text, stopReason: st.stopReason, stopDetails: st.stopDetails, model: st.model || model, fallbackTo: st.fallbackTo, picturesRefused };
 }
 
 /* Applies one chat-completions stream chunk (or a whole non-streamed response) to st; returns the text it added. */
@@ -2418,9 +2436,9 @@ async function streamOpenAI(s, req, hooks, session) {
       effort = '';
       continue;
     }
-    // A model that reads text only turns a request with pictures down (400, 415 or 422, in as many wordings as
-    // there are servers): the page goes again in words.
-    if (!picturesRefused && [400, 415, 422].includes(res.status) && messagePictures(messages).length) {
+    // A model that reads text only turns a request with pictures (or an attached PDF) down (400, 415 or 422, in as
+    // many wordings as there are servers): the page, or what was attached, goes again in words.
+    if (!picturesRefused && [400, 415, 422].includes(res.status) && hasBinaryParts(messages)) {
       forgetPictures(session, `openai:${model}`);
       messages = withoutPictures(messages);
       picturesRefused = true;
@@ -3326,23 +3344,466 @@ const LOADER_CAPTIONS = {
   alchemy: 'Lagrange is distilling',
   orbit: 'Lagrange is finding the balance',
 };
-/* A reply as it streams in, cut where it is safe to render: {done, open}. done is the part made of whole blocks (it
-   ends at a blank line that is outside a code fence and outside a $$ … $$ formula); open is what is still being
-   written, which the chat shows as plain text until it closes. While a reply streams, only what is new in `done` is
-   rendered (each new stretch once), so a long reply is not rendered again at every word. Pure. */
+/* A reply as it streams in, cut where it is safe to render: {done, open, tail}. done is the part made of whole
+   blocks; open is what is still being written (done + open is the reply); tail is `open` as the chat shows it, as
+   plain text, until it closes. A cut is made only where what follows cannot change how what came before is set:
+   - right after a code fence that began at the margin has closed, and
+   - at a blank line outside code and formulas, once the next line is known to begin a new block at the margin (not
+     a further item of the same list, not an indented continuation).
+   So the blocks rendered one by one read as the whole reply would (see needsWholeRender for what is left to the
+   end). While a reply streams, only what is new in `done` is rendered, each stretch once. The tail leaves out an
+   opening fence whose name is still arriving and may be one of Lagrange's own blocks (```lagrange-ed…), which are
+   never shown. Pure. */
+const INTERNAL_BLOCKS = ['lagrange-edits', 'lagrange-look'];
 function splitStable(md) {
   const text = String(md == null ? '' : md);
-  let fence = null, math = false, at = 0, safe = 0;
+  let fence = null, margin = false, math = false, at = 0, safe = 0, blank = false, inList = false, hide = -1;
   for (const line of text.split('\n')) {
-    const end = at + line.length + 1;
-    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.slice(f[0].length).trim()) fence = null; }
-    else if (f && !math) fence = f[1];
-    else if (((line.match(/\$\$/g) || []).length) % 2) math = !math;
-    if (!fence && !math && !line.trim() && end <= text.length) safe = end;
+    const end = at + line.length + 1, whole = end <= text.length;   // whole: the line has its newline already
+    const f = /^( {0,3})(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !line.slice(f[0].length).trim()) {
+        fence = null;
+        if (margin) { safe = Math.min(end, text.length); inList = false; }
+      }
+    } else if (math) {
+      if (((line.match(/\$\$/g) || []).length) % 2) math = false;
+    } else if (!line.trim()) {
+      blank = true;
+    } else {
+      const indented = /^[ \t]/.test(line);
+      const item = /^(?:[-*+]|\d{1,9}[.)])[ \t]/.test(line) || (whole && /^(?:[-*+]|\d{1,9}[.)])$/.test(line));
+      const known = whole || item || indented || /^[^-*+\d]/.test(line);   // (a lone "-" or "12" may yet become an item)
+      if (blank && known && !indented && !(item && inList)) { safe = at; inList = false; }
+      if (item) inList = true;
+      blank = false;
+      if (f) {
+        fence = f[2];
+        margin = !f[1];
+        const name = line.slice(f[0].length).trim().toLowerCase();
+        if (!whole && INTERNAL_BLOCKS.some(b => b.startsWith(name))) hide = at;
+      } else if (((line.match(/\$\$/g) || []).length) % 2) {
+        math = true;
+      }
+    }
     at = end;
   }
-  return { done: text.slice(0, safe), open: text.slice(safe) };
+  const open = text.slice(safe);
+  return { done: text.slice(0, safe), open, tail: hide >= safe ? text.slice(safe, hide) : open };
+}
+
+/* Whether a reply holds something that reaches across its blocks (a footnote or a link defined apart from its use,
+   a block of HTML): such a reply is rendered once more as a whole when it is complete. Pure. */
+function needsWholeRender(md) {
+  return /^ {0,3}(?:\[[^\]\n]+\]:|<\/?[a-zA-Z][^>\n]*>[ \t]*$)/m.test(String(md || ''));
+}
+
+/* The Markdown of a chat message as it is given to Obsidian's renderer. The chat only ever shows a reply; it runs
+   nothing a reply holds. So:
+   - a ```tikz block where TikZJax is off, and an Excalidraw embed where Excalidraw is off, are shown as their source
+     in a code block, with a line that says why;
+   - a code block of any other kind that a plugin of the vault would act on (opts.acts(name): a Dataview query, a
+     block of JavaScript for some plugin to run) is shown as its source too, with a line that says so. Mermaid and
+     TikZ only draw, and are let through;
+   - inline code that begins with one of opts.inlineRun (the prefixes a plugin such as Dataview runs inline code by)
+     is kept from running by a zero-width space before it;
+   - nothing is fetched from the web because a reply says so: a picture at an http(s) address becomes a link to it
+     (pictures of the vault and data: pictures are shown), and HTML that would load or run something (a frame, an
+     embedded object, a form, a remote picture or video) is shown as its text.
+   opts: {tikz, sketch: whether the two diagram plugins are on; acts(name) -> bool; inlineRun: [string]}. Pure. */
+const CHAT_DRAWN_BLOCKS = new Set(['mermaid', 'tikz', 'math', 'latex']);
+function chatMarkdown(md, opts) {
+  const o = opts || {};
+  const out = [];
+  const say = text => { out.push('', `<small class="lagrange-chat-degraded">${text}</small>`, ''); skip = true; };
+  let fence = null, note = '', skip = false;   // skip: a line has just been said, and the blank line after it is in already
+  const runs = (o.inlineRun || []).filter(Boolean);
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const runRe = runs.length ? new RegExp('(`+)([ \\t]*)(?=' + runs.map(esc).join('|') + ')', 'g') : null;
+  const sketchRe = /!\[\[([^\]\n|#]*\.excalidraw(?:\.md)?)((?:[|#][^\]\n]*)?)\]\]/gi;
+  for (const line of String(md == null ? '' : md).split('\n')) {
+    if (skip) {
+      skip = false;
+      if (!line.trim()) continue;
+    }
+    const f = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      out.push(line);
+      if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !f[3].trim()) {
+        fence = null;
+        if (note) say(note);
+        note = '';
+      }
+      continue;
+    }
+    if (f) {
+      const info = f[3].trim(), name = (info.split(/[\s{,]/)[0] || '').toLowerCase();
+      fence = f[2];
+      note = '';
+      if (name === 'tikz' && !o.tikz) {
+        note = 'TikZJax is not enabled in this vault, so the figure is shown as its source.';
+      } else if (name && !CHAT_DRAWN_BLOCKS.has(name) && o.acts && o.acts(name)) {
+        // (the name goes, so that no plugin takes the block up; what it was is said under it)
+        out.push(`${f[1]}${f[2]}text`);
+        note = `A “${name}” block: the chat shows its source and runs nothing.`;
+        continue;
+      }
+      out.push(line);
+      continue;
+    }
+    let l = line;
+    if (!o.sketch && sketchRe.test(l)) {
+      sketchRe.lastIndex = 0;
+      if (/^\s*!\[\[[^\]\n]*\]\]\s*$/.test(l)) {
+        out.push('', '```text', l.trim(), '```');
+        say('Excalidraw is not enabled in this vault, so the drawing is shown as its embed.');
+        continue;
+      }
+      l = l.replace(sketchRe, (m, name, rest) => `\`![[${name}${rest}]]\` <small class="lagrange-chat-degraded">(Excalidraw is not enabled in this vault, so the drawing is shown as its embed.)</small>`);
+    }
+    sketchRe.lastIndex = 0;
+    if (runRe) l = l.replace(runRe, '$1$2\u200b');
+    // (outside inline code only: what is in backticks is shown as it is anyway)
+    l = l.split(/(`+[^`\n]*`+)/).map((seg, i) => (i % 2 ? seg : seg
+      .replace(/!\[([^\]\n]*)\]\(\s*<?(https?:\/\/[^\s)>]+)>?[^)\n]*\)/gi, (m, alt, url) => `[${alt || 'picture'} (a picture on the web, not loaded)](${url})`)
+      .replace(/!\[(?!\[)([^\]\n]*)\]\[([^\]\n]*)\]/g, '[$1][$2]')
+      .replace(/<(\/?)(iframe|webview|object|embed|frame|frameset|form|script|style|link|meta|base|portal)\b/gi, '&lt;$1$2')
+      .replace(/<(img|video|audio|source|picture|track|input)\b(?=[^>\n]*(?:https?:)?\/\/)/gi, '&lt;$1'))).join('');
+    out.push(l);
+  }
+  if (fence && note) { out.push(fence); say(note); }   // (a block the reply left open at its end)
+  return out.join('\n');
+}
+
+/* ---- Attachments: what the writer gives Lagrange with a message (pictures, video, PDFs, text files) ----
+   Kept in memory for the session, like the conversation itself (nothing is written into the vault); a file of the
+   vault is attached by its path and read when the message is sent. */
+const ATTACH_MAX = 8;                      // attachments to one message
+const ATTACH_BYTES = { image: 20e6, video: 200e6, pdf: 20e6, text: 5e6 };
+const ATTACH_TEXT_CHARS = 60000;           // of one text file (and of a PDF's text) sent to the model
+const ATTACH_IMAGE_EDGE = 1568;            // a picture's longer side, in pixels, as it is sent
+const ATTACH_IMAGE_BYTES = 3500000;        // a picture larger than this is re-encoded even if it is small enough in pixels
+const ATTACH_FRAMES = 6, ATTACH_FRAME_EDGE = 768;
+const ATTACH_PDF_PAGES = 60;               // pages of a PDF whose text is read
+const ATTACH_KEPT = 4;                     // messages of the conversation that keep their pictures and documents
+const MODEL_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const ATTACH_EXT = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'svg'],
+  video: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ogv'],
+  pdf: ['pdf'],
+  text: ['md', 'markdown', 'txt', 'text', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'log', 'xml', 'html', 'htm', 'css',
+    'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rb', 'rs', 'go', 'java', 'kt', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'swift', 'm', 'php', 'pl', 'lua', 'r',
+    'jl', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'sql', 'tex', 'bib', 'sty', 'cls', 'org', 'rst', 'adoc', 'srt', 'vtt', 'canvas', 'base', 'gitignore', 'env'],
+};
+const EXT_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif',
+  svg: 'image/svg+xml', mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', ogv: 'video/ogg', pdf: 'application/pdf' };
+
+function fileExt(name) {
+  const m = /\.([A-Za-z0-9]+)$/.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : (/^\.?([A-Za-z0-9]+)$/.exec(String(name || '').split(/[\\/]/).pop()) || [])[1] || '';
+}
+
+/* What kind of attachment a file is: {kind: 'image' | 'video' | 'pdf' | 'text', mediaType}, or null for a file
+   Lagrange cannot read (it is then refused, and the writer told). The file's first bytes decide where they can (a
+   picture, a PDF or a video is known by its signature, whatever it is called); then its type as the system gives it;
+   then its name; and a file that is none of these but holds text (no zero byte, valid UTF-8) is a text file.
+   head: its first bytes (Uint8Array), or null when they are not read yet (a file of the vault). Pure. */
+function attachmentKind(name, mime, head) {
+  const ext = fileExt(name), type = String(mime || '').toLowerCase().split(';')[0].trim();
+  const b = head && head.length ? head : null;
+  const at = (s, o) => b && b.length >= o + s.length && Array.from(s).every((c, i) => b[o + i] === c.charCodeAt(0));
+  if (b) {
+    if (b[0] === 0x89 && at('PNG', 1)) return { kind: 'image', mediaType: 'image/png' };
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { kind: 'image', mediaType: 'image/jpeg' };
+    if (at('GIF8', 0)) return { kind: 'image', mediaType: 'image/gif' };
+    if (at('RIFF', 0) && at('WEBP', 8)) return { kind: 'image', mediaType: 'image/webp' };
+    if (at('BM', 0) && (ext === 'bmp' || type === 'image/bmp')) return { kind: 'image', mediaType: 'image/bmp' };
+    if (at('%PDF-', 0)) return { kind: 'pdf', mediaType: 'application/pdf' };
+    if (at('ftyp', 4)) {
+      const brand = String.fromCharCode(...b.slice(8, 12));
+      if (/^(?:avif|avis)$/.test(brand)) return { kind: 'image', mediaType: 'image/avif' };
+      if (/^(?:hei[cxms]|hev[cx]|mif1|msf1)$/.test(brand)) return null;        // HEIC: Obsidian cannot show it
+      return { kind: 'video', mediaType: ext === 'mov' || brand === 'qt  ' ? 'video/quicktime' : 'video/mp4' };
+    }
+    if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return { kind: 'video', mediaType: ext === 'mkv' ? 'video/x-matroska' : 'video/webm' };
+    if (at('OggS', 0) && (ext === 'ogv' || type.startsWith('video/'))) return { kind: 'video', mediaType: 'video/ogg' };
+  }
+  const known = k => ATTACH_EXT[k].includes(ext);
+  const textual = () => {
+    if (!b) return true;
+    if (b.includes(0)) return false;
+    try { new TextDecoder('utf-8', { fatal: true }).decode(b.length > 16 ? b.slice(0, b.length - 4) : b); return true; } catch (e) { return false; }
+  };
+  if (type === 'image/svg+xml' || (ext === 'svg' && !type.startsWith('text/'))) return textual() ? { kind: 'image', mediaType: 'image/svg+xml' } : null;
+  // (a file with bytes in hand that are none of the signatures above is not a picture, a PDF or a video, whatever
+  // it is called: it is a text file if it reads as one, and is refused if not)
+  if (!b) {
+    if (known('image') || /^image\/(?:png|jpeg|gif|webp|bmp|avif)$/.test(type)) return { kind: 'image', mediaType: EXT_MIME[ext] || type };
+    if (type.startsWith('image/')) return null;                                 // (TIFF, HEIC: Obsidian cannot show them)
+    if (type.startsWith('video/') || known('video')) return { kind: 'video', mediaType: type.startsWith('video/') ? type : EXT_MIME[ext] };
+    if (type === 'application/pdf' || known('pdf')) return { kind: 'pdf', mediaType: 'application/pdf' };
+    if (type.startsWith('text/') || /^application\/(?:json|xml|x-yaml|yaml|toml|javascript|x-sh|x-tex|sql|csv)$/.test(type) || known('text')) return { kind: 'text', mediaType: type || 'text/plain' };
+    return null;
+  }
+  if (known('image') || known('video') || known('pdf') || /^(?:image|video|audio)\//.test(type) || type === 'application/pdf') return null;   // called one, but is not
+  return textual() ? { kind: 'text', mediaType: type.startsWith('text/') ? type : 'text/plain' } : null;
+}
+
+function formatBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1000) return `${v} B`;
+  if (v < 1e6) return `${(v / 1000).toFixed(v < 1e4 ? 1 : 0)} kB`;
+  if (v < 1e9) return `${(v / 1e6).toFixed(v < 1e7 ? 1 : 0)} MB`;
+  return `${(v / 1e9).toFixed(1)} GB`;
+}
+
+const ATTACH_KIND_WORD = { image: 'picture', video: 'video', pdf: 'PDF', text: 'text file' };
+/* A chip's second line: “PNG picture · 2.4 kB”. */
+function attachmentLabel(a) {
+  const ext = fileExt(a.name).toUpperCase();
+  const what = a.kind === 'pdf' ? 'PDF' : `${ext && ext.length <= 5 ? ext + ' ' : ''}${a.kind === 'text' ? 'file' : ATTACH_KIND_WORD[a.kind]}`;
+  return `${what}${a.size != null ? ` · ${formatBytes(a.size)}` : ''}${a.path ? ' · in the vault' : ''}`;
+}
+
+/* Which of the files offered are taken, given what is attached already: {take: [index], refused: [{name, why}]}.
+   have: how many are attached; files: [{name, size, kind (attachmentKind's, or null)}]. Pure. */
+function admitAttachments(have, files) {
+  const take = [], refused = [];
+  let n = have;
+  (files || []).forEach((f, i) => {
+    const name = f.name || 'A file';
+    if (!f.kind) refused.push({ name, why: 'Lagrange cannot read this kind of file (it takes pictures, video, PDFs and text files)' });
+    else if (f.size > ATTACH_BYTES[f.kind]) refused.push({ name, why: `it is ${formatBytes(f.size)}, and a ${ATTACH_KIND_WORD[f.kind]} may be ${formatBytes(ATTACH_BYTES[f.kind])} at most` });
+    else if (n >= ATTACH_MAX) refused.push({ name, why: `a message takes ${ATTACH_MAX} attachments at most` });
+    else { take.push(i); n++; }
+  });
+  return { take, refused };
+}
+
+/* The size a picture is sent at: within max pixels on its longer side, never enlarged. Pure. */
+function fitWithin(width, height, max) {
+  const w = Math.max(1, Math.round(width) || 1), h = Math.max(1, Math.round(height) || 1);
+  const scale = Math.min(1, max / Math.max(w, h));
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)), scale };
+}
+
+/* A text file's text as it is sent: all of it, or its first `cap` characters (cut at a line's end where one is
+   near): {text, clipped, total}. Pure. */
+function clipAttachmentText(text, cap) {
+  const t = String(text == null ? '' : text).replace(/\r\n?/g, '\n').replace(/^\ufeff/, '');
+  if (t.length <= cap) return { text: t, clipped: false, total: t.length };
+  let cut = t.lastIndexOf('\n', cap);
+  if (cut < cap * 0.8) cut = cap;
+  return { text: t.slice(0, cut), clipped: true, total: t.length };
+}
+
+/* The moments of a video its frames are taken at: the middles of n equal parts of it (one frame for each second
+   of a video shorter than n seconds). Pure. */
+function frameTimes(duration, n) {
+  const d = Number(duration);
+  if (!(d > 0) || !Number.isFinite(d)) return [0];
+  const k = Math.max(1, Math.min(n, Math.ceil(d)));
+  return Array.from({ length: k }, (_, i) => +(((i + 0.5) * d) / k).toFixed(3));
+}
+
+/* What the provider and model in use take with a message: {images, pdf: 'document' | 'text', video: false, who}.
+   No provider path of Lagrange's takes video itself (the Messages API, chat completions, Claude Code's and Codex's
+   input all take pictures only), so a video always goes as frames taken from it. A PDF goes as a document to the
+   Messages API and to OpenAI's chat completions (a "file" part); a local server, Claude Code and Codex are given
+   its text. The demo sends nothing anywhere. */
+function providerInputs(s, session) {
+  const who = { anthropic: 'Claude', 'claude-code': 'Claude Code', 'openai-api': 'this OpenAI model', codex: 'Codex', openai: 'the model on your server', demo: 'the demo' }[s.provider] || 'this model';
+  if (s.provider === 'demo') return { images: false, pdf: 'text', video: false, who, demo: true };
+  const refused = Boolean(session && session.noPictures && session.noPictures[providerKey(s)]);
+  const images = !refused && (picturesSupported(s) || (s.provider === 'openai' && s.lookPictures === 'on'));
+  const pdf = images && (s.provider === 'anthropic' || s.provider === 'openai-api') ? 'document' : 'text';
+  return { images, pdf, video: false, who };
+}
+
+const seconds = d => (d >= 10 ? `${Math.round(d)}` : `${Math.round(d * 10) / 10}`);
+
+/* The writer's message with its attachments, as the model is sent it: {parts, text, alt, notes}.
+   parts: the pictures (a video's frames among them) and documents, as message parts ({type: 'image', mediaType,
+   data, label} and {type: 'document', mediaType, data, name, alt}); text: a list of what is attached, the text
+   files (and PDFs given as text), then the message; alt: the same in words alone, for a model that turns pictures
+   and documents down; notes: what the writer is told in the chat (a file cut short, a video sent as frames, a
+   picture this model cannot see). Nothing attached is ever left out without a line in both.
+   items: prepared attachments [{kind, name, problem} + image: {image: {mediaType, data, width, height, scaled}};
+   video: {duration, frames: [{mediaType, data, at}]}; text: {text, clipped, total}; pdf: {data, pages, text,
+   clipped, total}]. inputs: providerInputs. Pure. */
+function attachmentMessage(message, items, inputs) {
+  const parts = [], notes = [], files = [], altFiles = [];
+  const list = [], altList = [];
+  const quote = n => `“${n}”`;
+  const fileBlock = (name, extra, body) => `<attached_file name="${String(name).replace(/"/g, "'")}"${extra}>\n${body}\n</attached_file>`;
+  const cutLine = it => `\n[The file is cut here: these are the first ${it.text.length.toLocaleString('en')} of its ${it.total.toLocaleString('en')} characters.]`;
+  for (const it of items || []) {
+    const name = it.name || 'attachment';
+    if (it.problem) {
+      const line = `- ${quote(name)} (${ATTACH_KIND_WORD[it.kind] || 'file'}): it could not be read (${it.problem}), so you are not given it.`;
+      list.push(line);
+      altList.push(line);
+      notes.push(`${quote(name)} could not be read (${it.problem}), so Lagrange was not given it.`);
+      continue;
+    }
+    if (it.kind === 'image') {
+      const size = `${it.image.width}×${it.image.height} pixels`;
+      const blind = `- ${quote(name)} (a picture, ${size}): it could not be shown to you, since ${inputs.demo ? 'nothing is sent in demo mode' : 'the model in use reads text only'}.`;
+      altList.push(blind);
+      if (inputs.images) {
+        parts.push({ type: 'image', mediaType: it.image.mediaType, data: it.image.data, label: name });
+        list.push(`- ${quote(name)} (a picture, ${size}): attached.`);
+        if (it.image.scaled) notes.push(`${quote(name)} was scaled down to ${size} to be sent.`);
+      } else {
+        list.push(blind);
+        notes.push(inputs.demo ? `${quote(name)} was not sent anywhere (demo mode).` : `${inputs.who} takes no pictures, so ${quote(name)} was not shown to it: it was told only that the picture is there.`);
+      }
+    } else if (it.kind === 'video') {
+      const n = it.frames.length, d = seconds(it.duration);
+      const blind = `- ${quote(name)} (a video of ${d} seconds): it could not be shown to you.`;
+      altList.push(blind);
+      if (inputs.images && n) {
+        it.frames.forEach((f, i) => parts.push({ type: 'image', mediaType: f.mediaType, data: f.data, label: `${name}, frame ${i + 1} of ${n}, at ${seconds(f.at)} s` }));
+        list.push(`- ${quote(name)} (a video of ${d} seconds): you cannot be given video, so ${n === 1 ? 'one frame' : `${n} frames`} taken from it ` +
+          `(at ${it.frames.map(f => seconds(f.at)).join(', ')} s) ${n === 1 ? 'is' : 'are'} attached as pictures, in order. You do not have its sound, or what happens between the frames.`);
+        notes.push(`${inputs.who} takes no video, so ${quote(name)} (${d} s) was sent as ${n === 1 ? 'one frame' : `${n} frames`} taken from it, without its sound.`);
+      } else {
+        list.push(blind);
+        notes.push(inputs.demo ? `${quote(name)} was not sent anywhere (demo mode).` : `${inputs.who} takes neither video nor pictures, so ${quote(name)} was not shown to it: it was told only that the video is there.`);
+      }
+    } else if (it.kind === 'text') {
+      const block = fileBlock(name, '', it.text + (it.clipped ? cutLine(it) : ''));
+      files.push(block);
+      altFiles.push(block);
+      const line = `- ${quote(name)} (a text file${it.clipped ? ', cut short' : ''}): its text is below.`;
+      list.push(line);
+      altList.push(line);
+      if (it.clipped) notes.push(`${quote(name)} is long (${it.total.toLocaleString('en')} characters), so Lagrange was given its first ${it.text.length.toLocaleString('en')}.`);
+    } else if (it.kind === 'pdf') {
+      const pages = `${it.pages || '?'} ${it.pages === 1 ? 'page' : 'pages'}`;
+      const hasText = Boolean(it.text && it.text.trim());
+      const block = hasText ? fileBlock(name, ` pages="${it.pages || ''}" as="text taken from the PDF"`, it.text + (it.clipped ? cutLine(it) : '')) : '';
+      const asText = `- ${quote(name)} (a PDF, ${pages}): the text taken from it is below${it.clipped ? ', cut short' : ''}; its pictures and layout are not.`;
+      const unread = `- ${quote(name)} (a PDF, ${pages}): no text could be taken from it (it may be a scan), so you are not given it.`;
+      if (hasText) altFiles.push(block);
+      altList.push(hasText ? asText : unread);
+      if (inputs.pdf === 'document' && it.data) {
+        parts.push({ type: 'document', mediaType: 'application/pdf', data: it.data, name, alt: hasText ? block : '' });
+        list.push(`- ${quote(name)} (a PDF, ${pages}): attached as a document.`);
+      } else if (hasText) {
+        files.push(block);
+        list.push(asText);
+        notes.push(`${quote(name)} was given to ${inputs.demo ? 'the demo' : inputs.who} as the text taken from it${it.clipped ? ` (its first ${it.text.length.toLocaleString('en')} of ${it.total.toLocaleString('en')} characters)` : ''}, without its pictures and layout.`);
+      } else {
+        list.push(unread);
+        notes.push(`No text could be taken from ${quote(name)} (it may be a scan), and ${inputs.who} takes no PDF as it is, so Lagrange was not given it.`);
+      }
+    }
+  }
+  const words = String(message || '').trim() || '(The writer sent the attachments without a message.)';
+  const build = (l, fs) => (l.length ? `<attachments>\nThe writer attached ${l.length === 1 ? 'this' : 'these'} to the message:\n${l.join('\n')}\n</attachments>\n\n` : '') +
+    (fs.length ? fs.join('\n\n') + '\n\n' : '') + words;
+  return { parts, text: build(list, files), alt: build(altList, altFiles), notes };
+}
+
+/* Whether any message holds a picture or a document (which a provider may turn down). */
+function hasBinaryParts(messages) {
+  return (messages || []).some(m => m && Array.isArray(m.content) && m.content.some(p => p && (p.type === 'image' || p.type === 'document')));
+}
+
+/* The conversation as it is sent: only its last `keep` messages with pictures or documents still hold them; in the
+   earlier ones they have become words (the message's alt), so that a long conversation does not carry every
+   picture ever attached with every request. Pure; the messages themselves are not changed. */
+function recentBinaries(messages, keep) {
+  let left = keep;
+  const out = (messages || []).slice();
+  for (let i = out.length - 1; i >= 0; i--) {
+    const m = out[i];
+    if (!m || !Array.isArray(m.content) || !m.content.some(p => p && (p.type === 'image' || p.type === 'document'))) continue;
+    if (left > 0) { left--; continue; }
+    out[i] = { role: m.role, content: typeof m.alt === 'string' ? m.alt : messageText(m) };
+  }
+  return out;
+}
+
+/* The files of the vault named by what was dropped from Obsidian's own file explorer (its text is one obsidian://
+   link a line): their paths, as the links give them (a note's may lack its ".md"). Pure. */
+function vaultPathsFromDrop(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^obsidian:\/\/open\?(.*)$/.exec(line.trim());
+    if (!m) continue;
+    const file = /(?:^|&)file=([^&]*)/.exec(m[1]);
+    if (file) { try { out.push(decodeURIComponent(file[1].replace(/\+/g, ' '))); } catch (e) { /* not a path */ } }
+  }
+  return out;
+}
+
+/* The files a paste brings (clipboardData), or [] when the paste is of text: a copied file or picture is attached;
+   text copied from an application that also offers a picture of it (a word processor, a spreadsheet) is pasted as
+   text. clip: {files, items, getData}. */
+function pastedFiles(clip) {
+  if (!clip) return [];
+  let files = Array.from(clip.files || []);
+  if (!files.length && clip.items) files = Array.from(clip.items).filter(i => i && i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return [];
+  let text = '';
+  try { text = clip.getData ? String(clip.getData('text/plain') || '') : ''; } catch (e) { /* no text */ }
+  if (text.trim() && files.every(f => /^image\//.test(f.type || ''))) return [];
+  return files;
+}
+
+/* Prepares one attachment to be sent: reads it, scales a picture down, takes a video's frames, takes a PDF's text.
+   Resolves with an item for attachmentMessage; what cannot be read comes back with `problem` (a few words), never
+   as nothing. att: {kind, name, mediaType, size, read() -> Promise<Uint8Array>}. env does what needs a browser:
+     env.decodeImage(bytes, mediaType) -> Promise<{width, height, encode(width, height) -> {mediaType, data}}>
+     env.videoFrames(bytes, mediaType, n, edge) -> Promise<{duration, frames: [{mediaType, data, at}]}>
+     env.pdfText(bytes, maxPages) -> Promise<{pages, text}> */
+async function prepareAttachment(att, env) {
+  const base = { kind: att.kind, name: att.name };
+  let bytes;
+  try { bytes = await att.read(); } catch (e) { return Object.assign(base, { problem: 'the file could not be opened' }); }
+  if (bytes.length > ATTACH_BYTES[att.kind]) return Object.assign(base, { problem: `it is ${formatBytes(bytes.length)}, over the limit of ${formatBytes(ATTACH_BYTES[att.kind])}` });
+  // (a file of the vault was taken by its name: its bytes have the last word on what it is)
+  const real = attachmentKind(att.name, att.mediaType, bytes.subarray(0, 4096));
+  if (!real || real.kind !== att.kind) return Object.assign(base, { problem: `it is not a ${ATTACH_KIND_WORD[att.kind]} Lagrange can read` });
+  const mediaType = real.mediaType || att.mediaType;
+  if (att.kind === 'image') {
+    try {
+      const pic = await env.decodeImage(bytes, mediaType);
+      const fit = fitWithin(pic.width, pic.height, ATTACH_IMAGE_EDGE);
+      if (fit.scale === 1 && MODEL_IMAGE_TYPES.includes(mediaType) && bytes.length <= ATTACH_IMAGE_BYTES) {
+        return Object.assign(base, { image: { mediaType, data: base64FromBytes(bytes), width: fit.width, height: fit.height, scaled: false } });
+      }
+      const enc = pic.encode(fit.width, fit.height);
+      return Object.assign(base, { image: { mediaType: enc.mediaType, data: enc.data, width: fit.width, height: fit.height, scaled: fit.scale < 1 } });
+    } catch (e) { return Object.assign(base, { problem: 'it could not be read as a picture' }); }
+  }
+  if (att.kind === 'video') {
+    try {
+      const v = await env.videoFrames(bytes, mediaType, ATTACH_FRAMES, ATTACH_FRAME_EDGE);
+      if (!v.frames.length) throw new Error('no frames');
+      return Object.assign(base, { duration: v.duration, frames: v.frames });
+    } catch (e) { return Object.assign(base, { problem: 'Obsidian could not play it to take frames from it' }); }
+  }
+  if (att.kind === 'pdf') {
+    let got = { pages: 0, text: '' };
+    try { got = await env.pdfText(bytes, ATTACH_PDF_PAGES); } catch (e) { /* no text: it may still go as a document */ }
+    const clip = clipAttachmentText(got.text, ATTACH_TEXT_CHARS);
+    return Object.assign(base, { data: base64FromBytes(bytes), pages: got.pages, text: clip.text, clipped: clip.clipped || got.more > 0, total: clip.total });
+  }
+  let text;
+  try { text = new TextDecoder('utf-8').decode(bytes); } catch (e) { return Object.assign(base, { problem: 'it could not be read as text' }); }
+  return Object.assign(base, clipAttachmentText(text, ATTACH_TEXT_CHARS));
+}
+
+/* A line for the demo's reply about what was attached (nothing is sent anywhere in demo mode). */
+function demoAttachmentLine(items) {
+  if (!items || !items.length) return '';
+  const one = it => `**${it.name}** (${it.problem ? `could not be read: ${it.problem}` : it.kind === 'image' ? `a picture, ${it.image.width}×${it.image.height}`
+    : it.kind === 'video' ? `a video of ${seconds(it.duration)} s, ${it.frames.length} frames taken` : it.kind === 'pdf' ? `a PDF, ${it.pages || '?'} pages, ${it.total.toLocaleString('en')} characters of text`
+      : `a text file, ${it.total.toLocaleString('en')} characters`})`;
+  return `You attached ${items.map(one).join(', ')}. In demo mode nothing is sent anywhere, so no model has looked at ${items.length === 1 ? 'it' : 'them'}.`;
 }
 
 /* Which plate the next loader shows when none is chosen in the settings: the first one of a session is taken by
@@ -5943,7 +6404,94 @@ function renderMarkdown(app, markdown, el, sourcePath, component) {
   return MarkdownRenderer.renderMarkdown(markdown, el, sourcePath, component);
 }
 
+/* What preparing an attachment needs of the browser (see prepareAttachment): a picture is decoded and drawn smaller
+   on a canvas (as a JPEG, on white), a video is played unseen and unheard to the moments its frames are taken at, a
+   PDF's text is read with the PDF reader Obsidian has. Everything is read from the bytes in memory (blob: addresses),
+   so nothing is fetched and no file is written. */
+function attachmentEnv(win) {
+  const doc = win.document;
+  const jpeg = (source, w, h, quality) => {
+    const c = doc.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, w, h);
+    g.drawImage(source, 0, 0, w, h);
+    const url = c.toDataURL('image/jpeg', quality);
+    return { mediaType: 'image/jpeg', data: url.slice(url.indexOf(',') + 1) };
+  };
+  const waitFor = (el, ok, bad, ms) => new Promise((resolve, reject) => {
+    const done = f => () => { win.clearTimeout(timer); el.removeEventListener(ok, yes); el.removeEventListener(bad, no); f(); };
+    const yes = done(resolve), no = done(() => reject(new Error(bad)));
+    const timer = win.setTimeout(done(() => reject(new Error('timeout'))), ms);
+    el.addEventListener(ok, yes);
+    el.addEventListener(bad, no);
+  });
+  return {
+    async decodeImage(bytes, mediaType) {
+      const url = win.URL.createObjectURL(new win.Blob([bytes], { type: mediaType }));
+      try {
+        const img = new win.Image();
+        const loaded = waitFor(img, 'load', 'error', 20000);
+        img.src = url;
+        await loaded;
+        const width = img.naturalWidth || 1024, height = img.naturalHeight || 1024;   // (an SVG may state no size)
+        return { width, height, encode: (w, h) => jpeg(img, w, h, 0.9) };
+      } finally {
+        win.URL.revokeObjectURL(url);
+      }
+    },
+    async videoFrames(bytes, mediaType, n, edge) {
+      const url = win.URL.createObjectURL(new win.Blob([bytes], { type: mediaType }));
+      const v = doc.createElement('video');
+      try {
+        v.muted = true;
+        v.preload = 'auto';
+        const ready = waitFor(v, 'loadeddata', 'error', 20000);
+        v.src = url;
+        await ready;
+        const duration = Number.isFinite(v.duration) ? v.duration : 0;
+        const fit = fitWithin(v.videoWidth, v.videoHeight, edge);
+        const frames = [];
+        for (const at of frameTimes(duration, n)) {
+          if (Math.abs(v.currentTime - at) > 0.001) {
+            const sought = waitFor(v, 'seeked', 'error', 8000);
+            v.currentTime = at;
+            await sought;
+          }
+          frames.push(Object.assign(jpeg(v, fit.width, fit.height, 0.8), { at }));
+          await new Promise(r => win.setTimeout(r, 0));     // (the panel stays live between frames)
+        }
+        return { duration, frames };
+      } finally {
+        v.removeAttribute('src');
+        try { v.load(); } catch (e) { /* gone */ }
+        win.URL.revokeObjectURL(url);
+      }
+    },
+    async pdfText(bytes, maxPages) {
+      const pdfjs = await obsidian.loadPdfJs();
+      const task = pdfjs.getDocument({ data: bytes.slice() });
+      const pdf = await task.promise;
+      try {
+        const pages = pdf.numPages, read = Math.min(pages, maxPages);
+        const out = [];
+        for (let i = 1; i <= read; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          out.push(content.items.map(it => (it.str || '') + (it.hasEOL ? '\n' : '')).join('').trim());
+        }
+        return { pages, more: pages - read, text: out.filter(Boolean).join('\n\n') };
+      } finally {
+        try { await task.destroy(); } catch (e) { /* closed */ }
+      }
+    },
+  };
+}
+
 let pickerUid = 0;   // radio groups need a name of their own in each picker drawn
+let attachUid = 0;
 
 class LagrangeChatView extends ItemView {
   constructor(leaf, plugin) {
@@ -5954,6 +6502,8 @@ class LagrangeChatView extends ItemView {
     this.clipNoted = new Set();  // notes whose clipping the writer has been told about
     this.checkpoints = [];       // one per message sent, for "Rewind to here" (see rewindTo)
     this.shown = null;           // {look, el, hint}: a page the writer has shown Lagrange, to go with the next message
+    this.attachments = [];       // what is attached to the message being written (see attach): pictures, video, files
+    this.urls = [];              // blob: addresses made for showing them, given up when the conversation is cleared
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -6001,6 +6551,8 @@ class LagrangeChatView extends ItemView {
     this.watchLog();
 
     const compose = root.createDiv({ cls: 'lagrange-compose' });
+    // What is attached to the message being written: a chip each, above the box (renderTray).
+    this.trayEl = compose.createDiv({ cls: 'lagrange-tray is-empty', attr: { 'aria-label': 'Attached to your message' } });
     this.inputEl = compose.createEl('textarea', {
       cls: 'lagrange-input',
       attr: { rows: '2', placeholder: this.plugin.settings.agenticEdits ? 'Ask about this note, or ask for a change…' : 'Ask about this note…', 'aria-label': 'Message to Lagrange' },
@@ -6012,8 +6564,41 @@ class LagrangeChatView extends ItemView {
       }
     });
     this.inputEl.addEventListener('input', () => this.fitInput());
+    // A copied picture, video or file pasted into the box is attached; so is one dropped anywhere on the panel (from
+    // the system, or a file of the vault from Obsidian's file explorer), or picked with the paperclip.
+    this.inputEl.addEventListener('paste', ev => {
+      const files = pastedFiles(ev.clipboardData);
+      if (!files.length) return;
+      ev.preventDefault();
+      void this.attachFiles(files);
+    });
+    root.addEventListener('dragover', ev => {
+      if (!this.canDrop(ev)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.dataTransfer.dropEffect = 'copy';
+      root.addClass('is-dropping');
+    });
+    root.addEventListener('dragleave', ev => { if (!root.contains(ev.relatedTarget)) root.removeClass('is-dropping'); });
+    root.addEventListener('drop', ev => {
+      root.removeClass('is-dropping');
+      if (!this.canDrop(ev)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      void this.takeDrop(ev);
+    });
     const foot = compose.createDiv({ cls: 'lagrange-foot' });
     const left = foot.createDiv({ cls: 'lagrange-foot-left' });
+    const pick = compose.createEl('input', { cls: 'lagrange-attach-input', attr: { type: 'file', multiple: '', hidden: '', tabindex: '-1', 'aria-hidden': 'true' } });
+    pick.addEventListener('change', () => {
+      const files = Array.from(pick.files || []);
+      pick.value = '';
+      if (files.length) void this.attachFiles(files);
+    });
+    this.pickEl = pick;
+    const clip = left.createEl('button', { cls: 'lagrange-attach clickable-icon', attr: { type: 'button', 'aria-label': 'Attach pictures, video or files' } });
+    setIcon(clip, 'paperclip');
+    clip.addEventListener('click', () => pick.click());
     // The model and effort in use: a button that opens the picker (openPicker).
     this.modelEl = left.createEl('button', {
       cls: 'lagrange-model',
@@ -6044,6 +6629,7 @@ class LagrangeChatView extends ItemView {
   async onClose() {
     this.stop();
     this.closePicker();
+    this.dropUrls();
   }
 
   refreshSubject() {
@@ -6168,6 +6754,131 @@ class LagrangeChatView extends ItemView {
     }
   }
 
+  /* ---- Attachments ---- */
+
+  /* Whether what is dragged over the panel can be attached: files of the system, or of the vault (dragged from
+     Obsidian's file explorer, which says what it drags in app.dragManager). */
+  canDrop(ev) {
+    const dt = ev.dataTransfer;
+    if (!dt) return false;
+    const d = this.app.dragManager && this.app.dragManager.draggable;
+    return Array.from(dt.types || []).includes('Files') || Boolean(d && (d.file || d.files));
+  }
+
+  async takeDrop(ev) {
+    const dt = ev.dataTransfer, vault = this.app.vault;
+    const d = this.app.dragManager && this.app.dragManager.draggable;
+    const own = [];
+    if (d && d.file) own.push(d.file);
+    else if (d && Array.isArray(d.files)) own.push(...d.files);
+    const files = Array.from(dt.files || []);
+    if (!own.length && !files.length) {
+      let text = '';
+      try { text = dt.getData('text/plain'); } catch (e) { /* nothing */ }
+      for (const p of vaultPathsFromDrop(text)) {
+        const f = vault.getAbstractFileByPath(p) || vault.getAbstractFileByPath(`${p}.md`);
+        if (f) own.push(f);
+      }
+    }
+    if (own.length) this.attachVaultFiles(own);
+    if (files.length) await this.attachFiles(files);
+    this.inputEl.focus();
+  }
+
+  /* Files of the system (pasted, dropped or picked): each is known by its first bytes, and is read in full only
+     when the message is sent. */
+  async attachFiles(files) {
+    const list = [];
+    for (const f of files) {
+      let kind = null;
+      try { kind = attachmentKind(f.name, f.type, new Uint8Array(await f.slice(0, 4096).arrayBuffer())); } catch (e) { /* a folder, or unreadable */ }
+      list.push({
+        name: f.name || 'pasted file', size: f.size, kind: kind && kind.kind, mediaType: kind && kind.mediaType, blob: f,
+        read: async () => new Uint8Array(await f.arrayBuffer()),
+      });
+    }
+    this.attach(list);
+  }
+
+  /* Files of the vault: attached by their path, and read from the vault when the message is sent. */
+  attachVaultFiles(files) {
+    this.attach(files.map(f => {
+      if (f.children) return { name: f.name || f.path, size: 0, kind: null, folder: true };
+      const kind = attachmentKind(f.name, '', null);
+      return {
+        name: f.name, path: f.path, size: f.stat ? f.stat.size : null, kind: kind && kind.kind, mediaType: kind && kind.mediaType,
+        url: this.app.vault.getResourcePath(f),
+        read: async () => new Uint8Array(await this.app.vault.readBinary(f)),
+      };
+    }));
+  }
+
+  attach(list) {
+    const { take, refused } = admitAttachments(this.attachments.length, list);
+    for (const i of take) {
+      const a = list[i];
+      a.id = ++attachUid;
+      if (!a.url && a.blob && (a.kind === 'image' || a.kind === 'video')) {
+        a.url = window.URL.createObjectURL(a.blob);
+        this.urls.push(a.url);
+      }
+      this.attachments.push(a);
+    }
+    if (refused.length) new Notice(refused.map(r => `${r.name}: ${r.why}.`).join('\n'), 10000);
+    this.renderTray();
+  }
+
+  removeAttachment(a) {
+    this.attachments = this.attachments.filter(x => x !== a);
+    this.renderTray();
+    this.inputEl.focus();
+  }
+
+  renderTray() {
+    const t = this.trayEl;
+    if (!t) return;
+    t.empty();
+    t.toggleClass('is-empty', !this.attachments.length);
+    for (const a of this.attachments) t.appendChild(this.chipEl(a, true));
+  }
+
+  /* An attachment as a chip: a small picture of it (or a sign for its kind), its name, its kind and size, and in the
+     tray a button that takes it off. */
+  chipEl(a, removable) {
+    const chip = createDiv({ cls: `lagrange-chip lagrange-chip--${a.kind}` });
+    const thumb = chip.createDiv({ cls: 'lagrange-chip-thumb' });
+    if (a.kind === 'image' && a.url) thumb.createEl('img', { attr: { src: a.url, alt: '' } });
+    else if (a.kind === 'video' && a.url) thumb.createEl('video', { attr: { src: a.url, preload: 'metadata', tabindex: '-1' } }).muted = true;
+    else setIcon(thumb, a.kind === 'pdf' ? 'file-text' : a.kind === 'video' ? 'film' : a.kind === 'image' ? 'image' : 'file');
+    const words = chip.createDiv({ cls: 'lagrange-chip-words' });
+    words.createDiv({ cls: 'lagrange-chip-name', text: a.name });
+    words.createDiv({ cls: 'lagrange-chip-kind', text: attachmentLabel(a) });
+    if (removable) {
+      const x = chip.createEl('button', { cls: 'lagrange-chip-remove clickable-icon', attr: { type: 'button', 'aria-label': `Remove ${a.name}` } });
+      setIcon(x, 'x');
+      x.addEventListener('click', () => this.removeAttachment(a));
+    }
+    return chip;
+  }
+
+  dropUrls() {
+    for (const u of this.urls) { try { window.URL.revokeObjectURL(u); } catch (e) { /* gone */ } }
+    this.urls = [];
+  }
+
+  /* A message's Markdown set in the log as Obsidian sets a note (code with its colours and its copy button,
+     mathematics, Mermaid, TikZ and Excalidraw where the vault has them, pictures and video of the vault), after
+     chatMarkdown has made it safe to show. */
+  renderChat(md, el, sourcePath, component) {
+    try {
+      const done = renderMarkdown(this.app, chatMarkdown(md, this.plugin.chatRenderOptions()), el, sourcePath || '', component);
+      Promise.resolve(done).then(() => this.scrollDown(), () => {});
+    } catch (e) {
+      console.error('Lagrange: rendering a message', e);
+      el.setText(md);
+    }
+  }
+
   fitInput() {
     const el = this.inputEl;
     el.style.height = 'auto';
@@ -6252,6 +6963,9 @@ class LagrangeChatView extends ItemView {
     this.shown = null;
     this.clipNoted.clear();
     this.logEl.empty();
+    this.attachments = [];
+    this.renderTray();
+    this.dropUrls();
     this.showEmpty();
   }
 
@@ -6275,13 +6989,24 @@ class LagrangeChatView extends ItemView {
   }
 
   /* The writer's message in the log, with its "Rewind to here" button. */
-  addUser(text, checkpoint) {
+  addUser(text, checkpoint, attached) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--user' });
     // (the writer's own message is rendered too: code, mathematics and diagrams in it show as they do in a note)
-    const said = el.createDiv({ cls: 'lagrange-turn-text markdown-rendered' });
-    const target = this.plugin.targetMarkdownView();
-    try { renderMarkdown(this.app, text, said, (target && target.file && target.file.path) || '', this); } catch (e) { said.setText(text); }
+    if (text) {
+      const said = el.createDiv({ cls: 'lagrange-turn-text markdown-rendered' });
+      const target = this.plugin.targetMarkdownView();
+      this.renderChat(text, said, (target && target.file && target.file.path) || '', this);
+    }
+    // What was attached: pictures as they are (scaled to the panel), video with its controls, files as chips.
+    if (attached && attached.length) {
+      const strip = el.createDiv({ cls: 'lagrange-attached' });
+      for (const a of attached) {
+        if (a.kind === 'image' && a.url) strip.createEl('img', { cls: 'lagrange-attached-image', attr: { src: a.url, alt: a.name } });
+        else if (a.kind === 'video' && a.url) strip.createEl('video', { cls: 'lagrange-attached-video', attr: { src: a.url, controls: '', preload: 'metadata', 'aria-label': a.name } });
+        else strip.appendChild(this.chipEl(a, false));
+      }
+    }
     if (checkpoint) {
       checkpoint.el = el;
       const b = el.createEl('button', { cls: 'lagrange-rewind clickable-icon' });
@@ -6338,6 +7063,8 @@ class LagrangeChatView extends ItemView {
     }
     this.showEmpty();
     this.inputEl.value = cp.text;
+    this.attachments = (cp.attachments || []).slice(0, ATTACH_MAX);   // (what was attached to it is attached again)
+    this.renderTray();
     this.fitInput();
     this.inputEl.focus();
     if (cp.expired) new Notice(`Rewound the conversation. The note as it was then is no longer kept (only the last ${CHECKPOINTS_KEPT} points are), so it was left as it is.`, 8000);
@@ -6352,7 +7079,7 @@ class LagrangeChatView extends ItemView {
     return el;
   }
 
-  /* A reply in the log: a loader until the first words, then Markdown, re-rendered as text streams in. */
+  /* A reply in the log: a loader until the first words, then Markdown, rendered block by block as text streams in. */
   addReply(sourcePath) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--reply' });
@@ -6361,33 +7088,34 @@ class LagrangeChatView extends ItemView {
     this.scrollDown();
     let md = '', shown = null, timer = null, comp = null, status = null;
     // While the reply streams: the whole blocks that have come are rendered once each, as Obsidian renders a note
-    // (code with its colours and copy button, mathematics, Mermaid, TikZ and Excalidraw where the vault has them),
-    // and what is still being written is shown as plain text under them (splitStable). At the end the reply is
-    // rendered once more as a whole.
-    let stream = null;                     // {comp, box, tail, done}
-    const render = whole => {
+    // (renderChat), and what is still being written is shown as plain text under them (splitStable). When the
+    // reply is complete, what is left of it is rendered; it is rendered again as a whole only if it holds something
+    // that reaches across blocks (needsWholeRender) or is not what was streamed, so a diagram is not drawn twice.
+    let stream = null;                     // {box, tail, done}
+    const begin = () => {
+      const next = new Component();
+      this.addChild(next);
+      const box = createDiv();
+      body.empty();
+      body.appendChild(box);
+      if (comp) this.removeChild(comp);
+      comp = next;
+      stream = { box, tail: body.createDiv({ cls: 'lagrange-turn-open' }), done: '' };
+    };
+    const render = last => {
       timer = null;
-      if (md === shown && !whole) return;
+      if (md === shown && !last) return;
       shown = md;
       if (loader) { loader.stop(); loader = null; }
-      if (whole || !stream) {
-        const next = new Component();
-        this.addChild(next);
-        const box = createDiv();
-        body.empty();
-        body.appendChild(box);
-        if (comp) this.removeChild(comp);
-        comp = next;
-        stream = { comp: next, box, tail: null, done: '' };
-        if (whole) { renderMarkdown(this.app, md, box, sourcePath || '', next); stream = null; this.scrollDown(); return; }
-        stream.tail = body.createDiv({ cls: 'lagrange-turn-open' });
-      }
-      const part = splitStable(md);
-      if (!part.done.startsWith(stream.done)) { stream = null; render(false); return; }   // (the text before was changed: from the start again)
+      if (!stream) begin();
+      let part = last ? { done: md, tail: '' } : splitStable(md);
+      // (the text before was changed, or the whole must be set as one: from the start again)
+      if (!part.done.startsWith(stream.done) || (last && stream.done && needsWholeRender(md))) begin();
       const fresh = part.done.slice(stream.done.length);
-      if (fresh.trim()) renderMarkdown(this.app, fresh, stream.box.createDiv(), sourcePath || '', stream.comp);
+      if (fresh.trim()) this.renderChat(fresh, stream.box.createDiv({ cls: 'lagrange-turn-part' }), sourcePath, comp);
       stream.done = part.done;
-      stream.tail.setText(part.open);
+      stream.tail.setText(part.tail);
+      if (last) { stream.tail.remove(); stream = null; }
       this.scrollDown();
     };
     return {
@@ -6402,6 +7130,7 @@ class LagrangeChatView extends ItemView {
         if (status) { status.remove(); status = null; }
         md = text;
         if (md) render(true);
+        else stream = null;
         if (loader) { loader.stop(); loader = null; }
         if (!md) { body.empty(); if (!keep) el.addClass('is-empty'); }
       },
@@ -6506,8 +7235,11 @@ class LagrangeChatView extends ItemView {
   async send() {
     if (this.pending) return;
     const text = this.inputEl.value.trim();
-    if (!text) return;
+    const attached = this.attachments.slice();
+    if (!text && !attached.length) return;
     this.inputEl.value = '';
+    this.attachments = [];
+    this.renderTray();
     this.fitInput();
     this.stick = true;
 
@@ -6518,11 +7250,11 @@ class LagrangeChatView extends ItemView {
 
     // The checkpoint for "Rewind to here": where the conversation stands, and the note as it is now.
     const checkpoint = {
-      text, historyLength: this.history.length, path: note ? note.path : null, before: note ? note.text : null, after: null,
+      text, attachments: attached, historyLength: this.history.length, path: note ? note.path : null, before: note ? note.text : null, after: null,
       expired: false, clock: this.plugin.editClock,
     };
     this.checkpoints.push(checkpoint);
-    this.addUser(text, checkpoint);
+    this.addUser(text, checkpoint, attached);
     if (clip && clip.clipped && !this.clipNoted.has(note.path)) {
       this.clipNoted.add(note.path);
       this.addAside(`“${note.title}” is long (${clip.total.toLocaleString()} characters), so Lagrange reads the ` +
@@ -6541,15 +7273,42 @@ class LagrangeChatView extends ItemView {
     // of a look are sent once and are not kept. The conversation takes the turn in when it is over.
     // (shown when another model was chosen, perhaps: one that takes no pictures is given the words alone)
     const desktop = !(obsidian.Platform && obsidian.Platform.isDesktopApp === false);
-    const first = !shown ? null
-      : lookMessage(lookSendsPictures(settings, desktop, this.plugin.session) ? shown : Object.assign({}, shown, { pictures: [], more: 0 }), { by: 'writer', text });
+    const lookFor = (words, pictures) => lookMessage(pictures ? shown : Object.assign({}, shown, { pictures: [], more: 0 }), { by: 'writer', text: words });
+    const showPictures = Boolean(shown) && lookSendsPictures(settings, desktop, this.plugin.session);
+    const first = !shown ? null : lookFor(text, showPictures);
     const kept = [{ role: 'user', content: first ? first.kept : text }];
     const sent = [first ? { role: 'user', content: first.content, alt: first.alt } : kept[0]];
     const controller = new AbortController();
     this.setPending({ controller });
     let reply = null, partial = '', raw = '', streaming = false, failed = false, ran = null, typed = false;
     let looksLeft = canLook ? LOOKS_PER_MESSAGE : 0, lastLook = shown;
+    let items = [];              // what was attached, as it was prepared to be sent
     try {
+      if (attached.length) {
+        // What was attached is read now (a file of the vault from the vault), a picture scaled down, a video's
+        // frames taken, a PDF's text taken; then the message is made for the provider in use (attachmentMessage),
+        // and the writer is told whatever did not go as it is. The attachments stay in the conversation (kept),
+        // unlike the pictures of a look: the last few messages keep theirs (recentBinaries).
+        const busy = this.addAside('Reading what you attached…', 'is-quiet');
+        const env = attachmentEnv(window);
+        try {
+          for (const a of attached) items.push(await prepareAttachment(a, env));
+        } finally {
+          busy.remove();
+        }
+        const made = attachmentMessage(text, items, providerInputs(settings, this.plugin.session));
+        for (const n of made.notes) this.addAside(n);
+        const withParts = (parts, words) => (parts.length ? parts.concat([{ type: 'text', text: words }]) : words);
+        if (shown) {
+          const look = lookFor(made.text, showPictures);
+          const pictures = Array.isArray(look.content) ? look.content.filter(p => p.type === 'image') : [];
+          const words = Array.isArray(look.content) ? look.content[look.content.length - 1].text : look.content;
+          sent[0] = { role: 'user', content: withParts(pictures.concat(made.parts), words), alt: lookFor(made.alt, false).alt };
+          kept[0] = { role: 'user', content: withParts(made.parts, look.kept), alt: lookFor(made.alt, showPictures).kept };
+        } else {
+          sent[0] = kept[0] = { role: 'user', content: withParts(made.parts, made.text), alt: made.alt };
+        }
+      }
       for (let round = 0; ; round++) {
         const answer = reply = this.addReply(note && note.path);
         if (!round) this.scrollDown(true);       // the loader has just come in under the message: it is in view
@@ -6566,9 +7325,12 @@ class LagrangeChatView extends ItemView {
         const res = await complete(settings, {
           purpose: 'chat',
           system: chatSystemPrompt(note, clip, agentic, canLook, this.plugin.diagramPlugins()),
-          messages: this.history.concat(sent),
+          messages: recentBinaries(this.history.concat(sent), ATTACH_KEPT),
           cache: true,
-          demo: () => (round || lastLook ? demoLookReply(lastLook) : demoChatReply(text, note, agentic, canLook)),
+          demo: () => {
+            const said = round || lastLook ? demoLookReply(lastLook) : demoChatReply(text, note, agentic, canLook);
+            return items.length && !round ? `${demoAttachmentLine(items)}\n\n${said}` : said;
+          },
         }, {
           signal: controller.signal,
           onText: (d, full) => { raw = full; partial = prose(full); answer.update(partial); },
@@ -6588,8 +7350,10 @@ class LagrangeChatView extends ItemView {
         }
         if (res.picturesRefused) {
           // The provider turned the pictures down and was sent the words: that is what this turn holds from now on.
-          sent.forEach((m, i) => { if (Array.isArray(m.content)) { m.content = m.alt; kept[i].content = m.alt; } });
-          reply.note('This model would not take pictures of the page, so Lagrange was given the page in words instead.', 'is-quiet');
+          sent.forEach((m, i) => { if (Array.isArray(m.content)) { m.content = m.alt; if (kept[i] !== m) kept[i].content = Array.isArray(kept[i].content) ? kept[i].alt : m.alt; } });
+          reply.note(items.length
+            ? 'This model would not take pictures or documents, so Lagrange was given what you attached in words instead (the text of files; of pictures and video, only that they are there).'
+            : 'This model would not take pictures of the page, so Lagrange was given the page in words instead.', 'is-quiet');
         }
         if (editing) {
           const run = await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
@@ -6649,7 +7413,12 @@ class LagrangeChatView extends ItemView {
           if (!partial) reply.el.remove();
         }
         this.addError(err);
-        if (!this.inputEl.value) { this.inputEl.value = text; this.fitInput(); }
+        if (!this.inputEl.value && !this.attachments.length) {
+          this.inputEl.value = text;
+          this.attachments = attached;
+          this.renderTray();
+          this.fitInput();
+        }
       }
     } finally {
       this.setPending(null);
@@ -7532,6 +8301,18 @@ class LagrangePlugin extends Plugin {
   /* Makes the edits a chat reply asked for (parsed: parseAgentReply's result) in the note the message was about, by
      the same road as the commands: located in the editor's current text, written by the pen, one undo step, listed
      under the reply. */
+  /* What chatMarkdown needs to know of this vault: which diagram plugins are on (as diagramPlugins tells; an
+     Excalidraw embed is shown as soon as Excalidraw is on), which names of code blocks a plugin acts on, and the
+     prefixes Dataview (if it is here) runs inline code by. */
+  chatRenderOptions() {
+    const plugins = this.app.plugins, have = this.diagramPlugins();
+    const on = id => Boolean(plugins && plugins.enabledPlugins && plugins.enabledPlugins.has(id) && plugins.plugins[id]);
+    const acting = (obsidian.MarkdownPreviewRenderer && obsidian.MarkdownPreviewRenderer.codeBlockPostProcessors) || {};
+    const dv = on('dataview') && plugins.plugins.dataview.settings;
+    const inlineRun = dv ? [dv.inlineJsQueryPrefix, dv.inlineQueryPrefix].filter(p => typeof p === 'string' && p) : [];
+    return { tikz: have.tikz, sketch: have.sketch || on('obsidian-excalidraw-plugin'), acts: name => Object.prototype.hasOwnProperty.call(acting, name), inlineRun };
+  }
+
   /* Which of the two diagram plugins are on in this vault: {tikz, sketch}. */
   diagramPlugins() {
     const on = id => Boolean(this.app.plugins && this.app.plugins.enabledPlugins && this.app.plugins.enabledPlugins.has(id) && this.app.plugins.plugins[id]);
@@ -7858,4 +8639,7 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
+Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
+  clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
+  ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
 Object.assign(LagrangePlugin.internals, { splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
