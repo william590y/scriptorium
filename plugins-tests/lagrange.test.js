@@ -1491,7 +1491,7 @@ test('Draw a drop cap, the other providers: the model writes an SVG; the Demo ha
 
 
 
-/* ---------- 1.2.3: the pen under scrolling, clicks and typing; the chat's log; no hover bubbles ---------- */
+/* ---------- 1.2.4: the pen under scrolling, clicks and typing; the chat's log; no hover bubbles ---------- */
 
 test('penScript and wordCut: what is cut ends at a whole word, never inside one', () => {
   assert.equal(L.wordCut('alpha beta gamma', 100), 'alpha beta gamma');

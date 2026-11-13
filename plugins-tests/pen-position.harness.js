@@ -2,7 +2,7 @@
 // where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame but
 // for a reflow of at most three frames, which is counted), start
 // each further line at the left edge of the note's own line, and draw each equation that Live Preview typesets on that
-// very equation. Since 1.2.3 it also checks, in every case, that the handwriting of a line is never seen before the pen
+// very equation. Since 1.2.4 it also checks, in every case, that the handwriting of a line is never seen before the pen
 // comes to it, that no letter is cut by the box that uncovers it (ascenders, descenders and swashes included), that
 // the note does not scroll when the run ends and the last text written is in view; and, in cases of their own, that
 // the handwriting stays on its text while the note is scrolled, that a click or a key in the note ends the run with
