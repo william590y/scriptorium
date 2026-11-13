@@ -389,3 +389,10 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
 .scriptorium-dropcap-more { display: flex; flex-wrap: wrap; gap: 8px; margin: 0.8em 0 0; }
 .scriptorium-dropcap-download { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
 .scriptorium-dropcap-download strong { flex: 0 0 6.5em; }
+
+/* The direct Google sign-in (preview): the client ID's guide and boxes. */
+.scriptorium-drive-guide { font-size: var(--font-ui-small); }
+.scriptorium-drive-guide a { overflow-wrap: anywhere; }
+.scriptorium-drive-client, .scriptorium-drive-secret { display: block; width: 100%; margin: 0 0 8px; font-family: var(--font-monospace); font-size: var(--font-ui-small); }
+.scriptorium-drive-client { resize: vertical; }
+.scriptorium-drive .modal-button-container { flex-wrap: wrap; }

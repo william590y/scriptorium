@@ -10,6 +10,13 @@
 //
 // The Drive folder defaults to "Scriptorium"; tests use one whose name starts with "Scriptorium-sync-TEST-".
 //
+// With --direct 1 the same commands use the direct Google sign-in instead of Claude Code (the way to check it against
+// the real Google Drive), and two more exist:
+//   node plugins-tests/drive-sync-cli.js connect --direct 1 --client <the JSON file Google gave for a "Desktop app" client>
+//   node plugins-tests/drive-sync-cli.js disconnect --direct 1
+// connect prints Google's sign-in address: open it in a browser ON THIS COMPUTER (Google sends the browser back to
+// http://127.0.0.1:<port> here). The sign-in is kept where the plugin keeps it, or in --auth <file>.
+//
 // Copyright (C) 2026 William Liaw. GNU General Public License, version 3 or later (see LICENSE).
 'use strict';
 const fs = require('node:fs');
@@ -38,18 +45,36 @@ for (let i = 0; i < argv.length; i++) {
 const [command, a, b] = words;
 
 async function main() {
-  const check = await S.driveCheck(cli, opt.claude);
+  const settings0 = S.driveSettings({ drive: { folder: opt.folder, device: opt.device, model: opt.model } }, os.hostname());
+  let kit = null;
+  if (opt.direct) {
+    kit = S.driveKit({ fs, path, os, crypto, http: require('node:http'), https: require('node:https'), env: process.env, platform: process.platform, file: opt.auth || undefined,
+      log: opt.log ? e => fs.appendFileSync(opt.log, `${JSON.stringify(e)}\n`) : null });
+    if (kit.endpoints.test) console.log(`TEST: talking to a pretend Google at ${kit.endpoints.test}`);
+    if (command === 'connect') {
+      if (opt.client) { const c = S.driveParseClient(fs.readFileSync(opt.client, 'utf8')); if (!c.id) throw new Error(c.problem || 'no client ID in that file'); kit.store.save({ clientId: c.id, clientSecret: c.secret }); }
+      const got = await kit.signIn({ open: url => console.log(`Open this address in a browser on this computer:\n\n${url}\n`) });
+      console.log(`Connected${got.email ? ` as ${got.email}` : ''}.${got.apiOff ? ' But the Google Drive API is not turned on in the client ID’s project.' : ''}`);
+      return;
+    }
+    if (command === 'disconnect') { console.log(JSON.stringify(await kit.disconnect())); return; }
+    const st = kit.status();
+    if (command === 'check' || !st.connected) { console.log(st.connected ? `OK: connected${st.email ? ` as ${st.email}` : ''}.` : (st.problem || 'Not connected: run "connect" first.')); process.exit(st.connected ? 0 : 1); }
+  }
+  const check = kit ? { ok: true } : await S.driveCheck(cli, opt.claude);
   if (command === 'check' || !check.ok) {
     console.log(check.ok ? `OK: ${check.exe} has the Google Drive connector.` : `${check.problem}\n${check.steps.map((s, i) => `  ${i + 1}. ${s}`).join('\n')}`);
     process.exit(check.ok ? 0 : 1);
   }
-  const settings = S.driveSettings({ drive: { folder: opt.folder, device: opt.device, model: opt.model } }, os.hostname());
+  const settings = settings0;
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'scriptorium-drive-'));
   let said = '';
   const make = (dir, vault) => new S.DriveSync({
     fs, path, crypto, dir, work, vault, folder: settings.folder, device: settings.device,
     say: p => { const t = p.total ? `${p.stage}: ${p.done} of ${p.total}` : p.stage; if (t !== said) { said = t; console.log(`  [${new Date().toISOString().slice(11, 19)}] ${t}`); } },
-    run: S.driveRunner({ cli, fs, path, exe: check.exe, model: settings.model, dirs: [dir], work, onLine: opt.log ? line => fs.appendFileSync(opt.log, `${line}\n`) : null }),
+    limits: kit ? S.DRIVE_DIRECT_LIMITS : S.DRIVE_LIMITS,
+    run: kit ? kit.runner({ work, sessions: S.driveSessions(fs, path.join(dir, S.DRIVE_UPLOADS)) })
+      : S.driveRunner({ cli, fs, path, exe: check.exe, model: settings.model, dirs: [dir], work, onLine: opt.log ? line => fs.appendFileSync(opt.log, `${line}\n`) : null }),
   });
   const report = s => {
     console.log(JSON.stringify(Object.assign({}, s, { skipped: s.skipped.length, cost: Math.round(s.cost * 1000) / 1000 }), null, 1));
@@ -81,7 +106,7 @@ async function main() {
       S.applyVaultSetup(fs, path, dest, plan);
       console.log(`Set up as a Scriptorium vault: ${plan.changes.length} files.`);
     } else {
-      throw new Error('usage: drive-sync-cli.js check | plan <vault> | sync <vault> | list | retrieve <name> <folder>');
+      throw new Error('usage: drive-sync-cli.js check | plan <vault> | sync <vault> | list | retrieve <name> <folder> | connect | disconnect   [--direct 1]');
     }
   } finally {
     fs.rmSync(work, { recursive: true, force: true });

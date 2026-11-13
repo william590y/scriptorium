@@ -296,38 +296,56 @@ offers to).
 
 ## Backing up a vault to Google Drive (experimental)
 
-If your Claude account is connected to Google Drive, Scriptorium can keep a copy of a vault in your own Drive and bring
-it back on any computer: a free stand-in for a sync service, run only when you ask. It needs no Google API key and no
-server of ours. The work is done by [Claude Code](https://claude.com/code) on your computer, signed in to your Claude
-account (Pro or Max), through that account's Google Drive connector. It is **experimental**: it has been tested on
-Linux with Claude Code 2.1 and synthetic vaults, and Google or Anthropic may change the connector under it. Keep
-another backup of anything you cannot lose.
+Scriptorium can keep a copy of a vault in your own Google Drive and bring it back on any computer: a free stand-in for
+a sync service, run only when you ask. It needs no server of ours. There are two ways for it to reach your Drive, and
+you choose one in **Settings → Scriptorium → Connection**:
 
-Three commands, in the command palette (and two buttons in **Settings → Scriptorium**). Obsidian on a computer only;
-on a phone or tablet they say so.
+- **Through Claude Code** (the default). The work is done by [Claude Code](https://claude.com/code) on your computer,
+  signed in to your Claude account (Pro or Max), through that account's Google Drive connector. No Google sign-in of
+  your own is needed. Tested on Linux with Claude Code 2.1 and synthetic vaults.
+- **Google sign-in, directly** (a preview, new in 1.2.2). You sign in to Google in your browser, once, and Scriptorium
+  talks to Google Drive itself: no Claude account, no model in between, files of any size, changed files updated in
+  place, and pictures that Drive can show. **It has not yet been checked against the real Google Drive**: its author
+  had no Google client ID to test with, so it has only been run against a pretend Google that follows Google's
+  documentation (sign-in, uploads, downloads, errors). That is why it is not the default yet. See
+  **Signing in to Google directly** below.
+
+Both are **experimental**, and Google or Anthropic may change what they stand on. Keep another backup of anything you
+cannot lose.
+
+The commands, in the command palette (and buttons in **Settings → Scriptorium**). Obsidian on a computer only; on a
+phone or tablet they say so.
 
 - **Scriptorium: Back up this vault to Google Drive.** Shows what it will do, then sends new and changed files to the
   Drive folder `Scriptorium/<vault name>/`, in the vault's own folders. Only what changed since the last backup is
-  sent. A file you deleted is moved to `_trash/<date>/` inside that Drive folder, and the old copy of a file you
-  changed goes to Google Drive's trash: nothing is deleted for good. If another device has backed up since, its
-  changes are brought in first.
+  sent. A file you deleted is moved to `_trash/<date>/` inside that Drive folder: nothing is deleted for good. If
+  another device has backed up since, its changes are brought in first.
 - **Scriptorium: Sync now with Google Drive.** The same work under the name you would look for on a second computer:
   bring in what changed in Drive, then send what changed here.
 - **Scriptorium: Retrieve a vault from Google Drive.** Lists the vaults in the Drive folder (name, number of files,
-  when and from which device it was last backed up), asks for a new or empty folder, downloads the vault into it,
-  checks every file against the SHA-256 recorded at backup, sets Scriptorium up in it (the same code as **Set up
+  size, when and from which device it was last backed up), asks for a new or empty folder, downloads the vault into
+  it, checks every file against the SHA-256 recorded at backup, sets Scriptorium up in it (the same code as **Set up
   another vault**), and offers to open it.
+- **Scriptorium: Connect to Google Drive with a Google sign-in (preview).** Signs in and stops.
+- **Scriptorium: Copy the Google Drive diagnostic report.** See **When it does not work**.
 
-To get a vault back on a new computer, three steps:
+To get a vault back on a new computer:
 
 1. Install Scriptorium (see **Install**) and open the vault it makes.
-2. Install Claude Code, run `claude` once in a terminal and sign in with the Claude account whose Google Drive
-   connector is on (claude.ai → **Settings → Connectors → Google Drive → Connect**).
-3. In Obsidian, run **Scriptorium: Retrieve a vault from Google Drive**, choose the vault and a folder, and click
-   **Open the vault** when it is done.
+2. Make the same connection as on the computer that backed it up. Through Claude Code: install Claude Code, run
+   `claude` once in a terminal and sign in with the Claude account whose Google Drive connector is on (claude.ai →
+   **Settings → Connectors → Google Drive → Connect**). With a Google sign-in: choose it in **Settings → Scriptorium →
+   Connection**, paste the same client ID and secret, and click **Connect…**.
+3. Run **Scriptorium: Retrieve a vault from Google Drive**, choose the vault and a folder, and click **Open the
+   vault** when it is done.
 
-If Claude Code is missing, not signed in, signed in with an API key, or the account has no Google Drive connector,
-the command says which, and what to do.
+**A backup belongs to the way that made it.** A Google sign-in is only allowed to see the files it stored itself (see
+below), so it cannot see a vault that was backed up through Claude Code, which is every backup made with Scriptorium
+1.2.0. Retrieve such a vault through Claude Code; or, on the computer that has the vault, switch the connection to the
+Google sign-in and back up again. That makes a second, complete backup: Google Drive then shows two folders named
+`Scriptorium`, and you may delete the older one there once the new one is done. In the other direction, a backup made
+with the Google sign-in is listed through Claude Code but is not written or retrieved that way, so that the two never
+mix in one folder.
 
 **Two devices.** Each device remembers what it last saw of the backup. A file changed on one side goes to the other.
 A file changed on both sides keeps both: the version from Drive takes the file's name and yours is renamed
@@ -338,15 +356,147 @@ later one to finish writes the list of files).
 
 **What is backed up.** Your notes and attachments, and the settings that make the vault yours: Obsidian's settings
 files in `.obsidian` (not the workspace), your own CSS snippets and themes, and the settings of the Scriptorium,
-Manuscriptum, Typewriter Mode and Longform plugins. **Not** backed up: Lagrange's settings (they hold API keys), other
-plugins' code and settings, Scriptorium's own code, snippet and theme (setting up a vault puts those back), the
-workspace, caches, `.trash`, hidden folders, and `.obsidian/scriptorium-backup-…`. The dialog lists every file it
-leaves out because of its size.
+Manuscriptum, Typewriter Mode and Longform plugins. **Not** backed up: Lagrange's settings (they hold API keys), the
+Google sign-in (it is not in the vault at all), other plugins' code and settings, Scriptorium's own code, snippet and
+theme (setting up a vault puts those back), the workspace, caches, `.trash`, hidden folders, and
+`.obsidian/scriptorium-backup-…`. The dialog lists every file it leaves out.
+
+**Windows, macOS and Linux.** A vault backed up on one can be retrieved on another. Two things cannot cross: a file
+whose name Windows refuses (one of `< > : " | ? *`, a name ending in a full stop or a space, or a reserved name such as
+`aux`), and two files whose names differ only in capital letters on a disk that holds them to be one (Windows and
+macOS, as a rule). Such a file is listed with the reason and left in the backup; everything else is retrieved. Rename
+it on the computer it came from, back up there, and retrieve again.
+
+### Signing in to Google directly (preview)
+
+Choose **Google sign-in, directly** in **Settings → Scriptorium → Connection**, then **Connect…** (or run any of the
+backup commands: they lead you there).
+
+1. If Scriptorium has no Google client ID yet, the window explains how to make one and asks for it (next section).
+2. **Connect to Google Drive** opens Google's sign-in page in your browser. Choose the account to back up to and allow
+   Scriptorium to "see, edit, create and delete only the specific Google Drive files you use with this app".
+3. The browser says "Connected to Google Drive"; Obsidian carries on by itself.
+
+What happens underneath: the sign-in is Google's
+[OAuth 2.0 for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app) with PKCE. While
+you are in the browser, Scriptorium listens on `http://127.0.0.1:<a free port>` on your own computer, and Google's
+page sends the browser back there with a one-time code. Scriptorium asks for one permission only,
+`https://www.googleapis.com/auth/drive.file`, which Google lists among its
+[non-sensitive Drive scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth): it can
+create files and change the files it created, and cannot see anything else in your Drive.
+
+The sign-in (a refresh token) is kept in one file for your user account on that computer, **outside every vault**, so
+it is never backed up, never synced by a sync service that syncs your vault, and never copied by **Set up another
+vault**: `%APPDATA%\Scriptorium\scriptorium-google-drive.json` on Windows,
+`~/Library/Application Support/Scriptorium/` on macOS, `~/.config/scriptorium/` on Linux. Only your user may read the
+file, and where Obsidian offers the system keychain (Electron's safeStorage) the token in it is encrypted with it.
+**Disconnect**, in the settings, revokes the token at Google and deletes it. You can also withdraw it from Google's
+side at [myaccount.google.com/connections](https://myaccount.google.com/connections).
+
+Files then go over Google's [Drive API](https://developers.google.com/workspace/drive/api/guides/manage-uploads):
+small ones in one request, large ones in resumable sessions of 8 MB parts that carry on after an interruption, even in
+a later run (Google keeps a session for a week). There is no size limit of Scriptorium's own. A changed file is
+written into the same Drive file (Drive keeps its earlier versions for a while). Downloads are resumed with `Range`
+where they broke off and hashed as they arrive. Answers 429, 5xx and rate-limit 403 are tried again with a doubling
+wait, as [Google asks](https://developers.google.com/workspace/drive/api/guides/handle-errors). An empty file is
+recorded in the backup's list only. The requests go straight to Google: an HTTP proxy set in the system is not used.
+
+**Phones and tablets: not supported.** The sign-in needs a program that can listen on `127.0.0.1` for Google's answer
+and read and write files outside the vault, which Obsidian on a phone or tablet cannot. Google's older alternative,
+copying a code by hand, [is no longer supported](https://developers.google.com/identity/protocols/oauth2/resources/oob-migration).
+(Google's [flow for devices without a browser](https://developers.google.com/identity/protocols/oauth2/limited-input-device)
+does allow `drive.file`, but needs a client of another type and is not implemented.)
+
+### A Google sign-in of your own: making a client ID
+
+Google asks every program that signs people in for an "OAuth client ID", which belongs to a Google Cloud project.
+This release of Scriptorium has none built in, so each writer makes one, once. It is free, needs no payment method,
+and takes about five minutes. The Google account you do this with need not be the one you back up to.
+
+1. **Make a project.** Open [console.cloud.google.com/projectcreate](https://console.cloud.google.com/projectcreate),
+   name it (say "Scriptorium backup") and click **Create**. Make sure it is the project chosen at the top of the page
+   for the next steps.
+2. **Turn on the Drive API.** Menu → **APIs & Services → Library** → search for **Google Drive API** → **Enable**.
+3. **Describe the app.** Menu → **Google Auth Platform** → **Get started**. App name: Scriptorium. Support email:
+   yours. Audience: **External**. Contact: your email. Agree, then **Create**.
+4. **Name the permission.** **Data Access → Add or remove scopes** → tick the one ending in `/auth/drive.file` →
+   **Update** → **Save**.
+5. **Publish it.** **Audience → Publish app → Confirm**. (Or leave it in "Testing" and add your Google account under
+   **Test users**; then the sign-in lasts seven days at a time. See below.)
+6. **Make the client.** **Clients → Create client** → Application type: **Desktop app** → **Create**. Copy the
+   **client ID** and the **client secret** at once (Google shows the secret only then), or download the JSON.
+7. **Give them to Scriptorium.** Paste them into the window, or into **Settings → Scriptorium → Google OAuth client
+   ID** and **client secret**. The ID box also takes the whole JSON file. Then **Connect…**.
+
+Keep the client ID and secret (a password manager will do). **To retrieve a vault on another computer you sign in
+with the same client ID**: Google shows a sign-in only the files that were stored under its own client ID's project,
+so a new client ID in a new project sees an empty Drive. Google does not treat a desktop program's client secret as a
+secret ("the client secret is obviously not treated as a secret",
+[Using OAuth 2.0 to Access Google APIs](https://developers.google.com/identity/protocols/oauth2)), which is why PKCE is
+used as well; all the same it is yours, and nobody else needs it.
+
+For the repository's owner: a client ID shared by everyone who uses Scriptorium goes in one place,
+`DRIVE_DEFAULT_CLIENT` in `vault/.obsidian/plugins/scriptorium/main.js`. While it is empty, the windows ask each
+writer for their own, as above. Once it is filled in, writers need no setup at all, and all of them count as users of
+that one Google Cloud project, with the consequences below.
+
+**What Google imposes** (checked against Google's pages on 12 November 2026; they change, and none of this has been
+observed by us with a real sign-in):
+
+- **An app left in "Testing"** lets only the accounts listed as test users sign in, at most 100 of them, shows them a
+  warning first, and signs them out after seven days: "Authorizations by a test user will expire seven days from the
+  time of consent", refresh token included. The exception for apps that ask only for name, email and profile does not
+  cover `drive.file`. ([Manage App Audience](https://support.google.com/cloud/answer/15549945))
+- **An app "In production"** that asks only for a non-sensitive scope such as `drive.file` does not have to pass
+  Google's verification: "If your app utilizes only non-sensitive scopes, it is not mandatory for your app to complete
+  the app verification process"
+  ([When is verification not needed](https://support.google.com/cloud/answer/13463073)). Its sign-ins do not expire
+  after seven days.
+- **The "Google hasn't verified this app" screen and the cap of 100 users** are, by Google's description, for apps
+  that request sensitive or restricted scopes before they are verified: "Google will display an Unverified apps
+  warning message if your project's OAuth clients request authorization of scopes considered sensitive or restricted";
+  "The user cap limits the number of users that can grant permission to your app when requesting unapproved sensitive
+  or restricted scopes" ([Manage App Audience](https://support.google.com/cloud/answer/15549945),
+  [Unverified apps](https://support.google.com/cloud/answer/7454865)). By that description an app in production that
+  asks only for `drive.file` should show neither. Google's pages are not of one mind, though: one says that "all
+  production apps" must complete verification ([Get started](https://support.google.com/cloud/answer/15544987)), and
+  the warning also appears whenever the scopes an app requests differ from the ones entered under Data Access (step
+  4). If you see the warning with a client ID of your own, choose **Advanced**, then **Go to Scriptorium**: you are
+  the app's maker.
+- **The app's name and logo** on Google's consent page need "brand verification", a lighter check: "Without
+  verification, only your application domain will be visible to users"
+  ([Manage App Branding](https://support.google.com/cloud/answer/15549049)). It matters for a client ID shared by many
+  people, not for one of your own.
+- **A sign-in stops working** if you withdraw it, if it is not used for six months, or if the same account signs in
+  with the same client ID more than 100 times (the oldest is dropped)
+  ([Using OAuth 2.0](https://developers.google.com/identity/protocols/oauth2)). Scriptorium then says so and asks you
+  to connect again; the backup is untouched.
+- **The loopback address** `http://127.0.0.1:<port>` remains supported for clients of type "Desktop app"
+  ([Loopback IP address flow migration](https://developers.google.com/identity/protocols/oauth2/resources/loopback-migration)).
+  A client of type "Web application" does not allow it: Google answers `redirect_uri_mismatch`.
+
+### When it does not work
+
+Every failure is meant to say what it is and what to do: Claude Code not found (and where it was looked for), not
+signed in, signed in with an API key, no Google Drive connector, a Claude Code that does not answer within 90 seconds,
+a client ID that Google does not know, an account that is not a test user, the Drive API not turned on, a full Drive,
+no network, a folder that cannot be written to or has no room, and, when **Retrieve** finds no vault, the likely
+reasons: backed up the other way, to another Google account, under another client ID, or to a folder of another name.
+
+If the message does not help, click **Copy diagnostic report** (in the window, in **Settings → Scriptorium**, or as a
+command) and paste it into an issue. The report says which version, system and connection, each step and how it
+ended, and how many requests got which answer. It has no text of any note, no name of any file, folder or vault, and
+no password, token or key; an email address is cut down to its first letter and its domain, and paths in your home
+folder start at `~`.
+
+### Through Claude Code: limits, what the model sees, and what it costs
 
 **Limits.**
 
 - A file over 7 MB is skipped and listed (the connector accepts about 7.4 MB per file). An empty file is recorded in
   the backup's list only, since Drive takes no empty upload.
+- The connector cannot replace a file's content, so a changed file is uploaded again and the old copy goes to Google
+  Drive's trash.
 - Speed, measured on a synthetic vault of 34 files (8.7 MB: 24 notes, a PDF, images and a 6.9 MB recording): first
   backup 1 min 32 s, a later backup of eight changes 1 min 15 s, retrieving it all 45 s, and checking that nothing
   changed 14 s. A vault of 500 notes should take roughly 5 to 8 minutes the first time (an estimate from those rates,
@@ -434,6 +584,7 @@ installers/   the script installers, and Setup-Scriptorium-Vault.py (sets up a v
 tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py, test_auto_open.py, test_setup_vault.py
 plugins-tests/ tests for the Scriptorium plugin's layout and parsing (node --test plugins-tests/scriptorium.test.js)
               and for its Google Drive backup, against a pretend Drive (drive-sync.test.js; drive-sync-cli.js runs it for real)
+              and, for the direct Google sign-in, a pretend Google (drive-direct.test.js, fake-google.js)
 licenses/     licenses of embedded fonts
 docs/         the pictures in this README (recorded and captured in Obsidian)
 ```
@@ -491,10 +642,12 @@ telemetry, analytics or update check. Opening the new vault with its plugins on 
 computer, through Obsidian's local command line pipe. The Scriptorium plugin makes no network requests, with two
 exceptions that you start yourself. **Download more drop caps from gwern.net** fetches the images of the set you choose
 from `gwern.net`, when you press its button, and sends nothing but the request for each image. Its Google Drive backup
-(experimental, and only when you run one of its three commands) runs the Claude Code program on your computer, which
-sends the vault's files to your own Google Drive, or fetches them, through your Claude account's Google Drive
-connector; the names of the files, not their contents, are given to the Claude model that makes the calls (see
-**Backing up a vault to Google Drive**).
+(experimental, and only when you run one of its commands) sends the vault's files to your own Google Drive, or fetches
+them, in the way you chose. Through Claude Code: it runs the Claude Code program on your computer, which uses your
+Claude account's Google Drive connector; the names of the files, not their contents, are given to the Claude model
+that makes the calls. With a Google sign-in (preview): the plugin talks to Google's servers itself
+(`accounts.google.com`, `oauth2.googleapis.com`, `www.googleapis.com`), with the permission `drive.file` only, and
+nothing goes anywhere else (see **Backing up a vault to Google Drive**).
 
 Lagrange, the writing companion, sends the open note and what you write to it to the provider you choose in its
 settings, and only when you send it a message or run one of its commands: your Claude subscription through the Claude
