@@ -146,5 +146,12 @@ for script in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.comman
     check((plugins / "plug-a" / "main.js").is_file() and not (plugins / "plug-b").exists() and not (plugins / "plug-c").exists(), f"{script}: only the plugin that was downloaded whole is put in the vault")
     check(json.loads((work / "vault" / ".obsidian" / "community-plugins.json").read_text(encoding="utf-8")) == ["scriptorium", "lagrange", "plug-a"], f"{script}: it is turned on, after Scriptorium's own")
 
+# 5. the Windows script installer pins the same files (it is run on Windows by tools/test_auto_open.py)
+cmd = (ROOT / "installers" / "Install-Scriptorium-Windows.cmd").read_text(encoding="utf-8")
+for digest in ("cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41", "09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1", "d9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d",
+               "49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541", "8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9", "6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0"):
+    check(cmd.count(digest) == 1, f"Install-Scriptorium-Windows.cmd pins {digest[:8]}")
+check("$diagramMissing += $plugin.Name" in cmd and "Not installed (the download failed)" in cmd, "Install-Scriptorium-Windows.cmd: a failed download is caught and named, and does not stop the installer")
+
 print("All diagram plugin checks passed." if not failed else f"{len(failed)} check(s) FAILED")
 sys.exit(1 if failed else 0)
