@@ -982,7 +982,7 @@ function describeLook(look, limit) {
     if (b.math && b.math.length > 4) parts.push(`${b.math.length - 4} more formulas`);
     for (const im of (b.images || []).slice(0, 3)) {
       parts.push(`picture${im.alt ? ` “${excerpt(im.alt, 40)}”` : ''} ${Math.round(im.width)}×${Math.round(im.height)} px` +
-        `${im.broken ? ' (did not load)' : ''}${im.remote ? ' (from the web: a grey box in the picture of the page)' : ''}`);
+        `${im.broken ? ' (did not load)' : ''}${im.remote ? ' (from the web)' : ''}`);
     }
     for (const note of (b.notes || []).slice(0, 6)) parts.push(`footnote ${note.label} ${note.where === 'margin' ? 'in the margin' : 'at the foot'}`);
     if (b.overflow > 1) parts.push(`${Math.round(b.overflow)} px too wide for its column${b.scrolls ? ' (it scrolls)' : ''}`);
@@ -1024,7 +1024,7 @@ function lookMessage(look, opts) {
   const n = pictures.length, total = n + (look.more || 0);
   const part = `The page of “${look.title}” as Reading view renders it: ${look.label}` +
     `${look.page && look.page.cut ? ' (the note is very long, so only the part around it was rendered)' : ''}. ` +
-    'The note’s properties are left out.';
+    (look.page && look.page.properties ? `The note’s properties stand above its text, as the view shows them (${look.page.properties}).` : 'The note’s properties are not shown on the page.');
   const remarks = (look.remarks || []).map(r => `\n${r}`).join('');
   const rest = look.more ? ` They are the first ${n} of ${total} pages of it: look at a section, a passage or a range of lines to see further on.` : '';
   const text = how => `<rendered_page>\n${part} ${how}${remarks}\n\n${look.description}\n</rendered_page>\n\n${carry}`;
@@ -5093,6 +5093,7 @@ async function renderPage(app, view, text, width, frontmatter) {
     const written = pane.createDiv();
     await renderMarkdown(app, text, written, file.path, component);
     page.sizer = dressLikeReadingView(written, file.basename);
+    page.properties = dressProperties(view, page.sizer, frontmatter);
     page.sizer.createDiv({ cls: 'mod-footer mod-ui' });
     page.margin = dressLikeScriptorium(app, { file, host, content, text, frontmatter });
     return page;
@@ -5144,6 +5145,32 @@ function dressLikeReadingView(written, title) {
   }
   written.replaceWith(sizer);
   return sizer;
+}
+
+/* The note's properties, as the view shows them: Obsidian makes that box for a view, not for rendered Markdown, so
+   the one the note's own view shows now (in Reading view or in the editor; they look the same) is copied to its place
+   under the title, with what is typed in its fields. Where the view shows none (the note has none, or properties are
+   set not to show) the page has none either. -> the properties in words ("tags: a, b; date: 2026-01-01"), or ''. */
+function dressProperties(view, sizer, frontmatter) {
+  try {
+    const shown = Array.from(view.containerEl.querySelectorAll('.metadata-container')).find(el => el.offsetHeight > 0 && el.querySelector('.metadata-property'));
+    const header = sizer.querySelector('.mod-header');
+    if (!shown || !header) return '';
+    const copy = shown.cloneNode(true);
+    const from = Array.from(shown.querySelectorAll('input, textarea')), to = Array.from(copy.querySelectorAll('input, textarea'));
+    from.forEach((el, i) => {
+      if (!to[i]) return;
+      if (el.type === 'checkbox') { if (el.checked) to[i].setAttribute('checked', ''); else to[i].removeAttribute('checked'); }
+      else if (to[i].tagName === 'TEXTAREA') to[i].textContent = el.value;
+      else to[i].setAttribute('value', el.value);
+    });
+    for (const el of Array.from(copy.querySelectorAll('[contenteditable]'))) el.removeAttribute('contenteditable');
+    header.appendChild(copy);
+    const say = v => (Array.isArray(v) ? v.map(say).join(', ') : v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
+    return excerpt(Object.keys(frontmatter || {}).filter(k => k !== 'position').map(k => `${k}: ${say(frontmatter[k])}`).join('; '), 300);
+  } catch (e) {
+    return '';
+  }
 }
 
 /* A note embedded in the page (![[Another note]]) arrives a moment after the page's own blocks, written the same
@@ -5434,8 +5461,10 @@ function measurePage(page, info) {
 
 /* The page's markup and styles, as one XHTML text the browser can draw by itself, with nothing to fetch: the page
    (a copy of it) inside copies of <html> and <body>, which carry the classes the theme's rules look for; every style
-   rule of the document; the fonts in use, and the note's own pictures, as data. A picture from the web is not read
-   again (Lagrange makes no request of its own for one): a grey box of its size stands in its place. */
+   rule of the document; the fonts in use, and the note's pictures, as data. A picture from the web is asked for
+   from its own address once more, as Obsidian asks for it to show the note (most often it is answered from the cache),
+   and can be used only if its server lets a page read it; one that cannot be read has a box of its size in its
+   place that says so, and page.web counts both kinds. */
 async function pageMarkup(page, signal) {
   const host = page.host, doc = host.ownerDocument, win = doc.defaultView || window;
   const asData = async url => {
@@ -5449,6 +5478,28 @@ async function pageMarkup(page, signal) {
       reader.readAsDataURL(blob);
     });
   };
+  // a picture from the web, drawn again so that it can be read: only one whose server allows that comes out
+  const fromWeb = (url, w, h) => new Promise((resolve, reject) => {
+    const img = new win.Image();
+    const timer = win.setTimeout(() => reject(new Error('too slow')), 4000);
+    img.crossOrigin = 'anonymous';
+    img.onerror = () => { win.clearTimeout(timer); reject(new Error('not readable')); };
+    img.onload = () => {
+      win.clearTimeout(timer);
+      try {
+        const k = Math.min(1, 1600 / Math.max(1, img.naturalWidth, img.naturalHeight)), canvas = doc.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * k));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * k));
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        let data = canvas.toDataURL('image/png');
+        if (data.length > 1500000) data = canvas.toDataURL('image/jpeg', 0.85);
+        resolve(data);
+      } catch (e) { reject(e); }
+    };
+    img.src = url;
+    if (signal) signal.addEventListener('abort', () => { win.clearTimeout(timer); reject(abortError()); }, { once: true });
+  });
+  page.web = { shown: 0, missing: 0 };
   // a file of the vault or of Obsidian itself (the app's own address), never the network
   const local = url => /^(?:app|capacitor|file|blob):/i.test(url) || (/^https?:/i.test(url) && new URL(url).origin === win.location.origin);
   const inline = async (text, base) => {
@@ -5500,7 +5551,7 @@ async function pageMarkup(page, signal) {
 
   const live = Array.from(host.querySelectorAll('*')), copies = Array.from(copy.querySelectorAll('*'));
   const box = (el, c) => { const r = el.getBoundingClientRect(); c.setAttribute('width', String(Math.round(r.width))); c.setAttribute('height', String(Math.round(r.height))); return r; };
-  const blank = (w, h) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.max(1, Math.round(w))}" height="${Math.max(1, Math.round(h))}"><rect width="100%" height="100%" fill="#888" fill-opacity="0.25"/></svg>`)}`;
+  const blank = (w, h, label) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.max(1, Math.round(w))}" height="${Math.max(1, Math.round(h))}"><rect width="100%" height="100%" fill="#888" fill-opacity="0.25"/>${label ? `<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="${Math.max(9, Math.min(15, Math.round(w / 22)))}" fill="#666">${xmlSafe(label)}</text>` : ''}</svg>`)}`;
   let budget = 12000000;                                    // characters of pictures, as data, in one page
   for (let i = 0; i < live.length && i < copies.length; i++) {
     const el = live[i], c = copies[i], tag = el.tagName.toLowerCase();
@@ -5510,9 +5561,13 @@ async function pageMarkup(page, signal) {
       c.removeAttribute('loading');
       if (/^data:/i.test(src)) continue;
       let data = '';
-      try { if (local(src) && budget > 0) data = await asData(src); } catch (e) { /* a grey box */ }
+      const web = /^https?:/i.test(src) && !local(src);
+      try {
+        if (budget > 0 && !(el.complete && !el.naturalWidth)) data = web ? await fromWeb(src, r.width, r.height) : local(src) ? await asData(src) : '';
+      } catch (e) { if (isAbort(e)) throw e; /* a box in its place */ }
       budget -= data.length;
-      c.setAttribute('src', data || blank(r.width, r.height));
+      if (web) page.web[data ? 'shown' : 'missing']++;
+      c.setAttribute('src', data || (web ? blank(r.width, r.height, 'picture from the web, not shown here') : blank(r.width, r.height)));
     } else if (tag === 'canvas') {
       const img = doc.createElement('img');
       const r = box(el, img);
@@ -5617,7 +5672,10 @@ async function lookAtPage(app, view, spec, opts) {
         if (isAbort(e) || (signal && signal.aborted)) throw abortError();
         problem = String((e && e.message) || e).slice(0, 160);
       }
+      const lost = page.web ? page.web.missing : 0;
+      if (lost && pictures.length) remarks.push(`${lost === 1 ? 'One picture' : `${lost} pictures`} from the web could not be read for the picture of the page (${lost === 1 ? 'its server does' : 'their servers do'} not allow it): a grey box that says so stands in ${lost === 1 ? 'its' : 'their'} place; the size and the description below are right.`);
     }
+    measured.page.properties = page.properties || '';
     const look = {
       spec: want, label: range.remark ? 'the whole note' : lookLabel(want), title: file.basename, path: file.path, page: measured.page,
       blocks: blocks.slice(range.first, range.last + 1), pictures, more: pictures.length ? pages.more : 0, remarks, problem, description: '',

@@ -272,8 +272,10 @@ can show it the page yourself: run **Lagrange: Show Lagrange the rendered page**
 message. The page is the note as Reading view sets it (the vault's theme, snippets and fonts, Scriptorium's drop caps
 and marginalia, mathematics, callouts, pictures, at the width of the note's pane), set out of sight in a page of its
 own: your note, its view and the editor are not touched, and nothing is written to the vault. The note's properties
-are left out, and so is a picture that the note takes from the web (a grey box stands in its place; Lagrange does not
-fetch it again).
+stand above the text where the note's own view shows them. A picture that the note takes from the web is asked for
+from its own address once more, as Obsidian asks for it to show the note, and is in the page if its server lets a
+page read it; if not, a grey box that says so stands in its place, and Lagrange is told. The small arrows that fold
+a heading are not in the page: Reading view shows them only under the pointer.
 
 What Lagrange is given is pictures of the part of the note it asked for and nothing else, each at most 1024 by 1536
 pixels, at most four to a look and two looks to a message of yours, with the measurements of that part: each block's

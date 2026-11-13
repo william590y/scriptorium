@@ -2115,7 +2115,7 @@ test('Look fallback: the page in words says what was measured, block by block, w
   assert.match(kinds[2], /^2\. table, 3 rows by 2, lines 34–37/);
   assert.match(kinds[3], /^3\. callout \(note\): “A callout” \| justified/);
   assert.match(kinds[4], /^4\. margin note: “A marginal note” \| set in the margin \|/);
-  assert.match(kinds[5], /the full width of the column \| picture 760×400 px \(from the web: a grey box in the picture of the page\) \| picture “gone” 24×24 px \(did not load\)/);
+  assert.match(kinds[5], /the full width of the column \| picture 760×400 px \(from the web\) \| picture “gone” 24×24 px \(did not load\)/);
   assert.equal(kinds[6], '6. rule');
 });
 
@@ -2125,7 +2125,7 @@ test('Look message: pictures and words for a model that takes pictures, words al
   assert.equal(m.content.length, 3);
   assert.deepEqual(m.content.slice(0, 2), [{ type: 'image', mediaType: 'image/png', data: PNG_B64 }, { type: 'image', mediaType: 'image/png', data: PNG_B64 }]);
   const text = m.content[2].text;
-  assert.match(text, /^<rendered_page>\nThe page of “Look check” as Reading view renders it: the whole note\. The note’s properties are left out\. 2 pictures of it are attached, in reading order\. What follows was measured on the page\.\n\nThe page: /);
+  assert.match(text, /^<rendered_page>\nThe page of “Look check” as Reading view renders it: the whole note\. The note’s properties are not shown on the page\. 2 pictures of it are attached, in reading order\. What follows was measured on the page\.\n\nThe page: /);
   assert.ok(text.includes(look.description));
   assert.match(text, /<\/rendered_page>\n\nThat is your look at the page\. You may look once more for this message, if you need another part of it\. Now carry on with your reply to the writer\.$/);
   // in words alone, for a provider that turns the pictures down, and for the conversation afterwards
@@ -2470,4 +2470,13 @@ test('plainInline: the pen writes prose as the page shows it, without the Markdo
   assert.equal(show(L.penScript('— William Blake, *Songs of Experience* (1794)', 80, true)), '— William Blake, Songs of Experience (1794)');
   assert.equal(show(L.penScript('— William Blake, *Songs of Experience* (1794)', 80)), '— William Blake, *Songs of Experience* (1794)', 'in Source mode the marks are on the page, and are written');
   assert.equal(show(L.penScript('the *mass* $m_1 * m_2$ of **both**', 80, true)), 'the mass <m_1 * m_2> of both', 'mathematics is not touched');
+});
+
+test('A look: the properties are said to be on the page when the view shows them, and a web picture that cannot be read is a labelled box', () => {
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /img\.crossOrigin = 'anonymous'/, 'a web picture is read only if its server lets a page read it');
+  assert.match(js, /blank\(r\.width, r\.height, 'picture from the web, not shown here'\)/);
+  assert.match(js, /from the web could not be read for the picture of the page/);
+  assert.match(js, /header\.appendChild\(copy\)/, 'the view’s own properties box is copied under the title');
+  assert.match(js, /The note’s properties stand above its text, as the view shows them/);
 });
