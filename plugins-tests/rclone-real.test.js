@@ -92,8 +92,9 @@ function computer(t, d, name, settings) {
   return c;
 }
 
-test('the pinned rclone is downloaded, checked against its SHA-256 and unpacked (only when asked to download)', { skip: WANT !== 'download' && 'not asked to download' }, async t => {
-  const dir = tmp(t, 'bin');
+test('the pinned rclone is downloaded, checked against its SHA-256 and unpacked (only when asked to download)', { skip: WANT !== 'download' && 'not asked to download' }, async () => {
+  const dir = fs.mkdtempSync(path.join(TMP, 'scriptorium-rclone-bin-'));   // kept for the tests below; removed when the process ends
+  process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* the system clears it */ } });
   const asset = S.rcloneAsset(process.platform, process.arch);
   assert.ok(asset, `there is a build for ${process.platform} ${process.arch}`);
   const exe = path.join(dir, 'rclone', `v${S.RCLONE.version}`, asset.exe);
@@ -103,8 +104,6 @@ test('the pinned rclone is downloaded, checked against its SHA-256 and unpacked 
   assert.ok(fs.statSync(exe).size > 30e6);
   assert.deepEqual(fs.readdirSync(path.dirname(exe)), [asset.exe], 'the zip file is not kept');
   EXE = exe;
-  process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* the system clears it */ } });
-  t.after(() => {});   // kept for the tests below; removed when the process ends
 });
 
 test('rclone is the right version and never reads another configuration', { skip }, async t => {

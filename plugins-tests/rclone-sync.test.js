@@ -679,14 +679,26 @@ test('a change is synced a little after the last one, and the regular timer is n
   assert.deepEqual(runs, ['timer'], 'the five-minute timer still ran; no run after each keystroke');
   await c.advance(S.SYNC_TIMES.onChange);
   assert.deepEqual(runs, ['timer', 'change']);
-  // the sync's own writes are not the writer's changes
-  await e.run('manual');
+  assert.equal(e.pending(), false);
   e.touch();
-  assert.deepEqual(c.pending(), [5 * MIN], 'a change just after a run is the run’s own');
-  await c.advance(6000);
-  e.touch();
-  assert.deepEqual(c.pending(), [S.SYNC_TIMES.onChange, 5 * MIN - 6000]);
-  assert.equal(e.pending(), true);
+  assert.deepEqual(c.pending(), [S.SYNC_TIMES.onChange, 5 * MIN - 20000]);
+  assert.equal(e.pending(), true, 'something is waiting (asked before Obsidian quits)');
+});
+
+test('a change made while a run is going is synced by one more run after it', async () => {
+  let open;
+  const x = engine({});
+  x.o.gate = new Promise(r => { open = r; });
+  x.e.start(false);
+  const first = x.e.run('timer');
+  x.e.touch(); x.e.touch();
+  assert.deepEqual([x.runs, x.c.pending(), x.e.pending()], [['timer'], [], true]);
+  x.o.gate = null; open();
+  await first;
+  assert.deepEqual(x.c.pending(), [S.SYNC_TIMES.onChange, 5 * MIN]);
+  await x.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual(x.runs, ['timer', 'change']);
+  assert.deepEqual(x.c.pending(), [5 * MIN], 'and that run, which changed nothing, is not followed by another');
 });
 
 test('never two runs at once: a request during a run waits for it, and one more run follows', async () => {
@@ -698,7 +710,6 @@ test('never two runs at once: a request during a run waits for it, and one more 
   const second = x.e.run('manual', { force: true });
   const third = x.e.run('timer');
   assert.equal(first, second); assert.equal(first, third);
-  x.e.touch();
   assert.deepEqual(x.runs, ['manual'], 'one run, whatever was asked meanwhile');
   x.o.gate = null; open();
   await first;

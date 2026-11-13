@@ -2959,7 +2959,7 @@ class SyncEngine {
     this.state = { status: 'off', last: 0, summary: null, problem: null, reason: '', since: 0 };
     this.tick = null;      // the timer of the next regular run
     this.soon = null;      // the timer of a run that follows a change, or a request made during a run
-    this.running = null; this.again = null; this.fails = 0; this.quiet = 0; this.stopped = true;
+    this.running = null; this.again = null; this.touched = false; this.fails = 0; this.stopped = true;
   }
   set(patch) {
     Object.assign(this.state, patch);
@@ -2987,14 +2987,16 @@ class SyncEngine {
     if (this.soon !== null) { this.timers.clear(this.soon); this.soon = null; }
   }
   /* A note changed: a run follows the last change by a little. The regular timer is left as it is, so that a long
-     spell of writing is still synced on time. The sync's own writes (during a run and just after) do not count. */
+     spell of writing is still synced on time. A change made while a run is going is synced by one more run after
+     it (the run's own downloads look like changes too: the extra run then finds nothing to do). */
   touch() {
-    if (this.stopped || this.running || this.now() < this.quiet || !this.o.linked() || !this.o.settings().auto || this.paused()) return;
+    if (this.stopped || !this.o.linked() || !this.o.settings().auto || this.paused()) return;
+    if (this.running) { this.touched = true; return; }
     if (this.soon !== null) this.timers.clear(this.soon);
     this.soon = this.timers.set(() => { this.soon = null; void this.run('change'); }, SYNC_TIMES.onChange);
   }
   /* Whether a change is waiting to be synced, or a run is going. */
-  pending() { return this.soon !== null || Boolean(this.running); }
+  pending() { return this.soon !== null || this.touched || Boolean(this.running); }
   /* Runs now. While a run is going, the request waits for it, and one more run follows if it was asked for by the
      writer or by a change. */
   run(reason, opts) {
@@ -3017,13 +3019,13 @@ class SyncEngine {
         else { this.fails++; this.set({ status: 'problem', problem }); }
         result = { problem };
       }
-      this.quiet = this.now() + 5000;
       this.running = null;
-      const again = this.again;
-      this.again = null;
+      const again = this.again, touched = this.touched;
+      this.again = null; this.touched = false;
       if (!this.stopped) {
         this.start(false);
         if (again && !this.paused()) this.soon = this.timers.set(() => { this.soon = null; void this.run(again.reason, again.opts); }, SYNC_TIMES.again);
+        else if (touched) this.touch();
       }
       return result;
     })();
