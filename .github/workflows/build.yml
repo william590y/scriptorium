@@ -86,6 +86,10 @@ jobs:
         shell: pwsh
         run: python tools/test_auto_open.py dist/Scriptorium-Setup.exe
 
+      - name: Test that the four font faces are checked and repaired one by one (a pretend Windows, then this one, and the .cmd script)
+        shell: pwsh
+        run: python tools/test_fonts.py dist/Scriptorium-Setup.exe
+
       - name: Render the window (screenshots for review)
         shell: pwsh
         timeout-minutes: 5
@@ -156,6 +160,23 @@ jobs:
         run: |
           python3 -m py_compile installers/Setup-Scriptorium-Vault.py
           python3 tools/test_setup_vault.py
+      - name: The fonts, face by face (the Linux script with fontconfig; the macOS script with a pretend system_profiler)
+        run: |
+          fc-list --version
+          python3 tools/test_fonts.py
+
+  script-fonts-macos:
+    name: Check the macOS script installer's fonts on macOS
+    runs-on: macos-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The fonts, face by face, in a home folder of its own
+        run: |
+          bash -n installers/Install-Scriptorium-macOS.command
+          python3 tools/test_fonts.py
 
   plugin-tests:
     name: Test the Scriptorium and Lagrange plugins (Node)
@@ -194,7 +215,7 @@ jobs:
   release:
     name: Publish the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, zip-reproducible, script-tests, plugin-tests, sync-tests]
+    needs: [build, zip-reproducible, script-tests, script-fonts-macos, plugin-tests, sync-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write

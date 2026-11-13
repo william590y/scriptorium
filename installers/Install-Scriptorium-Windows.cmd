@@ -87,7 +87,7 @@ try {
     $archive = Join-Path $tempPath 'Writing.zip'
     Get-ScriptoriumDownload -Uri 'https://williamliaw.com/assets/downloads/Scriptorium.zip' -OutFile $archive
     $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne '7e5acf0c19730cbeeafc4e608c71231ba89568a076d9a3cc82df10a50d8071d2') { throw 'Package verification failed. Please download the current installer from the Projects page.' }
+    if ($actualHash -ne '2b8016d0fc0c927e471bff72f879c899f31c426900f4768e4273afc691710e78') { throw 'Package verification failed. Please download the current installer from the Projects page.' }
     $staging = Join-Path $tempPath 'vault'
     Expand-Archive -LiteralPath $archive -DestinationPath $staging
     if (!(Test-Path -LiteralPath (Join-Path $staging '.obsidian/appearance.json'))) { throw 'Invalid configuration archive.' }
@@ -129,52 +129,203 @@ try {
         if (!$exe) { throw "Obsidian's installer ran, but Obsidian is still not on this computer (Obsidian.exe was not found). Install Obsidian from https://obsidian.md, then run this again." }
         Write-Host "Installed Obsidian ($exe)"
     }
-    # Install missing font families for this user, including roman and italic faces.
-    Add-Type -AssemblyName System.Drawing
-    $installed = New-Object System.Drawing.Text.InstalledFontCollection
-    $families = @($installed.Families | ForEach-Object { $_.Name })
-    $installed.Dispose()
+    # FONTS_START
+    # The fonts, face by face: EB Garamond and Cormorant Garamond, each upright and italic. A face is in order only if a
+    # Fonts registry value (yours or the machine's) names a file that exists and is that face, and Windows lists the family
+    # with that style. Anything else is put right: a family with only its italic registered shows every heading in italics,
+    # and a check by family name would call that "installed". The upright face of a family always goes first; if it cannot
+    # be installed, its italic is not installed either. (tools/test_fonts.py runs this part by itself on Windows.)
     Add-Type @'
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
-public static class ScriptoriumFontRegistration {
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Win32;
+public static class ScriptoriumFonts {
+    const string Key = @"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
-    public static extern int AddFontResourceEx(string path, uint flags, IntPtr reserved);
+    static extern int AddFontResourceEx(string path, uint flags, IntPtr reserved);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+    static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr window);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr window, IntPtr dc);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct LOGFONT {
+        public int Height, Width, Escapement, Orientation, Weight;
+        public byte Italic, Underline, StrikeOut, Charset, OutPrecision, ClipPrecision, Quality, PitchAndFamily;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
+    }
+    delegate int EnumProc(IntPtr logfont, IntPtr metric, uint type, IntPtr lparam);
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    static extern int EnumFontFamiliesEx(IntPtr dc, ref LOGFONT logfont, EnumProc proc, IntPtr lparam, uint flags);
+
+    public static string FontDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Microsoft\Windows\Fonts"); } }
+
+    public static string Sha256(string file) {
+        using (SHA256 sha = SHA256.Create()) using (FileStream fs = File.OpenRead(file)) {
+            StringBuilder b = new StringBuilder();
+            foreach (byte x in sha.ComputeHash(fs)) b.Append(x.ToString("x2"));
+            return b.ToString();
+        }
+    }
+
+    // Whether the font file says it is this family (the typographic one, if it has one) and this style.
+    public static bool Is(string path, string family, bool italic) {
+        try {
+            byte[] d = File.ReadAllBytes(path);
+            Func<int, int> u16 = o => (d[o] << 8) | d[o + 1];
+            Func<int, long> u32 = o => ((long)d[o] << 24) | ((long)d[o + 1] << 16) | ((long)d[o + 2] << 8) | d[o + 3];
+            if (d.Length < 12) return false;
+            long magic = u32(0);
+            if (magic != 0x00010000 && magic != 0x4F54544F && magic != 0x74727565) return false;
+            int tables = u16(4), name = -1, os2 = -1, head = -1;
+            for (int i = 0; i < tables && 28 + 16 * i <= d.Length; i++) {
+                string tag = Encoding.ASCII.GetString(d, 12 + 16 * i, 4);
+                int offset = (int)u32(12 + 16 * i + 8);
+                if (tag == "name") name = offset; else if (tag == "OS/2") os2 = offset; else if (tag == "head") head = offset;
+            }
+            if (name < 0 || name + 6 > d.Length) return false;
+            int count = u16(name + 2), strings = name + u16(name + 4);
+            string first = null, typographic = null;
+            for (int i = 0; i < count && name + 18 + 12 * i <= d.Length; i++) {
+                int r = name + 6 + 12 * i, platform = u16(r), id = u16(r + 6), length = u16(r + 8), at = strings + u16(r + 10);
+                if (platform != 3 || (id != 1 && id != 16) || at + length > d.Length) continue;
+                string text = Encoding.BigEndianUnicode.GetString(d, at, length);
+                if (id == 1 && first == null) first = text;
+                if (id == 16 && typographic == null) typographic = text;
+            }
+            string f = typographic ?? first;
+            bool it = (os2 >= 0 && os2 + 64 <= d.Length && (u16(os2 + 62) & 1) != 0) || (head >= 0 && head + 46 <= d.Length && (u16(head + 44) & 2) != 0);
+            return f != null && it == italic && (string.Equals(f, family, StringComparison.OrdinalIgnoreCase) || f.StartsWith(family + " ", StringComparison.OrdinalIgnoreCase));
+        } catch { return false; }
+    }
+
+    // Whether Windows lists a face of this style under the family's name (or "<family> <weight>", as it names a variable font's instances).
+    public static bool Listed(string family, bool italic) {
+        bool[] found = new bool[2];
+        IntPtr dc = GetDC(IntPtr.Zero);
+        try {
+            List<string> names = new List<string>();
+            LOGFONT all = new LOGFONT { Charset = 1, FaceName = "" };
+            EnumProc collect = (lf, tm, type, lp) => {
+                string face = ((LOGFONT)Marshal.PtrToStructure(lf, typeof(LOGFONT))).FaceName ?? "";
+                if ((string.Equals(face, family, StringComparison.OrdinalIgnoreCase) || face.StartsWith(family + " ", StringComparison.OrdinalIgnoreCase)) && !names.Contains(face)) names.Add(face);
+                return 1;
+            };
+            EnumFontFamiliesEx(dc, ref all, collect, IntPtr.Zero, 0);
+            EnumProc look = (lf, tm, type, lp) => { found[((LOGFONT)Marshal.PtrToStructure(lf, typeof(LOGFONT))).Italic != 0 ? 1 : 0] = true; return 1; };
+            foreach (string name in names) { LOGFONT one = new LOGFONT { Charset = 1, FaceName = name }; EnumFontFamiliesEx(dc, ref one, look, IntPtr.Zero, 0); }
+            GC.KeepAlive(collect); GC.KeepAlive(look);
+        } finally { ReleaseDC(IntPtr.Zero, dc); }
+        return found[italic ? 1 : 0];
+    }
+
+    // "ok|<path>", or what is wrong with the face: "not installed", "file gone", "file differs", "not registered", "not listed|<path>".
+    public static string State(string family, bool italic, string file, string sha, string valueName, string legacyName) {
+        string target = Path.Combine(FontDir, file), system = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts");
+        string good = null; bool stale = false;
+        foreach (RegistryKey hive in new[] { Registry.CurrentUser, Registry.LocalMachine }) {
+            try {
+                using (RegistryKey k = hive.OpenSubKey(Key)) {
+                    if (k == null) continue;
+                    foreach (string name in k.GetValueNames()) {
+                        string value = k.GetValue(name) as string;
+                        if (string.IsNullOrEmpty(value)) continue;
+                        string path;
+                        try { path = Path.IsPathRooted(value) ? value : Path.Combine(system, value); } catch { continue; }
+                        string both = (name + " " + Path.GetFileName(path)).Replace(" ", "").Replace("-", "").Replace("_", "");
+                        if (both.IndexOf("garamond", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        bool ours = string.Equals(Path.GetFullPath(path), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase);
+                        if (!File.Exists(path)) { if (ours || name == valueName || name == legacyName) stale = true; continue; }
+                        if (Is(path, family, italic) || (ours && Sha256(target) == sha)) { good = path; break; }
+                    }
+                }
+            } catch { }
+            if (good != null) break;
+        }
+        if (good != null) return (Listed(family, italic) ? "ok|" : "not listed|") + good;
+        if (!File.Exists(target)) return stale ? "file gone" : "not installed";
+        return Sha256(target) != sha ? "file differs" : "not registered";
+    }
+
+    // Registers the file under Scriptorium's own value name (an older Scriptorium's value for the same file goes) and loads it.
+    public static void Register(string valueName, string legacyName, string target) {
+        using (RegistryKey k = Registry.CurrentUser.CreateSubKey(Key)) {
+            k.SetValue(valueName, target, RegistryValueKind.String);
+            string old = k.GetValue(legacyName) as string;
+            if (old != null && string.Equals(old, target, StringComparison.OrdinalIgnoreCase)) k.DeleteValue(legacyName, false);
+        }
+        if (AddFontResourceEx(target, 0, IntPtr.Zero) == 0) throw new InvalidOperationException("Windows could not load " + target);
+    }
+    public static bool Load(string path) { return AddFontResourceEx(path, 0, IntPtr.Zero) != 0; }
+    public static void Announce() {
+        UIntPtr result;
+        SendMessageTimeout((IntPtr)0xffff, 0x001d, UIntPtr.Zero, IntPtr.Zero, 2, 5000, out result);
+    }
 }
 '@
-    $fontDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-    $fontRegistry = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
-    function Install-ScriptoriumFont($file, $url, $hash, $label) {
-        $target = Join-Path $fontDir $file
-        if (Test-Path -LiteralPath $target) {
-            if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash) { throw "Existing font differs: $target" }
-        } else {
-            $download = Join-Path $tempPath $file
-            Get-ScriptoriumDownload -Uri $url -OutFile $download
-            if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $hash) { throw "Font verification failed: $file" }
-            New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
-            Copy-Item -LiteralPath $download -Destination $target
+    $fontBase = 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/'
+    $scriptoriumFaces = @(
+        @{ Family = 'EB Garamond'; Italic = $false; File = 'EBGaramond-Scriptorium.ttf'; Url = $fontBase + 'ebgaramond/EBGaramond%5Bwght%5D.ttf'; Hash = 'ef9512f92f6d579e5dc75af59a5a4b1b8b47d2eda89e00b954d44520e5369027' },
+        @{ Family = 'EB Garamond'; Italic = $true; File = 'EBGaramond-Italic-Scriptorium.ttf'; Url = $fontBase + 'ebgaramond/EBGaramond-Italic%5Bwght%5D.ttf'; Hash = 'bba2c4499c93c9612b90b9825d32b07da52fce2fe57562a1eb6b833553f93c4e' },
+        @{ Family = 'Cormorant Garamond'; Italic = $false; File = 'CormorantGaramond-Scriptorium.ttf'; Url = $fontBase + 'cormorantgaramond/CormorantGaramond%5Bwght%5D.ttf'; Hash = 'b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0' },
+        @{ Family = 'Cormorant Garamond'; Italic = $true; File = 'CormorantGaramond-Italic-Scriptorium.ttf'; Url = $fontBase + 'cormorantgaramond/CormorantGaramond-Italic%5Bwght%5D.ttf'; Hash = '0f48ea6abb2084537854f7174c470991a463b13036309e3b50a81511611c530d' }
+    )
+    function Get-ScriptoriumFaceState($face) {
+        $style = if ($face.Italic) { 'Italic' } else { 'Regular' }
+        [ScriptoriumFonts]::State($face.Family, $face.Italic, $face.File, $face.Hash, "Scriptorium $($face.Family) $style (TrueType)", "$($face.Family) $style (TrueType)")
+    }
+    # Puts right every face that is not in order, looks again, and says what it did. $true if all four are in order at the end.
+    function Repair-ScriptoriumFonts {
+        $changed = $false
+        $uprightFailed = @{}
+        $problems = @()
+        foreach ($face in $scriptoriumFaces) {
+            $style = if ($face.Italic) { 'Italic' } else { 'Regular' }
+            $name = "$($face.Family) $(if ($face.Italic) { 'italic' } else { 'upright' })"
+            $state = Get-ScriptoriumFaceState $face
+            if ($state.StartsWith('ok|')) { continue }
+            if ($face.Italic -and $uprightFailed[$face.Family]) {
+                $problems += "${name}: left as it was, because the upright face could not be installed"
+                continue
+            }
+            try {
+                if ($state.StartsWith('not listed|')) {
+                    $path = $state.Substring(11)
+                    if (![ScriptoriumFonts]::Load($path)) { throw "Windows could not load $path. Sign out of Windows and in again, then run this installer once more." }
+                } else {
+                    $target = Join-Path ([ScriptoriumFonts]::FontDir) $face.File
+                    if (!(Test-Path -LiteralPath $target) -or [ScriptoriumFonts]::Sha256($target) -ne $face.Hash) {
+                        $download = Join-Path $tempPath $face.File
+                        Get-ScriptoriumDownload -Uri $face.Url -OutFile $download
+                        if ([ScriptoriumFonts]::Sha256($download) -ne $face.Hash) { throw "the downloaded file is not the font it should be ($($face.File))" }
+                        New-Item -ItemType Directory -Path ([ScriptoriumFonts]::FontDir) -Force | Out-Null
+                        try { Copy-Item -LiteralPath $download -Destination $target -Force }
+                        catch { throw "its file is in use and could not be replaced ($target). Close Obsidian and any other program that shows this font, then run this installer again." }
+                    }
+                    [ScriptoriumFonts]::Register("Scriptorium $($face.Family) $style (TrueType)", "$($face.Family) $style (TrueType)", $target)
+                }
+                $changed = $true
+                Write-Host "$(if ($state -eq 'not installed') { 'Installed' } else { 'Repaired' }) $name$(if ($state -ne 'not installed') { " (it was: $(($state -split '\|')[0]))" })"
+            } catch {
+                if (!$face.Italic) { $uprightFailed[$face.Family] = $true }
+                $problems += "${name}: $($_.Exception.Message)"
+            }
         }
-        New-Item -Path $fontRegistry -Force | Out-Null
-        New-ItemProperty -Path $fontRegistry -Name $label -Value $target -PropertyType String -Force | Out-Null
-        if ([ScriptoriumFontRegistration]::AddFontResourceEx($target, 0, [IntPtr]::Zero) -eq 0) {
-            throw "Could not load font: $target"
+        if ($changed) { [ScriptoriumFonts]::Announce() }
+        foreach ($face in $scriptoriumFaces) {
+            $name = "$($face.Family) $(if ($face.Italic) { 'italic' } else { 'upright' })"
+            $state = Get-ScriptoriumFaceState $face
+            if (!$state.StartsWith('ok|') -and !($problems | Where-Object { $_.StartsWith("${name}:") })) { $problems += "${name}: still $(($state -split '\|')[0])" }
         }
+        foreach ($problem in $problems) { Write-Host "FONT NOT PUT RIGHT: $problem" -ForegroundColor Red }
+        return ($problems.Count -eq 0)
     }
-    if ($families -notcontains 'EB Garamond') {
-        Write-Host 'Installing EB Garamond ...'
-        Install-ScriptoriumFont 'EBGaramond-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/ebgaramond/EBGaramond%5Bwght%5D.ttf' 'ef9512f92f6d579e5dc75af59a5a4b1b8b47d2eda89e00b954d44520e5369027' 'EB Garamond Regular (TrueType)'
-        Install-ScriptoriumFont 'EBGaramond-Italic-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/ebgaramond/EBGaramond-Italic%5Bwght%5D.ttf' 'bba2c4499c93c9612b90b9825d32b07da52fce2fe57562a1eb6b833553f93c4e' 'EB Garamond Italic (TrueType)'
-    }
-    if ($families -notcontains 'Cormorant Garamond') {
-        Write-Host 'Installing Cormorant Garamond ...'
-        Install-ScriptoriumFont 'CormorantGaramond-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/cormorantgaramond/CormorantGaramond%5Bwght%5D.ttf' 'b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0' 'Cormorant Garamond Regular (TrueType)'
-        Install-ScriptoriumFont 'CormorantGaramond-Italic-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/cormorantgaramond/CormorantGaramond-Italic%5Bwght%5D.ttf' '0f48ea6abb2084537854f7174c470991a463b13036309e3b50a81511611c530d' 'Cormorant Garamond Italic (TrueType)'
-    }
-    $broadcastResult = [UIntPtr]::Zero
-    [void][ScriptoriumFontRegistration]::SendMessageTimeout([IntPtr]0xffff, 0x001d, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref]$broadcastResult)
+    $fontsInOrder = Repair-ScriptoriumFonts
+    $fontsLine = if ($fontsInOrder) { 'Fonts are ready.' } else { 'Some fonts could not be put right (the red lines above say which): close Obsidian and run this installer again.' }
+    # FONTS_END
     # CreateDirectory alone would merge; this deliberately fails if another process created the folder.
     New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
     Get-ChildItem -LiteralPath $staging -Force | Copy-Item -Destination $destination -Recurse
@@ -399,12 +550,12 @@ Remove-Item -LiteralPath $(& $quote $watchSource) -ErrorAction SilentlyContinue
     }
     if ($opened -eq 'trusted') {
         Write-Host 'Opened it in Obsidian with its community plugins on (as "Trust author and enable plugins" does).'
-        Write-Host 'Fonts are ready. Open Lorem Ipsum in Reading view.'
+        Write-Host "$fontsLine Open Lorem Ipsum in Reading view."
     } elseif ($opened -eq 'opened') {
         Write-Host 'When Obsidian asks, choose "Trust author and enable plugins" (or Restricted mode, to review them first).'
-        Write-Host 'Fonts are ready. Open Lorem Ipsum in Reading view.'
+        Write-Host "$fontsLine Open Lorem Ipsum in Reading view."
     } else {
-        Write-Host 'Fonts are ready. Restart any running Obsidian windows to load newly installed fonts.'
+        Write-Host "$fontsLine Restart any running Obsidian windows to load newly installed fonts."
         Write-Host 'Open Lorem Ipsum in Reading view. Review the bundled community plugins before enabling them.'
         Write-Host "In Obsidian, choose Open folder as vault and select $destination"
         if ($exe) { Start-Process -FilePath $exe -ArgumentList 'obsidian://choose-vault' }

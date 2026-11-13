@@ -3757,6 +3757,58 @@ class SyncModal extends Modal {
 }
 
 /* ==========================================================
+   A family whose upright face is missing
+   ==========================================================
+   The typography asks the system for EB Garamond and Cormorant Garamond. If a family is there with only its italic
+   face (a font that was half installed, or half removed), the system gives the italic for upright text too: every
+   heading, or all the text, stands in italics, and nothing says why. So once Obsidian has started, a capital I is
+   drawn upright in each family and measured: if the family is there and the letter leans, a notice says so, once,
+   and says what mends it (Scriptorium Setup and the script installers repair the fonts face by face). */
+
+/* How far the ink leans to the right, as run over rise: about 0 for an upright letter, 0.15 or more for an italic.
+   data is RGBA (ink is whatever has alpha). The top and the bottom fifth of the inked rows are compared. null if
+   there is too little ink to say. */
+function inkSlant(data, width, height) {
+  const rows = [];
+  for (let y = 0; y < height; y++) {
+    let sum = 0, n = 0;
+    for (let x = 0; x < width; x++) { const a = data[(y * width + x) * 4 + 3]; if (a > 40) { sum += x * a; n += a; } }
+    if (n) rows.push([y, sum / n]);
+  }
+  if (rows.length < 20) return null;
+  const k = Math.max(2, Math.floor(rows.length / 5));
+  const mean = part => part.reduce((t, r) => [t[0] + r[0] / part.length, t[1] + r[1] / part.length], [0, 0]);
+  const top = mean(rows.slice(0, k)), bottom = mean(rows.slice(-k));
+  return (top[1] - bottom[1]) / (bottom[0] - top[0]);
+}
+
+/* Whether the family is on this computer but draws upright text leaning: true, false, or null where it cannot be told
+   (the family is not there, or there is no canvas). */
+function uprightMissing(doc, family) {
+  try {
+    const canvas = doc.createElement('canvas');
+    canvas.width = 240; canvas.height = 200;
+    const g = canvas.getContext('2d', { willReadFrequently: true });
+    if (!g) return null;
+    // Is the family there at all? With it, a line is not as wide as in the fallback alone.
+    const probe = 'Hamburgefonstiv 0123';
+    g.font = '400 60px monospace';
+    const fallback = g.measureText(probe).width;
+    g.font = `400 60px "${family}", monospace`;
+    if (Math.abs(g.measureText(probe).width - fallback) < 0.5) return null;
+    g.clearRect(0, 0, 240, 200);
+    g.font = `normal 400 150px "${family}"`;
+    g.textBaseline = 'alphabetic';
+    g.fillStyle = '#000';
+    g.fillText('I', 90, 160);
+    const slant = inkSlant(g.getImageData(0, 0, 240, 200).data, 240, 200);
+    return slant === null ? null : slant > 0.09;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ==========================================================
    The plugin
    ========================================================== */
 
@@ -3859,7 +3911,7 @@ class Scriptorium extends Plugin {
       el.querySelectorAll(':scope > p').forEach(p => { this.kept.add(p); this.resizeObserver.observe(p); });
     });
     // Export to PDF prints the note's title by default: tick Obsidian's "Include file name as title" once.
-    this.app.workspace.onLayoutReady(() => { void this.includeTitleInPdf(); void this.loadDropcapSets(); });
+    this.app.workspace.onLayoutReady(() => { void this.includeTitleInPdf(); void this.loadDropcapSets(); window.setTimeout(() => void this.checkFontFaces(), 4000); });
     this.dropcapSets = [];   // the sets of drop caps beside the four built in (see "Sets of drop caps")
     this.ratios = new Map();  // an image's shape (width over height), by its address
     this.addCommand({
@@ -4018,6 +4070,22 @@ class Scriptorium extends Plugin {
     if (this.settings.syncMoveTold || !this.oldDriveBackup()) return;
     new Notice(`${SYNC_MOVED} (Settings → Scriptorium → Google Drive sync says this again.)`, 30000);
     await this.updateSettings({ syncMoveTold: true });
+  }
+
+  /* Says, once, that a family's upright face is missing on this computer (see "A family whose upright face is
+     missing"). When the fonts are in order again the notice is armed again. */
+  async checkFontFaces() {
+    try {
+      if (document.fonts && document.fonts.ready) await document.fonts.ready;
+      const missing = ['Cormorant Garamond', 'EB Garamond'].filter(family => uprightMissing(document, family) === true);
+      this.fontFacesMissing = missing;
+      if (!missing.length) { if (this.settings.fontNoticeTold) await this.updateSettings({ fontNoticeTold: false }); return; }
+      if (this.settings.fontNoticeTold) return;
+      const what = missing.includes('Cormorant Garamond') ? 'headings stand in italics' : 'the text stands in italics';
+      new Notice(`${missing.join(' and ')}: the upright face is missing on this computer (only the italic is installed), so ${what}. ` +
+        'Run Scriptorium Setup, or the installer script, again: it repairs the fonts. Then restart Obsidian.', 0);
+      await this.updateSettings({ fontNoticeTold: true });
+    } catch (e) { /* never in the way of writing */ }
   }
 
   /* Opens an address in the system's browser. */
@@ -4409,5 +4477,5 @@ Object.assign(module.exports, {
   syncLink, syncSaveLink, rcloneAsset, rcloneCandidates, findRclone, rcloneVersion, rcloneOldEnough, zipEntry, syncFetch, rcloneInstall, syncProblem, rcloneEnv,
   syncLogLine, rcloneExec, syncConfRead, syncConnection, syncConfPrepare, syncParseClient, syncFilters, syncTarget, syncWhere, syncFolderName, syncParseDirs,
   syncParseCheck, syncConflictName, syncBisyncArgs, syncSummary, syncSummaryText, syncExplain, rcloneApi, syncLock, syncUnlock, syncClearStale, syncPrune, syncOnce, syncStamp,
-  syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
+  inkSlant, uprightMissing, syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
 });
