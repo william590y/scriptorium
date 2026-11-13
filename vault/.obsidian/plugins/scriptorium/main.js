@@ -998,6 +998,7 @@ function noteBlocks(lines, body) {
    (which letter a drop cap image shows, and which of a letter's images). Pure. */
 function shownLine(source) {
   return String(source == null ? '' : source)
+    .replace(/\\([\\`*_{}\[\]()#+\-.!|<>~=$%^])/g, (m, c) => String.fromCharCode(0xE000 + c.charCodeAt(0)))   // (a mark that is escaped is a character)
     .replace(/%%.*?%%/g, '')
     .replace(/!\[\[[^\]\n]*\]\]|!\[[^\]\n]*\]\([^)\n]*\)/g, '')
     .replace(/\[\[[^\]|\n]*\|([^\]\n]*)\]\]/g, '$1')
@@ -1006,8 +1007,8 @@ function shownLine(source) {
     .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
     .replace(/<\/?[A-Za-z][^>\n]*>/g, '')
     .replace(/\*+|~~|==|`+/g, '')
-    .replace(/(^|[^\p{L}\p{N}])_+(?=\S)|(\S)_+(?![\p{L}\p{N}])/gu, '$1$2')
-    .replace(/\\([\\`*_{}\[\]()#+\-.!|<>~=$%^])/g, '$1');
+    .replace(/(^|[^\p{L}\p{N}])_+(?=\S)|(\S)_+(?![\p{L}\p{N}])/gu, (m, a, b) => (a || '') + (b || ''))
+    .replace(/[-]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE000));
 }
 
 /* The drop cap a note's properties ask for, read from its lines (the editor has the lines, and has them before

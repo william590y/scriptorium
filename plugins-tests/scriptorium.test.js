@@ -938,3 +938,147 @@ test('aligned text: the plugin registers its commands by id, and everything that
   for (const name of ['Centre selection', 'Right-align selection', 'Remove alignment', 'Use a drop cap on this aligned paragraph', 'Remove the drop cap from this aligned paragraph']) assert.ok(src.includes(name), name);
   assert.match(src, /Also on centred and right-aligned text/);
 });
+
+// ---- Drop caps in Live Preview: which lines of the note open a chapter, and what they are given ----
+
+const openings = text => S.openingPlan(text.split('\n'));
+const openLines = text => openings(text).map(o => o.line);
+
+test('drop caps in Live Preview: the note is read into the blocks Reading view draws', () => {
+  const blocks = text => S.noteBlocks(text.split('\n'), 0).map(b => `${b.type}${b.level || ''}:${b.from}-${b.to}`);
+  assert.deepEqual(blocks('# One\nText under it\nand its second line\n\n> a quote\nlazily continued\n\n> [!note] A callout\n> text'),
+    ['heading1:0-0', 'p:1-2', 'quote:4-5', 'other:7-8']);
+  assert.deepEqual(blocks('Title\n=====\n\nA paragraph\n-----\n\n---\n\n***'), ['heading1:0-1', 'heading2:3-4', 'other:6-6', 'other:8-8'], 'headings underlined, and rules');
+  assert.deepEqual(blocks('```js\n\n# not a heading\n```\nAfter\n\n~~~\nopen to the end'), ['other:0-3', 'p:4-4', 'other:6-7'], 'code, closed or not');
+  assert.deepEqual(blocks('- one\n- two\n\n- three\n\n  set in\n\nAfter the list'), ['other:0-5', 'p:7-7'], 'a list keeps its items and what is set in under them');
+  assert.deepEqual(blocks('Text\n- a list right under it\n\nText\n2. no list: only 1. begins one there'), ['p:0-0', 'other:1-1', 'p:3-4']);
+  assert.deepEqual(blocks('$$\nx\n\ny\n$$\n\n$$x$$\n\n%%\na comment\n\nstill\n%%\n\n%% in a line %% text'), ['other:0-4', 'other:6-6', 'other:8-12', 'p:14-14'], 'mathematics and comments run over blank lines');
+  assert.deepEqual(blocks('| a | b |\n| - | - |\n| 1 | 2 |\n\n<div>\nhtml\n</div>\n\n[^1]: a note\n    set in\n\nAfter it\n\n    code set in'), ['other:0-2', 'other:4-6', 'other:8-9', 'p:11-11', 'other:13-13']);
+  assert.deepEqual(blocks('a | b\nno table without its rule'), ['p:0-1']);
+  assert.deepEqual(S.noteBlocks(['---', 'a: 1', '---', 'Text'], 3).map(b => b.from), [3], 'the properties are no block of the text');
+});
+
+test('drop caps in Live Preview: the paragraphs that open a chapter are the ones Reading view gives a drop cap', () => {
+  assert.deepEqual(openLines('First paragraph.\n\nSecond.'), [0], 'the top of a note without properties');
+  assert.deepEqual(openLines('\n\nFirst paragraph.'), [2]);
+  assert.deepEqual(openLines('---\ntags: [a]\n---\nFirst paragraph.\n\n# One\n\nUnder it.'), [7], 'not under properties: the snippet opens no chapter there either');
+  assert.deepEqual(openLines('# One\nRight under it.\n\n## Two\n\nUnder two.\n\n###### Six\n\nUnder six.\n\nNot this one.'), [1, 5, 9]);
+  assert.deepEqual(openLines('### Three\n\nNo.\n\n#### Four\n\nNo.\n\n##### Five\n\nNo.'), [], 'only headings 1, 2 and 6');
+  assert.deepEqual(openLines('Title\n=====\n\nUnder it.\n\nSub\n---\n\nUnder that.'), [3, 8], 'headings underlined');
+  assert.deepEqual(openLines('## Two\n\n> An epigraph,\n> in two lines.\n\nAfter the epigraph.\n\nNo.'), [5], 'one quotation may stand between');
+  assert.deepEqual(openLines('## Two\n\n> One.\n\n> Two.\n\nNo.'), [], 'one, not two');
+  assert.deepEqual(openLines('## Two\n\n> [!note] A callout\n> text\n\nNo.'), [], 'a callout is no epigraph');
+  for (const between of ['- a list', '1. a list', '```\ncode\n```', '---', '| a | b |\n| - | - |', '$$\nx\n$$', '<div>html</div>', '[^1]: a footnote', '%%\na comment\n%%', '    code set in', '### A smaller heading']) {
+    assert.deepEqual(openLines(`## Two\n\n${between}\n\nNo.`), [], between);
+  }
+  assert.deepEqual(openLines('## Two\n\nA paragraph of\nthree lines\nin the note.\n\nNo.'), [2], 'the paragraph’s first line');
+  assert.deepEqual(openLines('## Two\n- a list right under the heading\n\nNo.'), []);
+  assert.deepEqual(openLines('## Two\n\n```\n## not a heading\n\nNot a paragraph.\n```'), []);
+  // the paragraph is there, and opens the chapter, but has no letter to set
+  for (const lead of ['![[picture.png]]', '![alt](picture.png) text', '$x$ is a number.', '%% a comment %%', '<span>marked up</span> text']) {
+    assert.deepEqual(openLines(`## Two\n\n${lead}\n\nNo.`), [], lead);
+  }
+  const led = text => openings(`## Two\n\n${text}`).map(o => o.led);
+  assert.deepEqual(led('Plain words.'), [false]);
+  assert.deepEqual(led('“Quoted,” she said.'), [false], 'a quotation mark is part of the initial in both views');
+  for (const text of ['**Bold** words.', '*Emphasis* first.', '_Emphasis_ first.', '[[A link]] first.', '[A link](https://example.com) first.', '==Marked== first.', '~~Struck~~ first.', '`code` first.']) assert.deepEqual(led(text), [true], text);
+});
+
+test('drop caps in Live Preview: aligned text has none unless it asks, a standing initial if it does, and the chapter opens after it', () => {
+  const VERSE2 = ['Tyger Tyger, burning bright,', 'In the forests of the night;'];
+  const block = (kind, ...lines) => [`::: ${kind}`, ...lines, ':::', ''];
+  const text = ['## Verse', '', ...block('center', ...VERSE2), ...block('right', '— Blake'), 'The prose after it.', '', 'No.'].join('\n');
+  assert.deepEqual(openings(text).map(o => [o.line, o.standing]), [[11, false]], 'the first paragraph that is not aligned');
+  const asked = ['## Verse', '', ...block('center dropcap', ...VERSE2), 'The prose after it.'].join('\n');
+  assert.deepEqual(openings(asked).map(o => [o.line, o.standing, o.text]), [[3, true, VERSE2.join('\n')]], 'the line after the marker, and not the paragraph after the block');
+  const note = ['---', 'align: center', '---', '## Verse', '', ...VERSE2, '', 'More.'].join('\n');
+  assert.deepEqual(openLines(note), [], 'a note that is centred as a whole');
+  assert.deepEqual(openings(note.replace('align: center', 'align: center\ndropcap-aligned: true')).map(o => [o.line, o.standing]), [[6, true]]);
+  assert.deepEqual(openLines(['## Verse', '', '::: center dropcap', '', ...VERSE2, '', ':::', '', 'Prose.'].join('\n')), [4], 'markers that stand apart from the stanza');
+  assert.deepEqual(openLines(['## Verse', '', '::: center', ':::', '', 'Prose.'].join('\n')), [5], 'a block of nothing but its markers');
+});
+
+test('drop caps in Live Preview: the note’s own choice is read from its lines, as its properties will say it', () => {
+  const said = (...props) => { const lines = ['---', ...props, '---', 'Text']; return S.linesDropcap(lines, props.length + 2); };
+  assert.equal(said('dropcap: goudy'), 'goudy');
+  assert.equal(said('tags: [a]', 'dropcap: "Goudy Initialen"'), 'goudy');
+  assert.equal(said('dropcap: none'), 'none');
+  assert.equal(said('dropcap: false'), 'none');
+  assert.equal(said('dropcap: Dropcat   # the cats'), 'set:Dropcat');
+  assert.equal(said("drop-cap: 'plain'"), 'plain');
+  assert.equal(said('dropcap:'), null);
+  assert.equal(said('title: dropcap: goudy'), null);
+  assert.equal(said('dropcap: yinit', 'drop-cap: goudy'), 'yinit', 'the same key first as noteDropcap');
+  assert.equal(S.linesDropcap(['dropcap: goudy', 'Text'], 0), null, 'only in the properties');
+  for (const v of ['goudy', 'Plain capital', 'none', 'My initials', 'no']) assert.equal(said(`dropcap: ${v}`), S.noteDropcap({ dropcap: v }), v);
+});
+
+test('drop caps in Live Preview: a line is read as it is shown (its opening words choose a drop cap’s image)', () => {
+  assert.equal(S.shownLine('**Bold** and *emphasis* and _this_ and ==marked== and ~~struck~~ and `code`.'), 'Bold and emphasis and this and marked and struck and code.');
+  assert.equal(S.shownLine('[[A note]] and [[A note|its name]] and [a link](https://example.com/a_b).'), 'A note and its name and a link.');
+  assert.equal(S.shownLine('snake_case stays, 2 * 3 loses its star only'), 'snake_case stays, 2  3 loses its star only');
+  assert.equal(S.shownLine('A note[^1] with %%a comment%% and ![[a picture.png]] and <b>html</b>.'), 'A note with  and  and html.');
+  assert.equal(S.shownLine('\\*not emphasis\\* and \\[no link\\]'), '*not emphasis* and [no link]', 'an escaped mark is a character');
+  assert.equal(openings('## Two\n\n**Tyger** Tyger,\nburning bright.   \n\nNo.')[0].text, 'Tyger Tyger,\nburning bright.');
+});
+
+test('drop caps in Live Preview: an opening line is given the classes and properties a block of Reading view is given', () => {
+  const o = { line: 2, text: 'Tyger Tyger, burning bright', standing: false, led: false };
+  const line = (...args) => S.openingLine(o, ...args);
+  assert.deepEqual(line(null, null, 'yinit', 'a.md'), { classes: 'scriptorium-opening', style: '' }, 'the vault’s: the classes on body do the rest');
+  assert.deepEqual(line('goudy', null, 'yinit', 'a.md'), { classes: 'scriptorium-opening scriptorium-dropcap scriptorium-dropcap-goudy', style: '' });
+  assert.equal(line('none', null, 'yinit', 'a.md'), null, 'the note says none');
+  assert.equal(line(null, null, 'none', 'a.md'), null, 'the vault says none');
+  assert.ok(line('plain', null, 'none', 'a.md'), 'the note’s choice outranks the vault’s None');
+  assert.equal(S.openingLine(Object.assign({}, o, { standing: true }), null, null, 'yinit', 'a.md').classes, 'scriptorium-opening scriptorium-align-dropcap');
+  assert.equal(line(null, null, 'yinit', 'a.md', null, true).classes, 'scriptorium-opening scriptorium-dropcap-inked');
+  const font = { kind: 'font', family: 'Scriptorium Set Kanzlei', size: 3.95, margin: '0.2em 0.12em -0.1em 0' };
+  const f = line('set:Kanzlei', font, 'yinit', 'a.md');
+  assert.equal(f.classes, 'scriptorium-opening scriptorium-dropcap scriptorium-dropcap-font');
+  assert.match(f.style, /--scriptorium-initial-font: "Scriptorium Set Kanzlei", var\(--manuscript-display\); --scriptorium-initial-size: 3\.95em; --scriptorium-initial-margin: 0\.2em 0\.12em -0\.1em 0/);
+  const images = { kind: 'images', mono: true, letters: { T: { light: ['app://x/T-1.png', 'app://x/T-2.png'], dark: ['app://x/T-dark.png'] } } };
+  const i = line('set:Cats', images, 'yinit', 'a.md', url => (url.includes('dark') ? 0 : 1.25));
+  assert.equal(i.classes, 'scriptorium-opening scriptorium-dropcap scriptorium-dropcap-image scriptorium-dropcap-mono');
+  assert.match(i.style, /--scriptorium-dropcap-light: url\("app:\/\/x\/T-[12]\.png"\); --scriptorium-dropcap-dark: url\("app:\/\/x\/T-dark\.png"\); --scriptorium-dropcap-ratio: 1\.25$/);
+  // the same image as Reading view chooses for the same paragraph of the same note
+  const el = { classList: { list: [], add(...c) { this.list.push(...c); }, remove() {}, [Symbol.iterator]: function* () {} }, style: { set: {}, setProperty(k, v) { this.set[k] = v; }, removeProperty() {} },
+    querySelector: () => ({ childNodes: null, textContent: o.text }) };
+  S.markDropcap(el, 'set:Cats', images, 'a.md');
+  assert.ok(i.style.includes(`--scriptorium-dropcap-light: ${el.style.set['--scriptorium-dropcap-light']}`));
+  // a set without the paragraph's letter: the vault's drop cap, or none if the vault has none
+  const noT = { kind: 'images', letters: { B: { light: ['app://x/B.png'] } } };
+  assert.deepEqual(line('set:Cats', noT, 'goudy', 'a.md'), { classes: 'scriptorium-opening', style: '' });
+  assert.equal(line('set:Cats', noT, 'none', 'a.md'), null);
+});
+
+test('drop caps in Live Preview: the snippet sets the editor’s opening line with the rules it has for Reading view, in Live Preview only', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8').replace(/url\("data:[^"]*"\)/g, 'url()');
+  const LP = '.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening';
+  // every rule for the paragraph after an epigraph has the editor's line in its list of selectors (so: the same declarations)
+  const rules = css.split('}').map(r => r.slice(0, r.indexOf('{') < 0 ? r.length : r.indexOf('{'))).filter(sel => /\.el-blockquote \+ \.el-p[^,]*$/.test(sel.trim()) && !/scriptorium-initials-none|@media print|hyphens/.test(sel));
+  assert.ok(rules.length >= 15, String(rules.length));
+  for (const sel of rules) {
+    if (/^\s*(?:@media[^{]*\{\s*)?\.markdown-rendered :is\(/.test(sel) && /-none/.test(sel)) continue;   // "None" is said in the plugin: such a line is not an opening line at all
+    assert.ok(sel.includes(LP), sel.trim().slice(-160));
+  }
+  for (const mode of [':where(body:not(.scriptorium-fancy))', ':where(body.scriptorium-fancy)']) {
+    assert.ok(css.includes(`${mode} ${LP}::first-letter,`), mode);
+    assert.ok(css.includes(`${mode} ${LP}::first-line,`), mode);
+  }
+  assert.ok(css.includes(`:where(body:not(.scriptorium-fancy)) ${LP}:not(.scriptorium-align-dropcap),`), 'the opening paragraph is not justified in normal mode');
+  for (const which of ['goudy', 'plain', 'yinit', 'font', 'image']) assert.ok(css.includes(`.cm-line.scriptorium-dropcap-${which}`), which);
+  // Source mode stays plain: no rule reaches an opening line outside Live Preview
+  for (const line of css.split('\n')) if (line.includes('.cm-line.scriptorium-opening')) assert.ok(line.includes('.is-live-preview '), line.slice(0, 160));
+  assert.match(css, /\.cm-line\.scriptorium-opening \.sc-keep,\s*\.markdown-rendered \.sc-keep \{\s*white-space: nowrap;/);
+});
+
+test('drop caps in Live Preview: the plugin registers the extension, never changes the note for it, and previews in the editor too', () => {
+  const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
+  assert.match(src, /this\.dropcapLive = dropcapExtension\(this\); this\.registerEditorExtension\(this\.dropcapLive\.extension\)/);
+  const ext = src.slice(src.indexOf('function dropcapExtension('), src.indexOf('Export to PDF: the page as Reading view sets it'));
+  assert.doesNotMatch(ext, /changes\s*:/, 'decorations only: no change to the text');
+  assert.doesNotMatch(ext, /Decoration\.(?:replace|widget)/, 'the letter stays the note’s own text');
+  assert.match(ext, /Decoration\.line\(/);
+  assert.match(src, /previewDropcap\(view, which, quiet\) \{\s*this\.previewLive\(view, which, quiet\);/);
+  assert.equal(typeof S.dropcapExtension, 'function');
+});
