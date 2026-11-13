@@ -428,7 +428,7 @@
     }
     await run('a note that is centred as a whole: no drop cap unless its properties ask for one', async out => {
       await both(out, note('align: center', '## Verse', VERSE.join('\n'), 'More of it.'), 'Tyger', 'none', 1);
-      // (other words: Reading view keeps a block it has drawn while the block's own text is the same, and does not mark it again when only the properties change)
+      // (other words: Reading view keeps a block it has drawn while the block's own text is the same, and marks it again only a moment after the properties change)
       await both(out, note('align: center\ndropcap-aligned: true', '## Verse', 'Tiger, tiger, burning bright\nIn the forests of the night,', 'More of it.'), 'Tiger', 'standing', 1);
     });
 
