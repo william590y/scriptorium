@@ -2040,7 +2040,7 @@ function demoRevise(passage, instruction) {
    or "correct" proofreads; "diagram", "figure" or "draw" adds a TikZ figure where the vault has TikZJax on (have:
    {tikz}); "equation" or "formula" adds one; "code" or "function" adds a code block; "add" or "append" adds a
    line. */
-const DEMO_FIGURE = ['```tikz', '\\begin{document}', '\\begin{tikzpicture}[scale=1.5]',
+const DEMO_FIGURE = ['```tikz', '\\begin{document}', '\\begin{tikzpicture}[scale=1.25]',
   '\\draw[dashed] (0,0) circle (2);',
   '\\draw[dashed] (-2.5,0) -- (3,0);',
   '\\draw[dashed] (0,0) -- (1,1.732) -- (2,0) -- (1,-1.732) -- cycle;',
