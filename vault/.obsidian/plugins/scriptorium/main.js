@@ -191,7 +191,15 @@ function repairTikzjax(win) {
   };
   function tick() {
     for (const p of Array.from(pending)) {
-      if (!p.loader.isConnected) { if (now() - p.since > 1000) pending.delete(p); continue; }   // replaced by its figure (or never shown)
+      if (!p.loader.isConnected) {
+        // Replaced by its figure, or never shown. Or TikZJax was given no figure and put nothing in the spinner's place
+        // (the word "null": the throw that stops its queue): the spinner goes back, and is taken up below.
+        const home = p.home;
+        if (home && home.isConnected && !home.firstElementChild && home.textContent.trim() === 'null') { home.textContent = ''; home.appendChild(p.loader); continue; }
+        if (now() - p.since > 1000) pending.delete(p);
+        continue;
+      }
+      p.home = p.loader.parentElement;
       if (p.taken || !worker || busy.size || now() - idleSince < 1000 || now() - p.since < 2000) continue;
       p.taken = true;
       chain = chain.then(() => rescue(p)).then(() => { pending.delete(p); }, () => { pending.delete(p); });
@@ -5757,6 +5765,8 @@ class Scriptorium extends Plugin {
   }
 }
 
+// (for the checks that run in Obsidian's console, where require('obsidian') is not to be had)
+Scriptorium.obsidian = { MarkdownRenderer, Component };
 module.exports = Scriptorium;
 // Pure helpers, exported for plugins-tests/ (Obsidian uses only the class).
 Object.assign(module.exports, {

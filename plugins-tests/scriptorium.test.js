@@ -29,8 +29,8 @@ test('the plugin module exports the plugin class and its helpers', () => {
 });
 
 test('settings: defaults, checked values, unknown keys kept', () => {
-  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true });
-  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true });
+  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true, tikzRepair: true });
+  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true, tikzRepair: true });
   // drop caps while editing: on by default (since 1.4.1), and a saved choice is kept
   assert.equal(S.normalizeSettings({ fancyMode: false, initials: 'goudy', marginalia: true, imageFocus: true, pdfTitleSet: true }).liveDropcaps, true);
   assert.equal(S.normalizeSettings({ liveDropcaps: true }).liveDropcaps, true);
@@ -1225,4 +1225,55 @@ test('drop caps in Live Preview: off, nothing is put into the editors; on and of
     apply();
     assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 2], 'off again: taken out of the editors');
   } finally { Module._load = realLoad2; }
+});
+
+test('Repair TikZJax rendering: when it stands, what TeX said, and a figure’s own ids', () => {
+  assert.equal(S.normalizeSettings({}).tikzRepair, true, 'on by default');
+  assert.equal(S.normalizeSettings({ tikzRepair: false }).tikzRepair, false);
+  assert.equal(S.tikzRepairState({ tikzRepair: true }, '0.5.2'), 'on');
+  assert.equal(S.tikzRepairState({ tikzRepair: false }, '0.5.2'), 'off');
+  assert.equal(S.tikzRepairState({ tikzRepair: true }, null), 'absent');
+  assert.equal(S.tikzRepairState({ tikzRepair: true }, '0.5.3'), 'unknown', 'a version that was not checked is left alone');
+  assert.equal(S.tikzRepairState({ tikzRepair: true }, '0.6.0'), 'unknown');
+  assert.deepEqual(S.TIKZJAX_REPAIRED, ['0.5.2']);
+  const log = ['This is e-TeX, Version 3.14159265-2.6', '(input.tex', '! Undefined control sequence.', 'l.3 \\drwa', '          (0,0) -- (1,1);', 'No pages of output.'];
+  assert.equal(S.texError(log), '! Undefined control sequence.\nl.3 \\drwa');
+  assert.equal(S.texError(['! LaTeX Error: File `tkz-euclide.sty\' not found.', 'Type X to quit', 'l.1 \\usepackage{tkz-euclide}']), '! LaTeX Error: File `tkz-euclide.sty\' not found.\nl.1 \\usepackage{tkz-euclide}');
+  assert.equal(S.texError(['(input.tex', 'Output written on input.dvi (2 pages, 1820 bytes).']), '');
+  assert.equal(S.texError(null), '');
+  assert.equal(S.tikzOwnIds('<svg><g id="pgf1"/><g id="pgf12"/><use href="#pgf12"/><use href="#pgf1"/>&#173;</svg>', 'ab'),
+    '<svg><g id="pgfab1"/><g id="pgfab12"/><use href="#pgfab12"/><use href="#pgfab1"/>&#172;</svg>');
+  assert.equal(S.tikzOwnIds('<svg><path d="M0 0"/></svg>', 'ab'), '<svg><path d="M0 0"/></svg>');
+});
+
+test('Repair TikZJax rendering, in a stand-in page: the first spinner is kept, the worker is known by its first figure, and taking it away leaves nothing', () => {
+  class Script { constructor(type) { this.type = type; } getAttribute(n) { return n === 'type' ? this.type : null; } }
+  class FakeWorker { constructor() { this.sent = []; this.listeners = []; } addEventListener(t, f) { this.listeners.push(f); } removeEventListener(t, f) { this.listeners = this.listeners.filter(x => x !== f); } }
+  FakeWorker.prototype.postMessage = function (m) { this.sent.push(m); };
+  const native = FakeWorker.prototype.postMessage;
+  let ticking = 0;
+  const win = { document: { querySelectorAll: () => [] }, performance: { now: () => 0 }, HTMLScriptElement: Script, Worker: FakeWorker,
+    setInterval: () => { ticking++; return 7; }, clearInterval: () => { ticking--; }, setTimeout: () => 0 };
+  const repair = S.repairTikzjax(win);
+  const figure = new Script('text/tikz'), first = { isConnected: true }, second = { isConnected: false };
+  figure.loader = first;
+  figure.loader = second;
+  assert.equal(figure.loader, first, 'met twice: the spinner on the page is the one kept');
+  assert.equal(repair.stats.twice, 1);
+  const other = new Script('text/javascript');
+  other.loader = 1; other.loader = 2;
+  assert.equal(other.loader, 2, 'any other script is as it was');
+  const w = new FakeWorker();
+  w.postMessage({ type: 'run', uid: 3, method: 'texify', args: ['x', {}] });
+  assert.deepEqual([w.sent.length, w.listeners.length, repair.stats.runs], [1, 1, 1], 'the message goes on, and the worker is listened to');
+  new FakeWorker().postMessage({ hello: 1 });
+  assert.equal(repair.stats.runs, 1);
+  repair.stop();
+  assert.equal(Object.getOwnPropertyDescriptor(Script.prototype, 'loader'), undefined);
+  assert.equal(FakeWorker.prototype.postMessage, native);
+  assert.deepEqual([w.listeners.length, ticking], [0, 0]);
+  assert.equal(figure.loader, first, 'a figure under way keeps its spinner');
+  const later = new Script('text/tikz');
+  later.loader = first; later.loader = second;
+  assert.equal(later.loader, second, 'off: as TikZJax comes');
 });
