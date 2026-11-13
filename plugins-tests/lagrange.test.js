@@ -1868,7 +1868,11 @@ test('Look: the part of the page a look is of', () => {
   assert.match(at({ target: 'passage', near: 'not in the note' }, { near: null })[2], /not found in the note/);
   // what is on screen: by lines in the editor, by the first and last block's words in Reading view
   assert.deepEqual(at({ target: 'view' }, { seen: { from: 26, to: 41 } }), ['picture', 'const look = 1;', '']);
-  assert.deepEqual(at({ target: 'view' }, { seen: { firstText: 'A  second paragraph follows.', lastText: 'A list and a table' } }), ['A second paragraph follows.', 'A list and a table', '']);
+  assert.deepEqual(at({ target: 'view' }, { seen: { texts: ['A  second paragraph follows.', 'A displayed equation', '∫x²dx', '', 'A list and a table'] } }), ['A second paragraph follows.', 'A list and a table', '']);
+  // (a block without words, at either end of what is in sight, is placed by its neighbours: here the equation and the picture)
+  assert.deepEqual(at({ target: 'view' }, { seen: { texts: ['', 'A list and a table'] } }), ['picture', 'A list and a table', '']);
+  assert.deepEqual(at({ target: 'view' }, { seen: { texts: ['A displayed equation', '∫x²dx', ''] } }), ['A displayed equation', 'picture', '']);
+  assert.match(at({ target: 'view' }, { seen: { texts: ['words that are nowhere on the page'] } })[2], /could not be told/);
   assert.match(at({ target: 'view' }, { seen: null })[2], /could not be told/);
   // a page whose lines cannot be told (see alignSections) shows the whole note, and says so
   const unlined = BLOCKS.map(b => Object.assign({}, b, { from: undefined, to: undefined }));
@@ -1971,7 +1975,7 @@ test('Look message: pictures and words for a model that takes pictures, words al
   assert.equal(L.lookCaption(look), 'The whole note, in 2 pictures and its measurements');
   assert.equal(L.lookCaption(lookOf({ more: 3 })), 'The whole note, in 2 pictures (the first 2 of 5 pages) and its measurements');
   assert.equal(L.lookCaption(lookOf({ pictures: [], label: 'the section “De litteris”' })), 'The section “De litteris”, in words');
-  assert.match(L.lookRecipient(baseSettings()), /^It goes to Anthropic \(Claude Sonnet 5\.5\) with the conversation, and to no one else\.$/);
+  assert.match(L.lookRecipient(baseSettings()), /^A look goes to Anthropic \(Claude Sonnet 5\.5\) with the conversation, and to no one else\.$/);
   assert.match(L.lookRecipient(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai', openaiModel: 'llava', openaiBaseUrl: 'http://localhost:11434/v1' })), /your server at http:\/\/localhost:11434\/v1 \(llava\)/);
   assert.match(L.lookRecipient(Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'demo' })), /nothing is sent anywhere/);
 });

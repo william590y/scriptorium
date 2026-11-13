@@ -77,7 +77,7 @@ const LOOK_WIDTH = 1024, LOOK_HEIGHT = 1536;
 const LOOK_PICTURE_CHARS = 2000000;   // one picture, in base64; a PNG over this is sent as a JPEG instead
 const LOOK_DESCRIPTION_CHARS = 6000;  // the page described in words
 const LOOK_SOURCE_CHARS = 250000;     // a longer note is rendered around the part asked for only
-const LOOK_BLOCKS = 400;              // how many blocks of a page are measured
+const LOOK_BLOCKS = 150;              // how many blocks of a look are measured in full (the description holds fewer)
 const LOOK_PICTURES = ['auto', 'on', 'off'];
 
 const LOADER_THEMES = ['random', 'clockwork', 'alchemy', 'orbit'];
@@ -762,7 +762,7 @@ function lookSource(text, line, limit) {
 /* The blocks of the page a look is of: {first, last, remark}, indices into blocks (measurePage's records: {kind,
    level, text, from, to, …}), or null when the page has no blocks. remark says, for the model, why it is shown
    something other than it asked for (a heading that is not there, lines that cannot be told), or is ''. ctx: {seen:
-   {from, to} | {firstText, lastText} | null, what the writer has on screen; near: {from, to} | null, the lines
+   {from, to} | {texts} | null, what the writer has on screen (visibleLines); near: {from, to} | null, the lines
    holding the words of a passage}. A passage is shown with the block before it and the block after. 'auto' is the
    whole note here; lookAtPage turns it into what is on screen when the note is too long for one look. */
 function lookRange(spec, blocks, ctx) {
@@ -807,13 +807,21 @@ function lookRange(spec, blocks, ctx) {
     const seen = ctx && ctx.seen;
     let r = null;
     if (seen && seen.from >= 1) r = byLines(seen.from, seen.to);
-    else if (seen && seen.firstText) {
-      const first = blocks.findIndex(b => norm(b.text) === norm(seen.firstText));
-      let last = -1;
-      for (let i = n - 1; i >= Math.max(first, 0); i--) if (norm(blocks[i].text) === norm(seen.lastText)) { last = i; break; }
-      if (first >= 0) r = { first, last: Math.max(first, last) };
+    else if (seen && Array.isArray(seen.texts) && seen.texts.length) {
+      // the blocks in sight, by their words: the first and the last of them that have words and are on the page
+      // say where the others (a picture, a rule) are, since the page has the same blocks in the same order
+      const words = b => norm(b.key !== undefined ? b.key : b.text);
+      const texts = seen.texts.map(norm), m = texts.length;
+      let a = -1, i = -1, z = -1, j = -1;
+      for (let k = 0; k < m && i < 0; k++) if (texts[k]) { i = blocks.findIndex(b => words(b) === texts[k]); a = k; }
+      for (let k = m - 1; k >= 0 && j < 0; k--) {
+        if (!texts[k]) continue;
+        for (let q = n - 1; q >= Math.max(i, 0); q--) if (words(blocks[q]) === texts[k]) { j = q; break; }
+        z = k;
+      }
+      if (i >= 0 && j >= 0) r = { first: Math.max(0, i - a), last: Math.min(n - 1, j + (m - 1 - z)) };
     }
-    if (r) return { first: r.first, last: r.last, remark: '' };
+    if (r) return { first: r.first, last: Math.max(r.first, r.last), remark: '' };
     return whole('What is on screen could not be told, so this is the note from its beginning.');
   }
   return whole('');
@@ -961,7 +969,7 @@ function lookRecipient(s) {
   if (s.provider === 'demo') return 'Demo mode: nothing is sent anywhere.';
   const who = { anthropic: 'Anthropic', 'claude-code': 'Anthropic, through Claude Code', 'openai-api': 'OpenAI', codex: 'OpenAI, through Codex',
     openai: `your server at ${String(s.openaiBaseUrl || '').trim() || 'the address in the settings'}` }[s.provider] || 'the provider chosen in the settings';
-  return `It goes to ${who} (${modelLabel(s)}) with the conversation, and to no one else.`;
+  return `A look goes to ${who} (${modelLabel(s)}) with the conversation, and to no one else.`;
 }
 
 /* A message's words, whatever shape its content has: the text of its parts, with a line where each picture was. */
@@ -4365,8 +4373,8 @@ function paneWidth(view) {
 }
 
 /* What the writer has on screen in a note's view: in the editor, {from, to}, lines counted from 1; in Reading view,
-   {firstText, lastText}, the words of the first and the last block in sight (Reading view keeps no line numbers a
-   plugin may read); null if it cannot be told. */
+   {texts}, the words of each block in sight, in order (Reading view keeps no line numbers a plugin may read); null
+   if it cannot be told. */
 function visibleLines(view) {
   const tidy = t => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 200);
   try {
@@ -4388,7 +4396,7 @@ function visibleLines(view) {
       return r.height > 0 && r.bottom > box.top && r.top < box.bottom;
     });
     if (!inSight.length) return null;
-    return { firstText: tidy(inSight[0].textContent), lastText: tidy(inSight[inSight.length - 1].textContent) };
+    return { texts: inSight.map(el => tidy(el.textContent)) };
   } catch (e) {
     return null;
   }
@@ -4438,9 +4446,9 @@ async function noteSections(app, text) {
    blocks (so every plugin's post-processors run, and mathematics, callouts and embeds are made as usual); the page
    around them is built as Reading view builds it, because the vault's theme and snippets look for it: the pane's
    own classes, the title above the text, and each block in a <div> marked el-p, el-h2 and so on (Scriptorium finds
-   a chapter's opening paragraph by those marks). The page is as wide as the note's pane, and as tall as its text.
-   If Scriptorium is on, it then gives the note its own drop cap, and lays the footnotes out in the margin as it
-   does in a view (dressLikeScriptorium). Returns {host, pane, sizer, destroy()}. */
+   a chapter's opening paragraph by those marks; see dressLikeReadingView). The page is as wide as the note's pane,
+   and as tall as its text. If Scriptorium is on, it then gives the note its own drop cap, and lays the footnotes
+   out in the margin as it does in a view (dressLikeScriptorium). Returns {host, pane, sizer, margin, destroy()}. */
 async function renderPage(app, view, text, width, frontmatter) {
   const doc = document, file = view.file;
   const host = doc.body.createDiv({ cls: 'lagrange-look-page', attr: { 'aria-hidden': 'true', inert: '' } });
@@ -4463,26 +4471,67 @@ async function renderPage(app, view, text, width, frontmatter) {
     const reading = content.createDiv({ cls: 'markdown-reading-view' });
     reading.style.width = '100%';
     const pane = page.pane = reading.createDiv({ cls: classes.join(' ') });
-    const sizer = page.sizer = pane.createDiv({ cls: 'markdown-preview-sizer markdown-preview-section' });
-    sizer.createDiv({ cls: 'markdown-preview-pusher' }).style.cssText = 'width:1px;height:0.1px;margin-bottom:0px;';
-    sizer.createDiv({ cls: 'mod-header mod-ui' }).createDiv({ cls: 'inline-title', text: file.basename });
-    const written = sizer.createDiv();
+    const written = pane.createDiv();
     await renderMarkdown(app, text, written, file.path, component);
-    for (const el of Array.from(written.children)) {
-      const block = doc.createElement('div');
-      block.className = `el-${el.tagName.toLowerCase()}`;
-      if (el.matches('pre.frontmatter')) block.classList.add('mod-frontmatter', 'mod-ui');
-      sizer.insertBefore(block, written);
-      block.appendChild(el);
-    }
-    written.remove();
-    sizer.createDiv({ cls: 'mod-footer mod-ui' });
+    page.sizer = dressLikeReadingView(written, file.basename);
+    page.sizer.createDiv({ cls: 'mod-footer mod-ui' });
     page.margin = dressLikeScriptorium(app, { file, host, content, text, frontmatter });
     return page;
   } catch (e) {
     page.destroy();
     throw e;
   }
+}
+
+/* Gives what Obsidian's renderer has written into `written` the frame Reading view gives a note: the sizer, the
+   header above the text (with the title, if there is one), and each block in a <div> of its own marked by its
+   element (el-p, el-h2, …). A table's block scrolls sideways, as it does there (which also keeps the table's margins
+   inside it), and a list has its bullets as elements, which is what themes style. Returns the sizer, which takes
+   the place of `written`. */
+function dressLikeReadingView(written, title) {
+  const doc = written.ownerDocument;
+  const make = (cls, parent) => { const el = doc.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+  const sizer = doc.createElement('div');
+  sizer.className = 'markdown-preview-sizer markdown-preview-section';
+  make('markdown-preview-pusher', sizer).style.cssText = 'width:1px;height:0.1px;margin-bottom:0px;';
+  const header = make('mod-header mod-ui', sizer);
+  if (title) make('inline-title', header).textContent = title;
+  for (const el of Array.from(written.children)) {
+    const block = make(`el-${el.tagName.toLowerCase()}`, sizer);
+    if (el.matches('pre.frontmatter')) block.classList.add('mod-frontmatter', 'mod-ui');
+    if (el.tagName === 'TABLE') {
+      block.style.overflowX = 'auto';
+      const dir = (el.querySelector('th, td') || el).getAttribute('dir');
+      if (dir === 'ltr' || dir === 'rtl') block.setAttribute('dir', dir);
+    }
+    block.appendChild(el);
+  }
+  for (const list of Array.from(sizer.querySelectorAll('ul:not(.has-list-bullet)'))) {
+    if (list.closest('.markdown-embed-content')) continue;     // an embedded note's lists are dressed with it
+    list.classList.add('has-list-bullet');
+    for (const item of Array.from(list.children)) {
+      if (item.tagName === 'LI' && !item.querySelector(':scope > .list-bullet')) item.insertBefore(doc.createElement('span'), item.firstChild).className = 'list-bullet';
+    }
+  }
+  written.replaceWith(sizer);
+  return sizer;
+}
+
+/* A note embedded in the page (![[Another note]]) arrives a moment after the page's own blocks, written the same
+   plain way; Reading view frames it as it frames a note. Frames those that have arrived and are not framed yet;
+   returns whether there were any. */
+function dressEmbeds(page) {
+  let any = false;
+  for (const inner of Array.from(page.host.querySelectorAll('.markdown-embed-content > .markdown-preview-view'))) {
+    if (!inner.firstElementChild || inner.querySelector(':scope > .markdown-preview-sizer')) continue;
+    const doc = inner.ownerDocument, written = doc.createElement('div');
+    while (inner.firstChild) written.appendChild(inner.firstChild);
+    inner.appendChild(written);
+    inner.classList.add('node-insert-event', 'allow-fold-headings', 'allow-fold-lists');
+    dressLikeReadingView(written, '');
+    any = true;
+  }
+  return any;
 }
 
 /* What Scriptorium does to a Reading view beyond its post-processor, done to the page: the note's own drop cap (its
@@ -4543,6 +4592,7 @@ async function settlePage(page, signal) {
       const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)');
       const late = Date.now() > deadline;
       if (!late && (waiting || Date.now() - changed < 160)) continue;
+      if (!late && dressEmbeds(page)) continue;     // embedded notes have come in: framed, and waited for in turn
       if (laid || late) break;
       relay();              // the margin once more, now that everything has its size; then one more quiet moment
       laid = true;
@@ -4553,10 +4603,12 @@ async function settlePage(page, signal) {
   }
 }
 
-/* Measures the page: {page, blocks}. page: {width, height, column: {left, width}, theme, font, size, margin,
-   background}; blocks: one record for each block that takes room on the page, as describeLook lists them, with its
-   place (top, bottom, in CSS pixels from the top of the page) and the source lines it comes from (info.sections, by
-   alignSections; info.shift is added to them). */
+/* Measures the page: {page, blocks, detail(first, last)}. page: {width, height, column: {left, width}, theme, font,
+   size, margin, background}. blocks: one record for each block that takes room on the page, with what it is, its
+   words, its place (top, bottom, in CSS pixels from the top of the page) and the source lines it comes from
+   (info.sections, by alignSections; info.shift is added to them): enough to tell which blocks a look is of.
+   detail(first, last) then measures those blocks in full, as describeLook lists them (alignment, font, lines, drop
+   cap, mathematics, pictures, footnotes, overflow); a long note has too many blocks to measure them all so. */
 function measurePage(page, info) {
   const { host, pane, sizer } = page;
   const doc = host.ownerDocument, win = doc.defaultView || window;
@@ -4655,13 +4707,15 @@ function measurePage(page, info) {
 
   const rendered = Array.from(sizer.children).filter(w => /(?:^|\s)el-/.test(w.className) && w.firstElementChild);
   const where = info.sections ? alignSections(info.sections, rendered.map(w => w.firstElementChild.tagName.toLowerCase())) : null;
-  const blocks = [];
-  const add = (w, el, lines) => {
+  const blocks = [], parts = new Map(), done = new Set();
+  // every block: what it is, its words, its place, its lines
+  const outline = (w, el, lines) => {
     const box = w.getBoundingClientRect();
     const cls = el.classList, tag = el.tagName.toLowerCase();
     const inMargin = cls.contains('callout') && cls.contains('scriptorium-in-margin');
     if (box.height < 0.5 && !inMargin) return;      // the front matter, a comment: nothing on the page
     const b = { kind: tag, text: tidy(el.textContent).slice(0, 200), top: box.top - origin.top, bottom: box.bottom - origin.top };
+    b.key = b.text;       // (its words as they stand on the page: what is on screen in Reading view is found by them)
     if (lines) { b.from = lines.from + (info.shift || 0); b.to = lines.to + (info.shift || 0); }
     let inner = el;
     if (cls.contains('inline-title')) b.kind = 'title';
@@ -4684,12 +4738,20 @@ function measurePage(page, info) {
       const lang = /(?:^|\s)language-([\w+#.-]+)/.exec(`${el.className} ${el.firstElementChild ? el.firstElementChild.className : ''}`);
       if (lang) b.language = lang[1];
       inner = el.querySelector('code') || el;
-    } else if (cls.contains('math')) b.kind = 'math';
+    } else if (cls.contains('math')) { b.kind = 'math'; b.text = ''; }
     else if (tag === 'hr') b.kind = 'rule';
     else if (tag === 'section' && cls.contains('footnotes')) { b.kind = 'footnotes'; b.items = el.querySelectorAll('li').length; inner = el.querySelector('li') || el; }
-
-    if (b.kind === 'picture') { const img = el.querySelector('img'); b.align = placed(img.getBoundingClientRect()); }
-    else if (b.kind === 'math') { const m = el.querySelector('mjx-math') || el; b.align = placed(m.getBoundingClientRect()); b.text = ''; }
+    parts.set(b, { el, inner, inMargin });
+    blocks.push(b);
+  };
+  // one block in full: how it is set
+  const detail = b => {
+    const part = parts.get(b);
+    if (!part || done.has(b)) return;
+    done.add(b);
+    const { el, inner, inMargin } = part;
+    if (b.kind === 'picture') b.align = placed(el.querySelector('img').getBoundingClientRect());
+    else if (b.kind === 'math') b.align = placed((el.querySelector('mjx-math') || el).getBoundingClientRect());
     else if (b.kind !== 'rule') b.align = alignOf(inner);
     if (!['picture', 'math', 'rule'].includes(b.kind)) {
       const cs = style(inner);
@@ -4703,7 +4765,7 @@ function measurePage(page, info) {
       b.dropcap = dropcapOf(el);
       b.firstLineCaps = /small-caps/.test(`${style(el, '::first-line').fontVariantCaps}`) && !b.smallCaps;
     }
-    b.math = Array.from(el.querySelectorAll('.math')).concat(cls.contains('math') ? [el] : []).map(f => sources[formulas.indexOf(f)]).filter(Boolean);
+    b.math = Array.from(el.querySelectorAll('.math')).concat(el.classList.contains('math') ? [el] : []).map(f => sources[formulas.indexOf(f)]).filter(Boolean);
     b.images = Array.from(el.querySelectorAll('img')).slice(0, 8).map(img => {
       const r = img.getBoundingClientRect();
       return { alt: img.alt || '', width: r.width, height: r.height, broken: img.complete && !img.naturalWidth, remote: /^https?:/i.test(img.currentSrc || img.src || '') };
@@ -4721,12 +4783,11 @@ function measurePage(page, info) {
       const past = x.getBoundingClientRect().right - column.right;
       if (past > 1 && !inMargin) b.overflow = Math.max(b.overflow, past);
     }
-    blocks.push(b);
   };
   const title = sizer.querySelector(':scope > .mod-header > .inline-title');
-  if (title && title.getBoundingClientRect().height >= 0.5) add(title.parentElement, title, null);
-  rendered.slice(0, LOOK_BLOCKS).forEach((w, i) => add(w, w.firstElementChild, where ? where[i] : null));
-  return { page: meta, blocks };
+  if (title && title.getBoundingClientRect().height >= 0.5) outline(title.parentElement, title, null);
+  rendered.forEach((w, i) => outline(w, w.firstElementChild, where ? where[i] : null));
+  return { page: meta, blocks, detail: (first, last) => { for (let i = Math.max(0, first); i <= last && i < blocks.length; i++) detail(blocks[i]); } };
 }
 
 /* The page's markup and styles, as one XHTML text the browser can draw by itself, with nothing to fetch: the page
@@ -4887,7 +4948,8 @@ async function lookAtPage(app, view, spec, opts) {
     measured.page.cut = source.cut;
     const blocks = measured.blocks;
     let range = lookRange(want, blocks, { seen, near });
-    if (!range) throw new LagrangeError('There is nothing on the page of this note yet.');
+    if (!range) throw new LagrangeError('there is nothing on the page of this note yet.');
+    measured.detail(range.first, Math.min(range.last, range.first + LOOK_BLOCKS - 1));
     const scale = lookScale(width);
     const line = (measured.page.size || 16) * 1.6;
     const plan = r => {
@@ -4901,6 +4963,7 @@ async function lookAtPage(app, view, spec, opts) {
       // the whole note if one look holds it; else what is on screen, if that can be told
       const onScreen = pages.more && seen ? lookRange({ target: 'view' }, blocks, { seen }) : null;
       if (onScreen && !onScreen.remark) { want = { target: 'view' }; range = onScreen; pages = plan(range); } else want = { target: 'note' };
+      measured.detail(range.first, Math.min(range.last, range.first + LOOK_BLOCKS - 1));
     }
     const remarks = [];
     if (range.remark) remarks.push(range.remark);
@@ -6760,7 +6823,7 @@ LagrangePlugin.internals = {
   LOOKS_PER_MESSAGE, LOOK_PAGES, LOOK_WIDTH, LOOK_HEIGHT, LOOK_DESCRIPTION_CHARS, LOOK_SOURCE_CHARS, LOOK_PICTURES, picturesSupported, providerKey, lookSendsPictures,
   splitBlocks, normalizeLook, parseLookReply, lookLabel, alignSections, lookSource, lookRange, lookScale, lookPages, describeLook, lookMessage, lookCaption, lookRecipient,
   messageText, messagePictures, withoutPictures, anthropicMessages, openaiMessages, claudeCodeInput, xmlSafe, pageSvg, cssUrls, demoLookReply, CHAT_LOOK,
-  passageLines, headingLine, lookAtPage,
+  passageLines, headingLine, visibleLines, noteSections, renderPage, settlePage, measurePage, picturePage, lookAtPage,
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
