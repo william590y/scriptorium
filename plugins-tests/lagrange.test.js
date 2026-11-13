@@ -2479,4 +2479,6 @@ test('A look: the properties are said to be on the page when the view shows them
   assert.match(js, /from the web could not be read for the picture of the page/);
   assert.match(js, /header\.appendChild\(copy\)/, 'the view’s own properties box is copied under the title');
   assert.match(js, /The note’s properties stand above its text, as the view shows them/);
+  // a look never waits without end on Obsidian's promise for mathematics (it does not settle in a session that has typeset none)
+  assert.match(js, /host\.querySelector\('\.math'\)\) await Promise\.race\(\[obsidian\.finishRenderMath\(\), sleep\(3000, signal\)\]\)/);
 });

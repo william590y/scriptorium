@@ -5240,7 +5240,11 @@ async function settlePage(page, signal) {
   watch.observe(host, { subtree: true, childList: true, attributes: true, characterData: true });
   const relay = () => { if (page.margin && typeof page.margin.layout === 'function') { try { page.margin.layout(); } catch (e) { /* Scriptorium's own */ } } };
   try {
-    try { if (typeof obsidian.finishRenderMath === 'function') await obsidian.finishRenderMath(); } catch (e) { /* no mathematics */ }
+    // (only where the page has mathematics, and never for long: in a session that has typeset none yet, Obsidian's
+    // promise for a page without any does not settle, and a look would wait on it for ever)
+    try {
+      if (typeof obsidian.finishRenderMath === 'function' && host.querySelector('.math')) await Promise.race([obsidian.finishRenderMath(), sleep(3000, signal)]);
+    } catch (e) { if (isAbort(e)) throw e; /* no mathematics */ }
     for (const img of Array.from(host.querySelectorAll('img'))) if (img.loading === 'lazy') img.loading = 'eager';
     if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(2000, signal)]);
     for (let laid = false; ;) {
