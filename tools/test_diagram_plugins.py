@@ -109,5 +109,42 @@ v = vault_with([])
 r = S.install_diagram_plugins(v, tampered, log.append)
 check(r[excalidraw["id"]] == "failed" and not (v / ".obsidian" / "plugins" / excalidraw["id"]).exists(), "a file that does not match its SHA-256 is refused, and none of that plugin's files is written")
 
+# 4. the macOS and Linux script installers: the same, in a new vault, with a stand-in for curl
+import os
+import shutil
+import subprocess
+
+bash = shutil.which("bash")
+for script in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.command"):
+    text = (ROOT / "installers" / script).read_text(encoding="utf-8")
+    start, end = text.find("# ---- The diagram plugins ----"), text.find("# ---- end of the diagram plugin functions ----")
+    check(start > 0 and end > start, f"{script}: has the diagram plugin functions")
+    for p in ("obsidian-tikzjax TikZJax 0.5.2 artisticat1/obsidian-tikzjax", "obsidian-excalidraw-plugin Excalidraw 2.29.2 zsviczian/obsidian-excalidraw-plugin"):
+        check(f"diagram_plugin {p}" in text, f"{script}: installs {p.split()[1]} at its pinned version")
+    check(text.count("cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41") == 1 and text.count("49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541") == 1, f"{script}: pins the same files as Setup-Scriptorium-Vault.py")
+    if not bash or os.name == "nt":
+        continue
+    work = Path(tempfile.mkdtemp(prefix="scriptorium-diagrams-sh-"))
+    (work / "vault" / ".obsidian").mkdir(parents=True)
+    (work / "vault" / ".obsidian" / "community-plugins.json").write_text('[\n  "scriptorium",\n  "lagrange"\n]\n', encoding="utf-8")
+    (work / "bin").mkdir()
+    (work / "served" / "good").mkdir(parents=True)
+    for name in ("main.js", "manifest.json", "styles.css"):
+        (work / "served" / "good" / name).write_text(f"stand-in {name}", encoding="utf-8")
+    # the stand-in curl: serves the files of repositories named "good/…", and fails for any other
+    (work / "bin" / "curl").write_text('#!/bin/bash\nurl=""; out=""\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; https://*) url="$1";; esac; shift; done\n'
+                                       'case "$url" in */good/*) cp "' + str(work / "served" / "good") + '/${url##*/}" "$out";; *) exit 22;; esac\n', encoding="utf-8")
+    os.chmod(work / "bin" / "curl", 0o755)
+    h = {n: hashlib.sha256(f"stand-in {n}".encode()).hexdigest() for n in ("main.js", "manifest.json", "styles.css")}
+    calls = (f'diagram_plugin plug-a "Plugin A" 1.0 good/a main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
+             f'diagram_plugin plug-b "Plugin B" 1.0 gone/b main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
+             f'diagram_plugin plug-c "Plugin C" 1.0 good/c main.js {h["main.js"]} manifest.json {"0" * 64} styles.css {h["styles.css"]}\n'
+             'printf "missing:%s\\n" "$diagram_missing"\n')
+    run = subprocess.run([bash, "-c", f'set -euo pipefail\nwork_dir="{work}"\nPATH="{work / "bin"}:$PATH"\n' + text[start:end] + calls], capture_output=True, text=True)
+    plugins = work / "vault" / ".obsidian" / "plugins"
+    check(run.returncode == 0 and "missing: Plugin B Plugin C" in run.stdout, f"{script}: a failed download and a wrong checksum do not stop the installer, and are named ({run.stderr.strip()[:120]})")
+    check((plugins / "plug-a" / "main.js").is_file() and not (plugins / "plug-b").exists() and not (plugins / "plug-c").exists(), f"{script}: only the plugin that was downloaded whole is put in the vault")
+    check(json.loads((work / "vault" / ".obsidian" / "community-plugins.json").read_text(encoding="utf-8")) == ["scriptorium", "lagrange", "plug-a"], f"{script}: it is turned on, after Scriptorium's own")
+
 print("All diagram plugin checks passed." if not failed else f"{len(failed)} check(s) FAILED")
 sys.exit(1 if failed else 0)
