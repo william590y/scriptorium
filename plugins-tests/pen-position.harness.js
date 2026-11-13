@@ -199,17 +199,23 @@
     return out.slice(0, n);
   };
   // The left edge of each line of handwriting, the first included.
+  // (boxes are one line when one's middle lies within the other's height: an equation typeset in the script is a
+  // taller box than the words beside it, with its middle a little off theirs)
   const handLines = hand => {
-    const lefts = new Map();
+    const boxes = [];
     for (const span of hand.children) {
       if (span.classList.contains('lagrange-pen-base') || span.classList.contains('lagrange-pen-lead')) continue;
-      for (const r of span.getClientRects()) {
-        if (r.width < 1) continue;
-        const key = Math.round((r.top + r.bottom) / 2 / 4);
-        lefts.set(key, Math.min(lefts.has(key) ? lefts.get(key) : Infinity, r.left));
-      }
+      for (const r of span.getClientRects()) if (r.width >= 1) boxes.push(r);
     }
-    return Array.from(lefts.entries()).sort((a, b) => a[0] - b[0]).map(e => e[1]);
+    boxes.sort((a, b) => (a.top + a.bottom) - (b.top + b.bottom));
+    const lines = [];
+    for (const r of boxes) {
+      const mid = (r.top + r.bottom) / 2, line = lines[lines.length - 1];
+      if (line && ((mid > line.top && mid < line.bottom) || ((line.top + line.bottom) / 2 > r.top && (line.top + line.bottom) / 2 < r.bottom))) {
+        line.left = Math.min(line.left, r.left); line.top = Math.min(line.top, r.top); line.bottom = Math.max(line.bottom, r.bottom);
+      } else lines.push({ left: r.left, top: r.top, bottom: r.bottom });
+    }
+    return lines.map(l => l.left);
   };
 
   const results = [];
