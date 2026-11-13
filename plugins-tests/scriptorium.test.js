@@ -938,3 +938,49 @@ test('aligned text: the plugin registers its commands by id, and everything that
   for (const name of ['Centre selection', 'Right-align selection', 'Remove alignment', 'Use a drop cap on this aligned paragraph', 'Remove the drop cap from this aligned paragraph']) assert.ok(src.includes(name), name);
   assert.match(src, /Also on centred and right-aligned text/);
 });
+
+test('Setting up a vault adds the TikZJax and Excalidraw plugins: fresh, already there, and a download that fails', async () => {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto');
+  const S = require(path.join(__dirname, '..', 'vault', '.obsidian', 'plugins', 'scriptorium', 'main.js'));
+  // the same pins as the installers'
+  const py = fs.readFileSync(path.join(__dirname, '..', 'installers', 'Setup-Scriptorium-Vault.py'), 'utf8');
+  for (const p of S.DIAGRAM_PLUGINS) for (const digest of Object.values(p.files)) assert.ok(py.includes(digest), `${p.name}: ${digest.slice(0, 8)} is pinned by the installers too`);
+  assert.ok(S.versionAtLeast('2.29.2', '2.29.2') && S.versionAtLeast('2.30.0', '2.29.2') && S.versionAtLeast('10.0', '9.9.9') && !S.versionAtLeast('2.29.1', '2.29.2') && !S.versionAtLeast('0.5', '0.5.2'));
+  // stand-ins for the two releases
+  const content = new Map();
+  const plugins = S.DIAGRAM_PLUGINS.map(p => {
+    const files = { 'main.js': `// ${p.id}`, 'styles.css': '/* css */', 'manifest.json': JSON.stringify({ id: p.id, version: p.version }) };
+    for (const [name, text] of Object.entries(files)) content.set(p.base + name, Buffer.from(text));
+    return Object.assign({}, p, { files: Object.fromEntries(Object.entries(files).map(([n, t]) => [n, crypto.createHash('sha256').update(t).digest('hex')])) });
+  });
+  const [tikz, ex] = plugins;
+  const fetch = async url => { if (!content.has(url)) throw new Error('offline'); return content.get(url); };
+  const vault = on => { const v = fs.mkdtempSync(path.join(os.tmpdir(), 'scriptorium-diagrams-js-')); fs.mkdirSync(path.join(v, '.obsidian')); fs.writeFileSync(path.join(v, '.obsidian', 'community-plugins.json'), JSON.stringify(on)); return v; };
+  const on = v => JSON.parse(fs.readFileSync(path.join(v, '.obsidian', 'community-plugins.json'), 'utf8'));
+  // fresh
+  let v = vault(['scriptorium']);
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'installed' });
+  assert.deepEqual(on(v), ['scriptorium', tikz.id, ex.id]);
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'main.js'), 'utf8'), `// ${ex.id}`);
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, async () => { throw new Error('must not download again'); }, plugins), { [tikz.id]: 'kept', [ex.id]: 'kept' });
+  // a newer copy and its settings are left alone
+  v = vault([ex.id]);
+  const dir = path.join(v, '.obsidian', 'plugins', ex.id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ id: ex.id, version: '99.0.0' }));
+  fs.writeFileSync(path.join(dir, 'main.js'), '// newer');
+  fs.writeFileSync(path.join(dir, 'data.json'), '{"theirs":true}');
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'kept' });
+  assert.equal(fs.readFileSync(path.join(dir, 'main.js'), 'utf8'), '// newer');
+  assert.equal(fs.readFileSync(path.join(dir, 'data.json'), 'utf8'), '{"theirs":true}');
+  assert.deepEqual(on(v), [ex.id, tikz.id]);
+  // a failed download, and a file that does not match: nothing of that plugin is written, and it is not turned on
+  v = vault(['scriptorium']);
+  const r = await S.installDiagramPlugins(fs, path, crypto, v, async url => (url.startsWith(tikz.base) ? Promise.reject(new Error('offline')) : url.endsWith('styles.css') ? Buffer.from('tampered') : content.get(url)), plugins);
+  assert.deepEqual(r, { [tikz.id]: 'failed', [ex.id]: 'failed' });
+  assert.ok(!fs.existsSync(path.join(v, '.obsidian', 'plugins')));
+  assert.deepEqual(on(v), ['scriptorium']);
+  assert.match(S.diagramPluginsNote(r), /TikZJax and Excalidraw could not be downloaded: to add them, open the vault and use Settings → Community plugins → Browse\./);
+  assert.equal(S.diagramPluginsNote({ [tikz.id]: 'kept', [ex.id]: 'kept' }), '');
+  assert.match(S.diagramPluginsNote({ [tikz.id]: 'installed', [ex.id]: 'kept' }), /^TikZJax was added for diagrams\.$/);
+});

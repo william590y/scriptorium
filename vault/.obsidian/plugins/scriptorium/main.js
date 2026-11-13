@@ -2147,6 +2147,81 @@ function describeVaultSetup(plan) {
 
 /* Makes the plan's changes in the vault in dir: backs up .obsidian as it is, then writes; on a failure every file is
    put back and the error is thrown. Returns the backup folder, or null if there was nothing to back up or to change. */
+/* The two community plugins that draw diagrams (Lagrange writes TikZ figures and Excalidraw drawings). They are not
+   part of Scriptorium: when a vault is set up, each is downloaded from its own GitHub release, at a pinned version,
+   and every file is checked against its SHA-256 before anything is written (the same pins as the installers').
+   TikZJax is MIT-licensed; the Excalidraw plugin is AGPL-3.0.
+   installDiagramPlugins(fs, path, crypto, dir, fetch) -> {id: 'installed' | 'updated' | 'kept' | 'failed'}: a plugin
+   the vault has at the pinned version or a newer one is left exactly as it is, and so are its settings; one that
+   cannot be downloaded, or does not match, is not installed, and nothing of it is written. fetch(url) resolves to
+   the bytes (a Buffer or a Uint8Array). */
+const DIAGRAM_PLUGINS = [
+  { id: 'obsidian-tikzjax', name: 'TikZJax', version: '0.5.2', base: 'https://github.com/artisticat1/obsidian-tikzjax/releases/download/0.5.2/',
+    files: { 'main.js': 'cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41', 'manifest.json': '09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1', 'styles.css': 'd9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d' } },
+  { id: 'obsidian-excalidraw-plugin', name: 'Excalidraw', version: '2.29.2', base: 'https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/download/2.29.2/',
+    files: { 'main.js': '49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541', 'manifest.json': '8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9', 'styles.css': '6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0' } },
+];
+function versionKey(v) {
+  return (String(v).match(/\d+/g) || []).slice(0, 4).map(Number);
+}
+function versionAtLeast(a, b) {
+  const x = versionKey(a), y = versionKey(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return true;
+}
+/* A file of a plugin's release, through Obsidian's own request (which is not held back by CORS). */
+async function fetchRelease(url) {
+  const res = await requestUrl({ url, method: 'GET', throw: false });
+  if (res.status !== 200) throw new Error(`status ${res.status}`);
+  return new Uint8Array(res.arrayBuffer);
+}
+async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
+  const result = {};
+  for (const p of plugins || DIAGRAM_PLUGINS) {
+    const folder = path.join(dir, '.obsidian', 'plugins', p.id);
+    let had = null;
+    try { had = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8')).version || null; } catch (e) { had = null; }
+    if (had !== null && versionAtLeast(had, p.version) && fs.existsSync(path.join(folder, 'main.js'))) result[p.id] = 'kept';
+    else {
+      try {
+        const files = {};
+        for (const name of Object.keys(p.files)) {
+          const data = Buffer.from(await fetch(p.base + name));
+          if (crypto.createHash('sha256').update(data).digest('hex') !== p.files[name]) throw new Error(`${name} does not match its pinned SHA-256`);
+          files[name] = data;
+        }
+        fs.mkdirSync(folder, { recursive: true });
+        for (const name of Object.keys(files)) {         // (its settings, data.json, are never touched)
+          const tmp = path.join(folder, `${name}.scriptorium-tmp`);
+          fs.writeFileSync(tmp, files[name]);
+          fs.renameSync(tmp, path.join(folder, name));
+        }
+        result[p.id] = had !== null ? 'updated' : 'installed';
+      } catch (e) {
+        result[p.id] = 'failed';
+        continue;
+      }
+    }
+    const listing = path.join(dir, '.obsidian', 'community-plugins.json');
+    let on = [];
+    try { on = JSON.parse(fs.readFileSync(listing, 'utf8')); if (!Array.isArray(on)) on = []; } catch (e) { on = []; }
+    if (!on.includes(p.id)) {
+      on.push(p.id);
+      fs.mkdirSync(path.dirname(listing), { recursive: true });
+      fs.writeFileSync(listing, JSON.stringify(on, null, 2) + '\n');
+    }
+  }
+  return result;
+}
+/* What a set-up says about the diagram plugins, from installDiagramPlugins's result; '' if there is nothing to say. */
+function diagramPluginsNote(result) {
+  const name = id => (DIAGRAM_PLUGINS.find(p => p.id === id) || { name: id }).name;
+  const got = Object.keys(result).filter(id => result[id] === 'installed' || result[id] === 'updated').map(name);
+  const failed = Object.keys(result).filter(id => result[id] === 'failed').map(name);
+  return [got.length ? `${got.join(' and ')} ${got.length === 1 ? 'was' : 'were'} added for diagrams.` : '',
+    failed.length ? `${failed.join(' and ')} could not be downloaded: to add ${failed.length === 1 ? 'it' : 'them'}, open the vault and use Settings → Community plugins → Browse.` : ''].filter(Boolean).join(' ');
+}
+
 function applyVaultSetup(fs, path, dir, plan, now) {
   const changes = plan.changes;
   if (!changes.length) return null;
@@ -2318,6 +2393,11 @@ class SetupVaultModal extends Modal {
       }
       el.empty();
       el.createEl('p', { text: `Done: ${added} file${added === 1 ? '' : 's'} added, ${replaced} replaced or merged.` });
+      // the diagram plugins come from their own releases, a moment later
+      const diagrams = el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Adding the TikZJax and Excalidraw plugins for diagrams…' });
+      installDiagramPlugins(this.fs, this.path, require('crypto'), this.target, fetchRelease).then(
+        r => diagrams.setText(diagramPluginsNote(r) || 'TikZJax and Excalidraw are already in the vault.'),
+        () => diagrams.setText('The TikZJax and Excalidraw plugins could not be added; use Settings → Community plugins → Browse in the vault.'));
       if (backup) el.createEl('p', { cls: 'scriptorium-setup-note', text: `The .obsidian folder as it was is in ${backup}` });
       el.createEl('p', {
         text: this.own ? 'Reload Obsidian to see it (Ctrl/Cmd+P, “Reload app without saving”).'
@@ -4076,6 +4156,7 @@ class SyncModal extends Modal {
       const plan = planVaultSetup(k.fs, k.path, setupPackage(k.fs, k.path, k.dir), dir);
       applyVaultSetup(k.fs, k.path, dir, plan);
       setup = 'Scriptorium’s theme, snippet and plugins are set up in it.';
+      try { const note = diagramPluginsNote(await installDiagramPlugins(k.fs, k.path, require('crypto'), dir, fetchRelease)); if (note) setup += ` ${note}`; } catch (e) { /* the vault is set up without them */ }
     } catch (e) {
       setup = 'Scriptorium could not be set up in it; run “Scriptorium: Set up another vault” on it.';
       this.plugin.syncNote('setting up the retrieved vault failed', [String(e && e.message)]);
@@ -4953,6 +5034,7 @@ Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
+  DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsNote, versionAtLeast,
   noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
   alignKind, alignMarker, noteAlign, alignPlan, sectionMarks, alignClasses, blockLines, blockMarks, alignEdits, alignDropcapEdits, applyLineEdits, lineAfterEdits, markAligned,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
