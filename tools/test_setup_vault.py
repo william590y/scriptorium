@@ -62,11 +62,12 @@ class Tool:
 
     def __init__(self, name, plan, setup):
         self.name, self._plan, self._setup = name, plan, setup
+        self.env = {}   # more of the environment, for one test
 
     def _run(self, cmd):
         # The children write UTF-8 (the script and Node do when asked; the exe's few non-ASCII characters may not
         # survive a Windows console code page, which is fine: the checks look at ASCII text and at the files).
-        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", SCRIPTORIUM_NO_FONTS="1", SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1")   # the fonts and the diagram plugins have tests of their own (test_fonts.py, test_diagram_plugins.py)
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", SCRIPTORIUM_NO_FONTS="1", SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1", **self.env)   # the fonts and the diagram plugins have tests of their own (test_fonts.py, test_diagram_plugins.py)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace", env=env)
         for line in (r.stdout + r.stderr).splitlines():
             print("      | " + line)
@@ -311,6 +312,108 @@ def test_refusals(tool, work):
     check(r.returncode != 0 and snapshot(inside.parent) == before, "a vault's .obsidian folder itself: refused, unchanged")
 
 
+SYNC_CLI = ROOT / "plugins-tests" / "sync-state-cli.js"
+SYNC_KEPT = "The sync of this vault with Google Drive is kept as it is"
+SYNC_FILES = (".scriptorium-sync", f"{OBS}/plugins/scriptorium/data.json", f"{OBS}/plugins/scriptorium/drive-sync.json")
+
+
+def sync_cli(node, mode, vault, user):
+    r = subprocess.run([node, str(SYNC_CLI), mode, str(vault), str(user)], capture_output=True, text=True, timeout=120,
+                       encoding="utf-8", errors="replace")
+    for line in (r.stdout + r.stderr).splitlines():
+        print("      | " + line)
+    return r.returncode == 0
+
+
+def test_sync_kept(tool, work):
+    """A vault that syncs with Google Drive is set up, and a Scriptorium vault of 1.2.3 that syncs is updated by
+    setting it up again: the sync's files, in the vault and in Scriptorium's own folder outside it, are the same bytes
+    afterwards, and the plugin's own code finds the sync set up, with a plain sync next (plugins-tests/sync-state-cli.js)."""
+    node = shutil.which("node")
+    if not node:
+        print(f"\nnode was not found: {tool.name} is not tested on a vault that syncs")
+        return
+    # Scriptorium's own folder, where the plugin would look for it on this system (see syncUserDir in the plugin).
+    user = work / "user data" / ("Scriptorium" if os.name == "nt" else "scriptorium")
+    tool.env = {"SCRIPTORIUM_USER_DIR": str(user), "XDG_DATA_HOME": str(user.parent)}
+    try:
+        print(f"\n== {tool.name}: a vault that syncs with Google Drive is set up, and the sync is as it was ==")
+        vault = my_vault(work, "synced")   # (its Scriptorium files were taken out; its settings and its sync stayed)
+        check(sync_cli(node, "make", vault, user), "the vault's sync is set up (a pretend sign-in, a Drive folder, a record of the last sync)")
+        before, outside = snapshot(vault), snapshot(user, skip_backups=False)
+        r = tool.plan(vault)
+        check(r.returncode == 0 and SYNC_KEPT in r.stdout, "the plan says that the sync is kept")
+        check(snapshot(vault) == before and snapshot(user, skip_backups=False) == outside, "the plan changes nothing")
+        r = tool.setup(vault)
+        after = snapshot(vault)
+        check(r.returncode == 0 and all(after.get(rel) == package(rel) for rel in MANAGED), "it is set up")
+        check(SYNC_KEPT in r.stdout, "it says that the sync is kept")
+        for rel in SYNC_FILES:
+            check(after.get(rel) == before[rel], f"kept byte for byte: {rel}")
+        check(snapshot(user, skip_backups=False) == outside, "Scriptorium's own folder outside the vault is byte for byte as it was")
+        check(sync_cli(node, "check", vault, user), "the plugin finds the sync set up, and the next sync is a plain one")
+        r = tool.setup(vault)
+        check(r.returncode == 0 and snapshot(vault) == after and len(backups(vault)) == 1, "run again, it changes nothing")
+        check(snapshot(user, skip_backups=False) == outside and sync_cli(node, "check", vault, user), "and the sync is still set up")
+
+        print(f"\n== {tool.name}: a Scriptorium vault of 1.2.3 that syncs is updated, and the sync is as it was ==")
+        vault = work / "synced-1.2.3"
+        shutil.copytree(PACKAGE, vault)
+        manifest = vault / OBS / "plugins" / "scriptorium" / "manifest.json"
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        m["version"] = "1.2.3"
+        write_json(manifest, m)
+        with open(vault / OBS / "plugins" / "scriptorium" / "main.js", "a", encoding="utf-8") as f:
+            f.write("\n/* the code of an older version */\n")
+        shutil.rmtree(user)
+        check(sync_cli(node, "make", vault, user), "the vault's sync is set up")
+        before, outside = snapshot(vault), snapshot(user, skip_backups=False)
+        r = tool.setup(vault)
+        after = snapshot(vault)
+        check(r.returncode == 0 and all(after.get(rel) == package(rel) for rel in MANAGED), "Scriptorium's files are the new ones")
+        check(SYNC_KEPT in r.stdout, "it says that the sync is kept")
+        for rel in SYNC_FILES:
+            check(after.get(rel) == before[rel], f"kept byte for byte: {rel}")
+        check(all(after.get(rel) == data for rel, data in before.items() if rel not in MANAGED), "and so is every other file of the vault")
+        check(snapshot(user, skip_backups=False) == outside, "Scriptorium's own folder outside the vault is byte for byte as it was")
+        check(sync_cli(node, "check", vault, user), "the plugin finds the sync set up, and the next sync is a plain one")
+
+        print(f"\n== {tool.name}: a vault that does not sync is told nothing about a sync ==")
+        r = tool.setup(my_vault(work, "not-synced"))
+        check(r.returncode == 0 and SYNC_KEPT not in r.stdout, "no word about a sync")
+    finally:
+        tool.env = {}
+
+
+def test_installers_refuse(work):
+    """The three script installers make new vaults only: given a vault that is there, they stop before anything is
+    downloaded or written, and say how such a vault is updated."""
+    print("\n== The script installers leave a vault that is there alone ==")
+    installers = ROOT / "installers"
+    cmd = (installers / "Install-Scriptorium-Windows.cmd").read_text(encoding="utf-8")
+    refusal = cmd.find("Folder already exists")
+    check(0 <= refusal < cmd.find("$tempPath =") and "sync with Google Drive" in cmd[refusal:cmd.find("$tempPath =")],
+          "Install-Scriptorium-Windows.cmd: it stops before its first file is written, and says that an update keeps the sync (read, not run)")
+    bash, node = shutil.which("bash"), shutil.which("node")
+    if os.name == "nt" or not bash:
+        print("no bash here: the macOS and Linux scripts are not run")
+        return
+    vault = work / "refused" / "vault"
+    shutil.copytree(PACKAGE, vault)
+    user = work / "refused" / "home" / ".local" / "share" / "scriptorium"
+    if node:
+        sync_cli(node, "make", vault, user)
+    before = snapshot(work / "refused", skip_backups=False)
+    for name in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.command"):
+        r = subprocess.run([bash, str(installers / name)], input=f"{vault}\n", capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, HOME=str(work / "refused" / "home"), XDG_DATA_HOME=str(user.parent)))
+        for line in (r.stdout + r.stderr).splitlines():
+            print("      | " + line)
+        check(r.returncode == 1 and "nothing was changed" in r.stdout, f"{name}: refuses the folder")
+        check("Setup-Scriptorium-Vault.py" in r.stdout and "sync with Google Drive" in r.stdout, f"{name}: says how to update it, and that the sync is kept then")
+        check(snapshot(work / "refused", skip_backups=False) == before, f"{name}: the vault and Scriptorium's own folder are byte for byte as they were")
+
+
 def test_script_download(work):
     print("\n== Setup-Scriptorium-Vault.py: the download names itself, and a failed download is said plainly ==")
     import importlib.util
@@ -387,6 +490,8 @@ def main():
             test_unreadable_json(tool, sub)
             test_rollback(tool, sub)
             test_refusals(tool, sub)
+            test_sync_kept(tool, sub)
+        test_installers_refuse(work)
         test_script_download(work)
         if len(found) > 1:
             test_same_result(found, work)
