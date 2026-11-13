@@ -268,8 +268,9 @@
       }
       if (plugin.dropcapLive !== null || plugin.liveExtensions.length) out.why.push('the extension is in the list Obsidian was given');
     };
-    await run('the setting is off by default; off, nothing of the drop caps is in the editor, and Reading view has them as ever', async out => {
-      if (S.normalizeSettings({}).liveDropcaps !== false || S.normalizeSettings({ initials: 'goudy', fancyMode: true }).liveDropcaps !== false) out.why.push('the setting is not off by default');
+    await run('the setting is on by default and a saved off is kept; off, nothing of the drop caps is in the editor, and Reading view has them as ever', async out => {
+      if (S.normalizeSettings({}).liveDropcaps !== true || S.normalizeSettings({ initials: 'goudy', fancyMode: true }).liveDropcaps !== true) out.why.push('the setting is not on by default');
+      if (S.normalizeSettings({ liveDropcaps: false }).liveDropcaps !== false) out.why.push('a saved off is not kept');
       await open(START, 'live');
       plain(out);
       // nothing the plugin does for Reading view's drop caps reaches the editor: shown from the list, sets read again, a typed property

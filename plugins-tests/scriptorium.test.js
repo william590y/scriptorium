@@ -29,12 +29,23 @@ test('the plugin module exports the plugin class and its helpers', () => {
 });
 
 test('settings: defaults, checked values, unknown keys kept', () => {
-  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true });
-  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true });
-  // drop caps while editing: off by default, and off for a vault that was set up before there was such a setting
-  assert.equal(S.normalizeSettings({ fancyMode: false, initials: 'goudy', marginalia: true, imageFocus: true, pdfTitleSet: true }).liveDropcaps, false);
+  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true });
+  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true });
+  // drop caps while editing: on by default (since 1.4.1), and a saved choice is kept
+  assert.equal(S.normalizeSettings({ fancyMode: false, initials: 'goudy', marginalia: true, imageFocus: true, pdfTitleSet: true }).liveDropcaps, true);
   assert.equal(S.normalizeSettings({ liveDropcaps: true }).liveDropcaps, true);
-  assert.equal(S.normalizeSettings({ liveDropcaps: 'yes' }).liveDropcaps, false);
+  assert.equal(S.normalizeSettings({ liveDropcaps: false }).liveDropcaps, false);
+  assert.equal(S.normalizeSettings({ liveDropcaps: 'yes' }).liveDropcaps, true);
+  // settings saved before 1.4.1: a saved "off" (1.4.0's default, or the writer's choice: they cannot be told apart)
+  // is turned on once and said; anything else is left; settings saved since are never touched
+  assert.deepEqual(S.migrateSettings({ fancyMode: true, liveDropcaps: false, sync: { folder: 'x' } }), { settings: { fancyMode: true, liveDropcaps: true, sync: { folder: 'x' }, liveDropcapsSince: '1.4.1' }, told: true });
+  assert.deepEqual(S.migrateSettings({ liveDropcaps: true }), { settings: { liveDropcaps: true, liveDropcapsSince: '1.4.1' }, told: false });
+  assert.deepEqual(S.migrateSettings({ initials: 'goudy' }), { settings: { initials: 'goudy', liveDropcapsSince: '1.4.1' }, told: false });
+  assert.deepEqual(S.migrateSettings(null), { settings: { liveDropcapsSince: '1.4.1' }, told: false });
+  const off = { liveDropcaps: false, liveDropcapsSince: '1.4.1' };
+  assert.deepEqual(S.migrateSettings(off), { settings: off, told: false }, 'turned off since 1.4.1: it stays off');
+  assert.equal(S.normalizeSettings(S.migrateSettings(off).settings).liveDropcaps, false);
+  assert.equal(S.normalizeSettings(S.migrateSettings({ liveDropcaps: false }).settings).liveDropcapsSince, '1.4.1', 'the mark is kept with the settings');
   const s = S.normalizeSettings({ initials: 'goudy', marginalia: false, imageFocus: 'no', future: 3 });
   assert.equal(s.initials, 'goudy');
   assert.equal(s.marginalia, false);
@@ -1196,10 +1207,10 @@ test('drop caps in Live Preview: off, nothing is put into the editors; on and of
   };
   try {
     let told = 0;
-    const plugin = { settings: S.normalizeSettings({}), liveExtensions: made, dropcapLive: null, app: { workspace: { updateOptions: () => { told++; } } } };
+    const plugin = { settings: S.normalizeSettings({ liveDropcaps: false }), liveExtensions: made, dropcapLive: null, app: { workspace: { updateOptions: () => { told++; } } } };
     const apply = () => S.prototype.applyLiveDropcaps.call(plugin);
     apply();
-    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 0], 'off by default: nothing registered, no editor touched');
+    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 0], 'turned off: nothing registered, no editor touched');
     // and with it off the plugin's calls into the editors do nothing
     S.prototype.refreshEditors.call(plugin);
     S.prototype.previewLive.call(plugin, { editor: { cm: { dispatch() { throw new Error('an editor was touched'); } } } }, 'goudy');

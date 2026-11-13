@@ -10,7 +10,7 @@ const INITIALS = [
   ['plain', 'Plain capital (Cormorant Garamond)'],
   ['none', 'None']
 ];
-const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true };
+const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', liveDropcaps: true, marginalia: true, imageFocus: true };
 
 /* Saved settings with every known key checked and defaulted; keys this version does not know are kept. */
 function normalizeSettings(saved) {
@@ -23,6 +23,22 @@ function normalizeSettings(saved) {
     if (INITIALS.some(([value]) => value === saved.initials) || (typeof saved.initials === 'string' && /^set:.+/.test(saved.initials))) settings.initials = saved.initials;
   }
   return settings;
+}
+
+/* "Show drop caps while editing" was off unless turned on in 1.4.0, and is on unless turned off since 1.4.1. What
+   1.4.0 saved cannot tell a writer who turned it off from one who never touched it (the plugin saved all its
+   settings, the default among them, when any one changed), so settings saved before 1.4.1 (they have no
+   `liveDropcapsSince`) are brought to the new default once: -> {settings, told}, told being true where a saved "off"
+   was turned on, which the plugin then says once, with where the switch is. Settings saved since are left as they
+   are, so turning it off afterwards holds. Pure. */
+const LIVE_DROPCAPS_SINCE = '1.4.1';
+function migrateSettings(saved) {
+  const had = saved && typeof saved === 'object' ? saved : null;
+  if (had && had.liveDropcapsSince) return { settings: had, told: false };
+  const settings = Object.assign({}, had || {}, { liveDropcapsSince: LIVE_DROPCAPS_SINCE });
+  const told = Boolean(had && had.liveDropcaps === false);
+  if (told) settings.liveDropcaps = true;
+  return { settings, told };
 }
 
 /* ==========================================================
@@ -1384,7 +1400,7 @@ class ScriptoriumSettings extends PluginSettingTab {
       });
     new Setting(el)
       .setName('Show drop caps while editing (Live Preview)')
-      .setDesc('Off by default: the editor shows the opening paragraph as plain text, and drop caps are drawn in Reading view and in an exported PDF only. On: Live Preview shows the same drop cap on the same paragraph, in the same place, with the first line in small capitals, so the text does not move between the two views. The initial is still the letter you typed (the cursor goes before and after it; it is selected, copied, found and spell-checked as any other); nothing is added to the note. Source mode stays plain.')
+      .setDesc('On by default: Live Preview shows the same drop cap as Reading view on the same paragraph, in the same place, with the first line in small capitals, so the text does not move between the two views. The initial is still the letter you typed (the cursor goes before and after it; it is selected, copied, found and spell-checked as any other); nothing is added to the note. Off: the editor shows the opening paragraph as plain text, and drop caps are drawn in Reading view and in an exported PDF only. Source mode stays plain.')
       .addToggle(toggle => toggle
         .setValue(settings.liveDropcaps)
         .onChange(value => this.plugin.updateSettings({ liveDropcaps: value })));
@@ -4683,7 +4699,13 @@ function uprightMissing(doc, family) {
 
 class Scriptorium extends Plugin {
   async onload() {
-    this.settings = normalizeSettings(await this.loadData());
+    const saved = await this.loadData(), moved = migrateSettings(saved);
+    this.settings = normalizeSettings(moved.settings);
+    if (moved.told) {
+      // (once: the settings are saved with their mark, so this is not said again, and "off" chosen from now on holds)
+      try { await this.saveData(this.settings); } catch (e) { console.error('Scriptorium: the settings could not be saved', e); }
+      new Notice('Scriptorium now shows drop caps while you edit (Live Preview), as Reading view does. To have the editor plain again, turn off Settings → Scriptorium → Show drop caps while editing.', 20000);
+    }
     this.ribbon = this.addRibbonIcon('feather', 'Toggle fancy mode', () => {
       void this.setFancyMode(!this.settings.fancyMode);
     });
@@ -5536,7 +5558,7 @@ class Scriptorium extends Plugin {
 module.exports = Scriptorium;
 // Pure helpers, exported for plugins-tests/ (Obsidian uses only the class).
 Object.assign(module.exports, {
-  normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
+  normalizeSettings, migrateSettings, LIVE_DROPCAPS_SINCE, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
   DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsWanted, diagramPluginsNote, versionAtLeast,
