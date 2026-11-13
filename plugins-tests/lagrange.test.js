@@ -2629,7 +2629,7 @@ test('chatMarkdown: a diagram whose plugin is off shows as its source with a lin
   assert.ok(web.includes('![[local.png]]') && web.includes('![d](data:image/png;base64,AAAA)') && web.includes('![v](Media/pic.png)'), 'pictures of the vault and data: pictures are shown');
   assert.equal(L.chatMarkdown('![a][r] and ![[w]]\n\n[r]: https://x.example/a.png', all), '[a][r] and ![[w]]\n\n[r]: https://x.example/a.png', 'a picture by reference becomes a link');
   const html = L.chatMarkdown('<iframe src="https://x.example"></iframe> <img src="https://x.example/p.gif"> <img src="data:image/gif;base64,R0"> <video src="//x.example/v.mp4"> `<iframe>` <form action="/x">', all);
-  assert.equal(html, '`<iframe src="https://x.example">``</iframe>` `<img src="https://x.example/p.gif">` <img src="data:image/gif;base64,R0"> `<video src="//x.example/v.mp4">` `<iframe>` `<form action="/x">`');
+  assert.equal(html, '`<iframe src="https://x.example"></iframe>` `<img src="https://x.example/p.gif">` <img src="data:image/gif;base64,R0"> `<video src="//x.example/v.mp4">` `<iframe>` `<form action="/x">`');
   // inside code, everything is as it was written
   const code = '```html\n<iframe src="https://x.example"></iframe>\n![a](https://x.example/a.png) `$= 1` ![[d.excalidraw]]\n```';
   assert.equal(L.chatMarkdown(code, Object.assign({}, all, { sketch: false })), code);

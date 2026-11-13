@@ -3468,7 +3468,8 @@ function chatMarkdown(md, opts) {
       .replace(/!\[([^\]\n]*)\]\(\s*<?(https?:\/\/[^\s)>]+)>?[^)\n]*\)/gi, (m, alt, url) => `[${alt || 'picture'} (a picture on the web, not loaded)](${url})`)
       .replace(/!\[(?!\[)([^\]\n]*)\]\[([^\]\n]*)\]/g, '[$1][$2]')
       .replace(/<\/?(?:iframe|webview|object|embed|frame|frameset|form|script|style|link|meta|base|portal)\b[^>\n]*>?/gi, m => `\`${m}\``)
-      .replace(/<(?:img|video|audio|source|picture|track|input)\b(?=[^>\n]*(?:https?:)?\/\/)[^>\n]*>?/gi, m => `\`${m}\``))).join('');
+      .replace(/<(?:img|video|audio|source|picture|track|input)\b(?=[^>\n]*(?:https?:)?\/\/)[^>\n]*>?/gi, m => `\`${m}\``)
+      .replace(/``/g, ''))).join('');                    // (an opening tag and its closing tag side by side are one piece of code)
     out.push(l);
   }
   if (fence && note) { out.push(fence); say(note); }   // (a block the reply left open at its end)
@@ -7330,7 +7331,7 @@ class LagrangeChatView extends ItemView {
           messages: recentBinaries(this.history.concat(sent), ATTACH_KEPT),
           cache: true,
           demo: () => {
-            const said = round || lastLook ? demoLookReply(lastLook) : demoChatReply(text, note, agentic, canLook);
+            const said = round || lastLook ? demoLookReply(lastLook) : demoChatReply(text || '(what is attached, with no message)', note, agentic, canLook);
             return items.length && !round ? `${demoAttachmentLine(items)}\n\n${said}` : said;
           },
         }, {
