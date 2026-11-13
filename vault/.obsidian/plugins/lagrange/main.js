@@ -4317,8 +4317,9 @@ function createPen(app, settings) {
             console.debug(`Lagrange: ${maths.length - targets.length} of ${maths.length} equation(s) in this edit are not typeset in the note here (off screen, the cursor is in one, or Obsidian does not read their delimiters), so the pen draws them in its script.`);
           }
           // The pen's script: the words (and code), and the equations the note does not typeset itself.
-          const lines = rangeRects(view, at.start, at.end);
           const col = columnAt(L, view, at.start);
+          // (the lines the new text takes: an initial it begins with is three lines deep, and no line of its own)
+          const lines = (all => { const text = all.filter(r => r.height <= col.lineHeight * 1.8); return text.length ? text : all; })(rangeRects(view, at.start, at.end));
           const mayWrite = penLines(settings && settings.penLines, lines.length, tally && tally.spent, speed);
           // Text the note centres or sets to the right is written line for line as the note sets it (noteRows).
           let rows = first && (col.align || text.split('\n').some(l => ALIGN_MARK.test(l))) ? noteRows(L, view, at.start, at.end, col.lineHeight) : [];
@@ -4453,7 +4454,14 @@ function createPen(app, settings) {
             // line to itself.
             const last = lines[lines.length - 1];
             const followed = at.end < view.state.doc.length && view.state.doc.sliceString(at.end, at.end + 1) !== '\n';
-            const tall = () => Math.round(hand.getBoundingClientRect().height / col.lineHeight);
+            const tall = () => {
+              const box = hand.getBoundingClientRect();
+              if (!hand.classList.contains('is-beside-initial')) return Math.round(box.height / col.lineHeight);
+              // (beside an initial the hand's box is as deep as the float that holds the initial's place: its words are counted)
+              let bottom = box.top;
+              for (const q of pieces) for (const r of q.el.getClientRects()) bottom = Math.max(bottom, r.bottom);
+              return Math.max(1, Math.round((bottom - box.top) / col.lineHeight));
+            };
             const overruns = () => {
               if (!last) return false;
               if (lines.length !== 1 && (!followed || tall() < lines.length)) return false;

@@ -70,7 +70,7 @@
       ops: [{ find: 'and a body in motion keeps its motion, unless something acts on it', replace: 'and whatever moves keeps moving at the same speed and along the same line for as long as nothing pushes it or pulls it, which is the whole of the first law and the beginning of the science' }] },
     { name: 'beside a drop cap that is a picture (a set of images): a sentence on the first line rewritten', cap: 'beside', picture: true, lines: 3, note: CAPNOTE,
       ops: [{ find: 'whatever the width of its swing, or near enough', replace: 'however wide or narrow its swing may be, or so nearly that the difference, which is there, and which Huygens measured, and for which he bent the cheeks of his clocks, did not trouble anybody else' }] },
-    { name: 'a chapter is appended: its opening paragraph has its drop cap when the pen has written it', cap: 'after', ops: [{ append: '## A new chapter\n\nIts opening paragraph follows the heading, and is long enough to run on to a second line of the page.' }] },
+    { name: 'a chapter is appended: its opening paragraph has its drop cap when the pen has written it', cap: 'after', aligned: 'center', ops: [{ append: '## A new chapter\n\nIts opening paragraph follows the heading, and is long enough to run on to a second line of the page.' }] },
     { name: 'replace one word', ops: [{ find: 'Short line here.', replace: 'Short sentence here.' }] },
     { name: 'insert after a sentence', ops: [{ insert_after: 'Short line here.', text: ' And a second sentence comes after it.' }] },
     { name: 'insert a new paragraph', ops: [{ insert_after: 'Short line here.', text: '\n\nA new paragraph is put in after the short line, and it runs on for a while so that it wraps.' }] },
@@ -237,7 +237,30 @@
         line.left = Math.min(line.left, r.left); line.top = Math.min(line.top, r.top); line.bottom = Math.max(line.bottom, r.bottom);
       } else lines.push({ left: r.left, top: r.top, bottom: r.bottom });
     }
-    return lines.map(l => l.left);
+    const lefts = lines.map(l => l.left);
+    lefts.mids = lines.map(l => (l.top + l.bottom) / 2);
+    return lefts;
+  };
+  // The initial of a chapter's opening paragraph in Live Preview (a letter three lines deep, or a picture): where the
+  // lines beside it begin, and where it ends. null if the line has none.
+  const initialOf = line => {
+    if (!line.classList.contains('scriptorium-opening')) return null;
+    const px = v => parseFloat(v) || 0, cs = getComputedStyle(line), box = line.getBoundingClientRect();
+    const picture = getComputedStyle(line, '::before'), letter = getComputedStyle(line, '::first-letter');
+    if (picture.content !== 'none' && picture.content !== 'normal' && picture.float === 'left') {
+      return { right: box.left + px(cs.paddingLeft) + px(picture.marginLeft) + px(picture.width) + px(picture.marginRight), bottom: box.top + px(cs.paddingTop) + px(picture.marginTop) + px(picture.height) + px(picture.marginBottom) };
+    }
+    if (letter.float !== 'left') return null;
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT), r = document.createRange();
+    let out = null;
+    for (let node = walker.nextNode(), seen = 0; node && seen < 8; node = walker.nextNode()) {
+      for (let i = 0; i < node.length && seen < 8; i++, seen++) {
+        r.setStart(node, i); r.setEnd(node, i + 1);
+        const q = r.getClientRects()[0];
+        if (q && q.height > px(cs.lineHeight) * 1.8) out = { right: Math.max(out ? out.right : 0, q.right + px(letter.marginRight)), bottom: q.bottom + px(letter.marginBottom) };
+      }
+    }
+    return out;
   };
 
   // Scriptorium's drop caps in Live Preview: on for the cases about them, else as asked for, else as the vault has them
@@ -330,11 +353,9 @@
               if (line) {
                 const edge = line.getBoundingClientRect().left + parseFloat(getComputedStyle(line).paddingLeft);
                 // (beside a drop cap the note's own lines begin after the initial, and so must the handwriting's)
-                let opening = false;
-                for (let el = line, n = 0; el && n < lefts.length + 2 && !opening; el = el.nextElementSibling, n++) opening = el.classList.contains('scriptorium-opening');
-                const own = opening ? noteLines(cm, starts[Math.min(handNo, starts.length - 1)], lefts.length) : [];
+                const cap = initialOf(line);
                 lefts.slice(1).forEach((x, i) => {
-                  const want = own[i + 1] != null ? own[i + 1] : edge;
+                  const want = cap && lefts.mids[i + 1] < cap.bottom ? cap.right : edge;
                   seen.beside = Math.max(seen.beside || 0, want - edge);
                   seen.lineDx = Math.max(seen.lineDx, Math.abs(x - want));
                 });
