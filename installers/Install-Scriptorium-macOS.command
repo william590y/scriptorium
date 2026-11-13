@@ -48,7 +48,7 @@ diagram_plugin() {   # id, name, version, GitHub repository, then a file name an
   shift 4
   mkdir -p "$dir"
   while [ $# -gt 0 ]; do
-    if ! curl --silent --fail --location --proto '=https' --tlsv1.2 "$base/$1" -o "$dir/$1" 2>/dev/null || ! soft_hash "$dir/$1" "$2"; then ok=0; break; fi
+    if ! curl --silent --fail --location --connect-timeout 30 --proto '=https' --tlsv1.2 "$base/$1" -o "$dir/$1" 2>/dev/null || ! soft_hash "$dir/$1" "$2"; then ok=0; break; fi
     shift 2
   done
   if [ "$ok" = 1 ]; then

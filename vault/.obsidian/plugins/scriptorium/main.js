@@ -2175,6 +2175,15 @@ async function fetchRelease(url) {
   if (res.status !== 200) throw new Error(`status ${res.status}`);
   return new Uint8Array(res.arrayBuffer);
 }
+/* The names of the diagram plugins that installDiagramPlugins would download into the vault in dir. */
+function diagramPluginsWanted(fs, path, dir, plugins) {
+  return (plugins || DIAGRAM_PLUGINS).filter(p => {
+    const folder = path.join(dir, '.obsidian', 'plugins', p.id);
+    let had = null;
+    try { had = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8')).version || null; } catch (e) { had = null; }
+    return !(had !== null && versionAtLeast(had, p.version) && fs.existsSync(path.join(folder, 'main.js')));
+  }).map(p => p.name);
+}
 async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
   const result = {};
   for (const p of plugins || DIAGRAM_PLUGINS) {
@@ -2370,7 +2379,22 @@ class SetupVaultModal extends Modal {
     if (!plan.changes.length) {
       el.createEl('p', { text: 'Scriptorium is already set up here: nothing to change.' });
       for (const n of plan.notes) el.createEl('p', { cls: 'scriptorium-setup-note', text: n });
-      buttons().createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
+      // (a vault that was set up while the diagram plugins could not be downloaded can still be given them)
+      const wanted = diagramPluginsWanted(this.fs, this.path, this.target);
+      const row = buttons();
+      if (wanted.length) {
+        const diagrams = el.createEl('p', { cls: 'scriptorium-setup-note', text: `${wanted.join(' and ')}, for diagrams, ${wanted.length === 1 ? 'is' : 'are'} not in this vault: ${wanted.length === 1 ? 'it' : 'they'} can be downloaded from ${wanted.length === 1 ? 'its' : 'their'} own release${wanted.length === 1 ? '' : 's'} on GitHub.` });
+        el.insertBefore(diagrams, row);
+        const add = row.createEl('button', { text: `Add ${wanted.join(' and ')}` });
+        add.addEventListener('click', () => {
+          add.disabled = true;
+          diagrams.setText(`Adding ${wanted.join(' and ')}…`);
+          installDiagramPlugins(this.fs, this.path, require('crypto'), this.target, fetchRelease).then(
+            r => diagrams.setText(diagramPluginsNote(r) || 'TikZJax and Excalidraw are already in the vault.'),
+            () => diagrams.setText('The plugins could not be added; use Settings → Community plugins → Browse in the vault.'));
+        });
+      }
+      row.createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
       return;
     }
     const replaced = plan.changes.filter(c => c.replaces).length, added = plan.changes.length - replaced;
@@ -5038,7 +5062,7 @@ Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
-  DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsNote, versionAtLeast,
+  DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsWanted, diagramPluginsNote, versionAtLeast,
   noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
   alignKind, alignMarker, noteAlign, alignPlan, sectionMarks, alignClasses, blockLines, blockMarks, alignEdits, alignDropcapEdits, applyLineEdits, lineAfterEdits, markAligned,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
