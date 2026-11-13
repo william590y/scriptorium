@@ -813,9 +813,12 @@ function wordCut(text, max) {
   }
   return head.trimEnd();
 }
+/* A line that only marks where Scriptorium centres text or sets it to the right ("::: center", "::: right", ":::";
+   see ALIGN_STYLE). The note does not show it as text, so the pen never writes it. */
+const ALIGN_MARK = /^[ \t]*:{3,}[ \t]*(?:\{?[ \t]*\.?(?:cent(?:er|re|ered|red)|right)(?![\w-])[^\n]*)?$/;
 function penScript(replacement, limit) {
   const max = limit || 48;
-  const segs = mathSegments(String(replacement == null ? '' : replacement).trim(), { code: true })
+  const segs = mathSegments(String(replacement == null ? '' : replacement).split('\n').filter(l => !ALIGN_MARK.test(l)).join('\n').trim(), { code: true })
     .map(g => (g.type === 'text' ? { type: 'text', text: g.text.replace(/\s+/g, ' ') } : g))
     .filter(g => g.type !== 'text' || g.text);
   if (segs.length && segs[0].type === 'text') segs[0].text = segs[0].text.trimStart();
@@ -871,11 +874,19 @@ function penScript(replacement, limit) {
 }
 
 /* How far into a piece of Markdown its first written character is: past white space and past what opens a block
-   (a heading's #, a list's bullet or number, a quotation's >), which Live Preview does not show as text. The pen
-   starts writing there. Equal to the text's length when it has nothing to write. */
+   (a heading's #, a list's bullet or number, a quotation's >, the marker line of centred or right-aligned text),
+   which Live Preview does not show as text. The pen starts writing there. Equal to the text's length when it has
+   nothing to write. */
 function inkOffset(text) {
-  const m = /^\s*(?:(?:#{1,6}|[-*+]|\d{1,9}[.)])[ \t]+|>[ \t]?)*/.exec(String(text == null ? '' : text));
-  return m ? m[0].length : 0;
+  const t = String(text == null ? '' : text);
+  let at = 0;
+  for (;;) {                                           // marker lines first ("::: center" and the line break after it)
+    const m = /^\s*:{3,}[^\n]*(?:\n|$)/.exec(t.slice(at));
+    if (!m || !ALIGN_MARK.test(m[0].trim())) break;
+    at += m[0].length;
+  }
+  const m = /^\s*(?:(?:#{1,6}|[-*+]|\d{1,9}[.)])[ \t]+|>[ \t]?)*/.exec(t.slice(at));
+  return at + (m ? m[0].length : 0);
 }
 
 /* How many lines of handwriting an edit gets, and how fast they are written.
@@ -2021,12 +2032,26 @@ const MATH_STYLE =
   'Write mathematics the way Obsidian reads it: $…$ inside a sentence, and $$…$$ on lines of its own for a displayed ' +
   'equation (an align or other environment goes inside $$…$$); never \\( \\) or \\[ \\].';
 
+// Centred and right-aligned text: the marker lines the Scriptorium plugin reads (its "Centred and right-aligned
+// text"). In every system prompt, so that verse is centred whoever writes it and the markers are left alone.
+const ALIGN_STYLE =
+  'Scriptorium centres a block of text, or sets it to the right, between two marker lines: "::: center" (or ' +
+  '"::: right") on a line of its own, then the lines of text, then ":::" on a line of its own, with a blank line ' +
+  'before the opening marker and after the closing one. Between the markers every line of the note is a line on the ' +
+  'page (no two spaces or backslash at a line’s end), and a blank line parts two stanzas. Always centre poetry and ' +
+  'verse this way, whether you write it, quote it or revise it: a poem, a stanza, song lyrics, a few lines of ' +
+  'verse; and an epigraph or a dedication of a line or two where centring suits it. Set an attribution or a ' +
+  'signature (a line such as "— Emily Dickinson") to the right with "::: right" when the writer asks for that. ' +
+  'Centred and right-aligned text has no drop cap: never write "dropcap" on a marker line ("::: center dropcap" ' +
+  'asks for one) unless the writer asks for a drop cap on that text. Leave the marker lines that are already in ' +
+  'the note as they are unless the writer asks for another alignment, and never use HTML or a callout to align text.';
+
 const CHAT_INTRO =
   'You are Lagrange, a writing companion inside Obsidian. The writer uses Scriptorium, a configuration that ' +
   'sets notes like the pages of a printed book. You talk with the writer about the note they have open: answer ' +
   'questions about it, suggest improvements, and explain your thinking briefly. Write plain, warm, precise prose, ' +
   'and use Markdown lightly (a short list or some emphasis when it helps). Quote the note exactly when you quote ' +
-  'it. ' + MATH_STYLE + ' ';
+  'it. ' + MATH_STYLE + ' ' + ALIGN_STYLE + ' ';
 
 const CHAT_TALK_ONLY =
   'You cannot change the note yourself; if the writer wants changes made, they can select a passage and run ' +
@@ -2070,6 +2095,7 @@ const PROOFREAD_SYSTEM =
   'Find mistakes of spelling, grammar, punctuation and typography, and nothing else: do not rewrite for style, do not ' +
   'change the meaning, and leave Markdown syntax, links, code, YAML front matter and deliberately foreign text (such ' +
   'as Latin placeholder text) as they are.\n\n' +
+  'One piece of that syntax, so that you leave it as it is: ' + ALIGN_STYLE + '\n\n' +
   'Reply with only a JSON array, with nothing before or after it, in this form:\n' +
   '[{"find": "exact text from the note", "replace": "the corrected text", "reason": "a few words"}]\n\n' +
   'Rules for each edit:\n' +
@@ -2090,7 +2116,7 @@ const REVISE_SYSTEM =
   'Reply with only the revised passage, ready to replace the original: no preamble, no explanation, and no quotation ' +
   'marks or code fences around it. Keep the passage’s Markdown (emphasis, links, headings, line breaks) unless the ' +
   'instruction asks otherwise, and keep the writer’s voice. The rest of the note is there for context only; change ' +
-  'nothing outside the passage. ' + MATH_STYLE;
+  'nothing outside the passage. ' + MATH_STYLE + ' ' + ALIGN_STYLE;
 
 function reviseUserMessage(note, clip, passage, instruction) {
   return `Instruction: ${instruction}\n\nFor context, the whole note. ${noteBlock(note, clip)}\n\n` +
@@ -2523,7 +2549,10 @@ function rangeRects(view, from, to) {
 // through in rubric ink; the new text then takes its place in the note, unseen at first, and the pen writes it in its
 // own handwriting exactly where it will stand: the first stroke is where the first letter of the new text is (same
 // left edge, same baseline), each further line starts at the left edge of the note's own line and wraps where the
-// text column does, and the lines are the note's lines. The handwriting may be larger than the note's type. A long
+// text column does, and the lines are the note's lines. Text that the note centres or sets to the right (between
+// Scriptorium's marker lines "::: center" and "::: right", which are never written) is written line for line as the
+// note sets it: each line of handwriting starts where the note starts that line (noteRows), and is no wider than
+// the column. The handwriting may be larger than the note's type. A long
 // edit is written for a few lines (settings.penLines, 3 by default; see penLines) and ends in an ellipsis; then the
 // handwriting gives way to the text itself, which is already in its place, so nothing moves. Between edits the pen
 // hovers; a moment after the last one it flies off.
@@ -2930,7 +2959,38 @@ function createPen(app, settings) {
     const box = rel(L, (el || view.contentDOM).getBoundingClientRect()), cs = win.getComputedStyle(el || view.contentDOM);
     const left = box.left + (parseFloat(cs.paddingLeft) || 0), right = box.right - (parseFloat(cs.paddingRight) || 0);
     const fs = parseFloat(cs.fontSize) || 16;
-    return { left, right: Math.max(right, left + 40), lineHeight: parseFloat(cs.lineHeight) || fs * 1.5, fontSize: fs };
+    return { left, right: Math.max(right, left + 40), lineHeight: parseFloat(cs.lineHeight) || fs * 1.5, fontSize: fs, align: el ? alignOf(cs) : '' };
+  };
+  /* How a line of the note is set: 'center', 'right' or '' (from its left edge, as most text is). */
+  const alignOf = cs => (/center/.test(cs.textAlign) ? 'center' : /right|end/.test(cs.textAlign) ? 'right' : '');
+  /* The lines of the page that the note sets its text [from, to) in: [{off, text, x, top, width, align}], in order,
+     off being where a line's first letter is (counted from `from`), x and top where that letter stands on the
+     sheet, width how far the line's words reach. The lines that only mark an alignment (ALIGN_MARK) are left out.
+     Where the note centres text or sets it to the right, the handwriting keeps to these lines (see lay). */
+  const noteRows = (L, view, from, to, lineHeight) => {
+    const doc = view.state.doc, o = org(L), end = Math.min(to, from + 1600), mids = [], at = [];
+    for (let p = from; p < end; p++) {
+      const c = /\S/.test(doc.sliceString(p, p + 1)) ? view.coordsAtPos(p, 1) : null;
+      mids.push(c ? (c.top + c.bottom) / 2 : null);
+      at.push(c);
+    }
+    const starts = lineStarts(mids, lineHeight * 0.5), rows = [];
+    starts.forEach((s, n) => {
+      let a = s, b = (n + 1 < starts.length ? starts[n + 1] : mids.length) - 1;
+      while (a <= b && mids[a] == null) a++;
+      while (b > a && mids[b] == null) b--;
+      if (a > b) return;
+      const text = doc.sliceString(from + a, from + b + 1), last = view.coordsAtPos(from + b + 1, -1) || at[b];
+      if (ALIGN_MARK.test(text)) return;
+      let align = '';
+      try {
+        const dom = view.domAtPos(from + a), el = (dom.node.nodeType === 1 ? dom.node : dom.node.parentElement).closest('.cm-line');
+        if (el) align = alignOf(L.win.getComputedStyle(el));
+      } catch (e) { align = ''; }
+      rows.push({ off: a, text, x: at[a].left - o.x, top: at[a].top - o.y, width: Math.max(0, last.right - at[a].left), align });
+    });
+    rows.more = end < to;
+    return rows;
   };
   /* Waits until the character at pos stands still on the sheet (the change and a reflow move the text for a few
      frames), bringing it on screen if it is not. -> its charBox, or null if it cannot be measured. */
@@ -3231,20 +3291,43 @@ function createPen(app, settings) {
           const lines = rangeRects(view, at.start, at.end);
           const col = columnAt(L, view, at.start);
           const mayWrite = penLines(settings && settings.penLines, lines.length, run && run.spent, speed);
-          const script = (first ? penScript(text, Math.min(520, 150 * mayWrite)) : []).filter(g => {
+          // Text the note centres or sets to the right is written line for line as the note sets it (noteRows).
+          let rows = first && (col.align || text.split('\n').some(l => ALIGN_MARK.test(l))) ? noteRows(L, view, at.start, at.end, col.lineHeight) : [];
+          if (!rows.some(r => r.align)) rows = [];
+          const byRow = () => {
+            const out = [];
+            rows.slice(0, mayWrite).forEach((r, i) => {
+              out.push({ type: 'row', row: r, gap: i ? Math.max(1, Math.round((r.top - rows[i - 1].top) / col.lineHeight)) : 0 });
+              for (const g of penScript(r.text, 150)) out.push(g);
+            });
+            if (rows.length > mayWrite || rows.more) out.push({ type: 'text', text: ' …' });
+            return out;
+          };
+          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite))).filter(g => {
             if (g.type !== 'math') return true;
             const i = inNote.indexOf(bare(g.source));
             if (i < 0) return true;
             inNote[i] = null;
             return false;
           });
-          const pieces = [];
+          const pieces = [], leads = [];
           if (script.length) {
             hand = doc.createElement('div');
             hand.className = 'lagrange-pen-hand';
             hand.appendChild(doc.createElement('span')).className = 'lagrange-pen-base';   // sits on the first line's baseline
             for (const g of script) {
+              if (g.type === 'row') {
+                // a new line of the note: after the first, a line break and the room up to where the note starts the line
+                for (let n = 0; n < g.gap; n++) hand.appendChild(doc.createElement('br'));
+                if (g.gap) {
+                  const lead = hand.appendChild(doc.createElement('span'));
+                  lead.className = 'lagrange-pen-lead';
+                  leads.push({ el: lead, row: g.row });
+                }
+                continue;
+              }
               const span = doc.createElement('span');
+              if (rows.length) span.dataset.row = String(leads.length);
               if (g.type === 'code') {
                 // typed text, a marker where the next letter lands, and the text still to come (it holds the slip's shape)
                 span.className = `lagrange-pen-code${g.block ? ' is-block' : ''}`;
@@ -3278,7 +3361,8 @@ function createPen(app, settings) {
               pieces.push({ el: span, math: plan.how === 'draw', prose: plan.how !== 'draw' });
             }
             // Laid over the text column: the first line starts where the text's first letter is, the others at the
-            // column's left edge, on the note's lines.
+            // column's left edge, on the note's lines. Where the note centres the text or sets it to the right, each
+            // line of the handwriting is one of the note's lines and starts where the note starts that line.
             let fs = col.fontSize * 1.3;
             const lay = () => {
               hand.style.fontSize = `${fs.toFixed(1)}px`;
@@ -3286,6 +3370,12 @@ function createPen(app, settings) {
               hand.style.left = `${col.left.toFixed(2)}px`;
               hand.style.width = `${(col.right - col.left).toFixed(2)}px`;
               hand.style.textIndent = `${Math.max(0, first.x - col.left).toFixed(2)}px`;
+              hand.style.whiteSpace = rows.length ? 'nowrap' : '';
+              for (const lead of leads) {
+                const now = charBox(L, view, at.start + lead.row.off);
+                if (now) lead.row.x = now.x;
+                lead.el.style.width = `${Math.max(0, lead.row.x - col.left).toFixed(2)}px`;
+              }
               hand.style.top = '0px';
               const base = hand.firstChild.getBoundingClientRect().bottom - hand.getBoundingClientRect().top;
               hand.style.top = `${(first.baseline - base).toFixed(2)}px`;
@@ -3348,9 +3438,25 @@ function createPen(app, settings) {
               hand.style.whiteSpace = '';
               return now - want > col.lineHeight * 0.5;
             };
-            for (let i = 0; i < 6 && dropped(); i++) { fs *= 0.94; lay(); }
-            for (let i = 0; i < 4 && lines.length === 1 && !fits(); i++) { fs *= 0.94; lay(); }
-            for (let i = 0; i < 80 && pieces.length && !fits(); i++) {
+            // The note's own lines: the hand is made smaller until its lines are no wider than the note's (so that a
+            // centred line stays centred), though no smaller than the note's type for that; and smaller still, if it
+            // must be, to end inside the column (a line set to the right ends at the margin).
+            if (rows.length) {
+              const mine = new Map();
+              for (const q of pieces) for (const r of q.el.getClientRects()) mine.set(q.el.dataset.row, (mine.get(q.el.dataset.row) || 0) + r.width);
+              let fit = 0, edge = 0;
+              rows.slice(0, mayWrite).forEach((r, i) => {
+                const w = mine.get(String(i)) || 0;
+                if (r.width > 24) fit = Math.max(fit, w / r.width);
+                edge = Math.max(edge, w / Math.max(24, col.right - r.x));
+              });
+              let size = fit > 1 ? Math.max(fs / fit, Math.min(fs, col.fontSize)) : fs;
+              if (edge * size / fs > 1) size = Math.max(col.fontSize * 0.8, fs / edge);
+              if (size !== fs) { fs = size; lay(); }
+            }
+            for (let i = 0; i < 6 && !rows.length && dropped(); i++) { fs *= 0.94; lay(); }
+            for (let i = 0; i < 4 && !rows.length && lines.length === 1 && !fits(); i++) { fs *= 0.94; lay(); }
+            for (let i = 0; i < 80 && !rows.length && pieces.length && !fits(); i++) {
               const q = pieces[pieces.length - 1];
               if (!q.prose) {
                 if (pieces.length === 1 || q.code) break;      // an equation or code alone is never left out
@@ -5346,3 +5452,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
+Object.assign(LagrangePlugin.internals, { ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM });
