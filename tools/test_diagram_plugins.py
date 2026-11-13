@@ -13,6 +13,7 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -32,6 +33,10 @@ def check(ok, what):
         failed.append(what)
 
 
+# the pins are kept in installers/diagram-plugins.json; every installer carries a copy (tools/pin_plugins.py checks them all)
+PINNED = json.loads((ROOT / "installers" / "diagram-plugins.json").read_text(encoding="utf-8"))["plugins"]
+check([(p["id"], p["version"], p["files"]) for p in S.DIAGRAM_PLUGINS] == [(p["id"], p["version"], p["files"]) for p in PINNED], "Setup-Scriptorium-Vault.py pins what installers/diagram-plugins.json says")
+check(subprocess.run([sys.executable, str(ROOT / "tools" / "pin_plugins.py")], capture_output=True).returncode == 0, "every installer's copy of the pins agrees with installers/diagram-plugins.json (tools/pin_plugins.py)")
 # the pinned list is well formed, and names two plugins by their own release addresses
 check([p["id"] for p in S.DIAGRAM_PLUGINS] == ["obsidian-tikzjax", "obsidian-excalidraw-plugin"], "TikZJax and Excalidraw are the two plugins")
 for p in S.DIAGRAM_PLUGINS:
@@ -123,9 +128,9 @@ for script in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.comman
     text = (ROOT / "installers" / script).read_text(encoding="utf-8")
     start, end = text.find("# ---- The diagram plugins ----"), text.find("# ---- end of the diagram plugin functions ----")
     check(start > 0 and end > start, f"{script}: has the diagram plugin functions")
-    for p in ("obsidian-tikzjax TikZJax 0.5.2 artisticat1/obsidian-tikzjax", "obsidian-excalidraw-plugin Excalidraw 2.29.2 zsviczian/obsidian-excalidraw-plugin"):
-        check(f"diagram_plugin {p}" in text, f"{script}: installs {p.split()[1]} at its pinned version")
-    check(text.count("cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41") == 1 and text.count("49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541") == 1, f"{script}: pins the same files as Setup-Scriptorium-Vault.py")
+    for p in PINNED:
+        check(f"diagram_plugin {p['id']} {p['name']} {p['version']} {p['repository']}" in text, f"{script}: installs {p['name']} at its pinned version")
+        check(all(text.count(digest) == 1 for digest in p["files"].values()), f"{script}: pins the same files of {p['name']} as Setup-Scriptorium-Vault.py")
     if not bash or os.name == "nt":
         continue
     work = Path(tempfile.mkdtemp(prefix="scriptorium-diagrams-sh-"))
@@ -152,8 +157,7 @@ for script in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.comman
 
 # 5. the Windows script installer pins the same files
 cmd = (ROOT / "installers" / "Install-Scriptorium-Windows.cmd").read_text(encoding="utf-8")
-for digest in ("cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41", "09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1", "d9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d",
-               "49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541", "8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9", "6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0"):
+for digest in [d for p in PINNED for d in p["files"].values()]:
     check(cmd.count(digest) == 1, f"Install-Scriptorium-Windows.cmd pins {digest[:8]}")
 check("$diagramMissing += $plugin.Name" in cmd and "Not installed (the download failed)" in cmd, "Install-Scriptorium-Windows.cmd: a failed download is caught and named, and does not stop the installer")
 
@@ -360,7 +364,7 @@ else:
     # the plan shown before a set-up names the downloads
     vault = notes("plan")
     r = run_exe("--setup-plan", str(vault), "--plugin-pins", good)
-    check(r.returncode == 0 and "TikZJax 0.5.2, from its own release on GitHub" in r.stdout and "Excalidraw" in r.stdout and not (vault / ".obsidian").exists(), "Scriptorium-Setup.exe: the set-up plan names the two downloads, and changes nothing")
+    check(r.returncode == 0 and f"TikZJax {tikz['version']}, from its own release on GitHub" in r.stdout and "Excalidraw" in r.stdout and not (vault / ".obsidian").exists(), "Scriptorium-Setup.exe: the set-up plan names the two downloads, and changes nothing")
 
 server.shutdown()
 print("All diagram plugin checks passed." if not failed else f"{len(failed)} check(s) FAILED")

@@ -164,6 +164,7 @@ jobs:
         run: |
           python3 -m py_compile installers/Setup-Scriptorium-Vault.py
           python3 tools/test_setup_vault.py
+          python3 tools/pin_plugins.py
           python3 tools/test_diagram_plugins.py
       - name: The fonts, face by face (the Linux script with fontconfig; the macOS script with a pretend system_profiler)
         run: |

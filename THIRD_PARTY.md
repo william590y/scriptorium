@@ -163,6 +163,31 @@ is ticked. They are not part of this repository, the zip or the installer (apart
 - License: its own license, in its repository. Longform is enabled in `vault/.obsidian/community-plugins.json`; if it
   is not installed, install it from **Settings → Community plugins** in Obsidian.
 
+### TikZJax 0.5.2
+
+- Source: <https://github.com/artisticat1/obsidian-tikzjax/releases/tag/0.5.2> (`main.js`, `manifest.json`,
+  `styles.css`); id `obsidian-tikzjax` in Obsidian's community plugin list
+- Author: artisticat
+- License: MIT (`LICENSE.md` in its repository, copyright 2022 artisticat1)
+- Not bundled: none of its code is in this repository, in `Scriptorium.zip` or in `Scriptorium-Setup.exe`. The
+  installers download the three files from the address above into the vault's `.obsidian/plugins/obsidian-tikzjax`
+  when a vault is installed, updated or set up, and install them only if each has its pinned SHA-256 (the pins are
+  in `installers/diagram-plugins.json`). A copy the vault already has at this version or a newer one is left alone.
+  Lagrange draws technical figures with it.
+
+### Excalidraw 2.29.2
+
+- Source: <https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/tag/2.29.2> (`main.js`, `manifest.json`,
+  `styles.css`); id `obsidian-excalidraw-plugin` in Obsidian's community plugin list
+- Author: Zsolt Viczian
+- License: GNU Affero General Public License, version 3 (`LICENSE` in its repository)
+- Not bundled, and not redistributed: Scriptorium neither contains nor hosts any of its files. The installers download
+  the three files from the plugin's own release, as above, into `.obsidian/plugins/obsidian-excalidraw-plugin`, on the
+  computer of the person installing; they are checked against the pinned SHA-256 and otherwise left exactly as the
+  author published them. "Set up another vault" does not copy the plugin from one vault to another either: it
+  downloads it again. Lagrange makes free-form drawings through the plugin's own interface (`ExcalidrawAutomate`)
+  inside Obsidian.
+
 ### rclone 1.76.0
 
 - Source: <https://downloads.rclone.org/v1.76.0/> (the official builds `rclone-v1.76.0-<system>-<processor>.zip`), or

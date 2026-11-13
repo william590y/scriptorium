@@ -77,6 +77,9 @@ def main():
     files = vault_files()
     if "longform" in {Path(f).parts[2] for f in files if f.startswith(".obsidian/plugins/")}:
         sys.exit("vault/.obsidian/plugins/longform must not be packaged (Longform is downloaded at install time)")
+    for plugin in ("obsidian-tikzjax", "obsidian-excalidraw-plugin"):   # the diagram plugins are never redistributed
+        if any(f.startswith(f".obsidian/plugins/{plugin}/") for f in files):
+            sys.exit(f"vault/.obsidian/plugins/{plugin} must not be packaged (it is downloaded from its own release at install time)")
     if ".obsidian/appearance.json" not in files:
         sys.exit("vault/.obsidian/appearance.json is missing")
     check_no_api_keys(files)
