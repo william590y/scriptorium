@@ -21,10 +21,11 @@
  *      are to the provider chosen in its settings, when the writer asks for something.
  *   4. The loader, a replaceable section:  mountLoader(containerEl, theme) -> { stop() }
  *   5. Pen helpers shared by any pen (rangeRects, sleep, nextFrame), then the pen, a replaceable section:
- *      createPen(app, settings) -> { edit(view, from, to, replacement): Promise<void>, destroy() }
+ *      createPen(app, settings) -> { edit(view, from, to, replacement, run), finish(), destroy(), extension }
  *      Each replaceable section runs from its "==== LAGRANGE … (replaceable) ====" line to its "==== END …" line,
  *      here and in styles.css.
- *   6. Edit runs: the editor is locked while the pen writes, and all of a request's edits become one undo step
+ *   6. Edit runs: the pen writes each edit in turn, a click or a key ends the run at once (or the writer edits
+ *      alongside it), and all of a request's edits become one undo step
  *   7. The chat view (with the model and effort picker in its footer), the revise modal, the settings tab and the
  *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits). Each run
  *      of edits can be undone and redone (recordEdit, undoEdit, redoEdit), and each message is a checkpoint the
@@ -34,7 +35,7 @@
 
 const obsidian = require('obsidian');
 const { Plugin, ItemView, Modal, Notice, PluginSettingTab, Setting, MarkdownRenderer, MarkdownView, Component, setIcon } = obsidian;
-const { StateField, StateEffect, EditorState, Transaction, ChangeSet, Compartment } = require('@codemirror/state');
+const { StateField, StateEffect, EditorState, Transaction, ChangeSet, Annotation } = require('@codemirror/state');
 const { EditorView, Decoration, WidgetType } = require('@codemirror/view');
 
 
@@ -90,6 +91,7 @@ const DEFAULT_SETTINGS = {
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
   penTrail: true,                     // a fading line of ink behind the pen's nib as it moves
   penLines: 3,                        // how many lines of a long edit the pen writes out before the rest is set down (1 to 8)
+  editWhileWriting: false,            // off: a click or a key in the note ends the pen's animation; on: the writer edits alongside it
 };
 
 function sanitizeSettings(saved) {
@@ -595,6 +597,7 @@ function userChangedSince(checkpoints, k, current) {
     if (c.path !== cp.path) continue;
     if (c.before == null) return true;
     if (c.before !== expected) return true;
+    if (c.userTyped) return true;        // the writer typed while the pen wrote: the turn's changes are not all Lagrange's
     expected = c.after == null ? c.before : c.after;
   }
   return current !== expected;
@@ -798,6 +801,18 @@ function typeCadence(text, budget, seed) {
    a block is cut to CODE_LINES lines of CODE_COLS characters, a span to CODE_COLS characters, each with an ellipsis. */
 const CODE_LINES = 6, CODE_COLS = 56;
 const SCRIPT_EQUATIONS = 8, SCRIPT_LEAD = 18;
+/* The first `max` characters of text, cut back to the end of a whole word (a word is never cut in two, unless it is
+   the only one and longer than max). Pure. */
+function wordCut(text, max) {
+  const t = String(text == null ? '' : text);
+  if (t.length <= max) return t.trimEnd();
+  let head = t.slice(0, Math.max(0, max));
+  if (/\S/.test(t[head.length] || '') && /\S$/.test(head)) {
+    const whole = head.replace(/\S+$/, '');
+    if (whole.trim()) head = whole;
+  }
+  return head.trimEnd();
+}
 function penScript(replacement, limit) {
   const max = limit || 48;
   const segs = mathSegments(String(replacement == null ? '' : replacement).trim(), { code: true })
@@ -830,7 +845,7 @@ function penScript(replacement, limit) {
       used += Math.min(g.text.length, 24);
     } else if (!full) {
       if (g.text.length > room) {
-        const head = g.text.slice(0, Math.max(0, room - 2)).trimEnd();
+        const head = wordCut(g.text, Math.max(0, room - 2));
         const next = segs[i + 1], toMath = Boolean(next && next.type === 'math' && equations < SCRIPT_EQUATIONS);
         full = true;
         // prose that runs up to an equation: its last words are written too, or all of it when little would be left out
@@ -880,6 +895,73 @@ function penLines(wanted, textLines, spent, speed) {
 function penPace(width) {
   const w = Math.max(1, Number(width) || 0);
   return Math.min(9, Math.max(1.2, PEN_LINES_MS / w));
+}
+
+/* Where the lines of a piece of laid-out text begin. tops[i] is the vertical middle of character i on the page, or
+   null for a character that takes no room (white space at a line's end): a character more than `tol` below the line
+   so far starts a new line. -> the index of the first character of each line, starting with 0. Pure. */
+function lineStarts(tops, tol) {
+  const starts = [0];
+  let cur = null;
+  for (let i = 0; i < tops.length; i++) {
+    const t = tops[i];
+    if (t == null) continue;
+    if (cur !== null && Math.abs(t - cur) > tol) starts.push(i);
+    cur = t;
+  }
+  return starts;
+}
+
+/* Whether a key press in the note would change it (or is about to, through an input method): a character, Enter,
+   Backspace, Delete, Tab, and paste, cut, undo and redo. Moving the cursor, selecting, copying and the modifier keys
+   alone change nothing. ev: {key, ctrlKey, metaKey, altKey, isComposing}. Pure. */
+function isEditKey(ev) {
+  if (!ev) return false;
+  const key = String(ev.key || '');
+  if (ev.isComposing || key === 'Process' || key === 'Dead') return true;
+  if (ev.ctrlKey || ev.metaKey) return !ev.altKey && ['v', 'x', 'z', 'y'].includes(key.toLowerCase());
+  if (['Enter', 'Backspace', 'Delete', 'Tab'].includes(key)) return true;
+  return Array.from(key).length === 1;
+}
+
+/* Where a position of a text stands after changes to it: changes is a list of {from, to, insert} (insert a string, or
+   its length), each in the coordinates of the text as it was before all of them, in order and not overlapping. A
+   position inside replaced text goes to the start of what replaced it (assoc < 0, the default) or to its end; one
+   exactly where text was put in stays before it (assoc < 0) or goes after it. As CodeMirror's ChangeSet.mapPos, which the plugin uses in the
+   editor; this is for the tests and for texts that are not in an editor. Pure. */
+function mapOffset(changes, pos, assoc) {
+  let shift = 0;
+  const before = assoc == null || assoc < 0;
+  for (const c of changes || []) {
+    const len = typeof c.insert === 'number' ? c.insert : String(c.insert == null ? '' : c.insert).length;
+    const to = c.to == null ? c.from : c.to;
+    if (pos < c.from) break;
+    if (pos > to || (pos === to && (to > c.from || !before))) { shift += len - (to - c.from); continue; }
+    if (pos === c.from && to === c.from) break;          // an insertion exactly here, and the position stays before it
+    return c.from + shift + (pos === c.from || before ? 0 : len);
+  }
+  return pos + shift;
+}
+
+/* An edit that was located before the note changed, in the note as it is now. edit: {from, to, matched}; mapPos(pos,
+   assoc) carries a position through the changes since (ChangeSet.mapPos, or mapOffset); slice(from, to) reads the
+   note now. -> {from, to}, or {skip: why} when the words the edit was to replace are no longer what they were.
+   An insertion (from === to) is never spoiled: it goes where its place went. Pure. */
+function remapEdit(edit, mapPos, slice) {
+  if (edit.from === edit.to) { const p = mapPos(edit.from, 1); return { from: p, to: p }; }
+  const from = mapPos(edit.from, 1), to = mapPos(edit.to, -1);
+  if (to < from || slice(from, to) !== edit.matched) return { skip: 'the text changed' };
+  return { from, to };
+}
+
+/* Whether the chat's log should keep to its bottom after a scroll. It keeps to the bottom while the writer is there
+   (within `slack` px), lets go when they scroll up, and takes hold again when they come back down; the log's own
+   scrolling (always downwards) and its growing never let go. stick: as it was; prevTop, top: the scroll offset before
+   and now. Pure. */
+function stickAfterScroll(stick, prevTop, top, scrollHeight, clientHeight, slack) {
+  if (scrollHeight - top - clientHeight < (slack == null ? 48 : slack)) return true;
+  if (top < prevTop - 1) return false;
+  return Boolean(stick);
 }
 
 /* A typeset equation as an element, from `render(source, display)` (Obsidian's renderMath), or null when there is no
@@ -2456,17 +2538,31 @@ function rangeRects(view, from, to) {
 // way to a small typewriter, and the code appears in the monospace font one character at a time, at a typist's uneven
 // pace, with a carriage return at each line end and no trail of ink; for the prose around it the pen comes back.
 //
+// Where it is drawn: on a sheet inside the editor's scroller (layerFor), which scrolls with the note and is clipped
+// where the note is; nothing of the pen is fixed to the window. Each line of handwritten words is a box of its own
+// (cutLines, .lagrange-pen-seg), unseen until the pen comes to it and then uncovered up to the nib through a soft
+// edge, with room around it for the tails and loops of its letters: one line's ink never shows through another's.
+// The editor is not locked while the pen writes. The writer's selection is left where it is, and whatever they type
+// meanwhile moves the places the pen holds (track); see runEdits for what a click or a key does to a run.
+//
 // Contract
-//   createPen(app, settings) -> { edit(view, from, to, replacement, run): Promise<void>, destroy() }
+//   createPen(app, settings) -> { edit(view, from, to, replacement, run), finish(), destroy(), extension }
 //     settings.penSpeed (0.5 slow .. 3 fast), settings.penTrail and settings.penLines are read on every edit. Lagrange
-//     calls edit() one edit at a time, in document order, with the editor locked and all changes folded into one undo
-//     step; see runEdits. run (optional) is an object shared by the edits of one run: the pen keeps in run.spent how
-//     long its handwriting has taken, and writes less of each later edit once that is long (penLines).
+//     calls edit() one edit at a time, in document order, and folds all changes into one undo step; see runEdits.
+//     run (optional) is an object shared by the edits of one run: the pen keeps in run.spent how long its handwriting
+//     has taken, and writes less of each later edit once that is long (penLines); with a run the pen's change stays
+//     out of the undo history (the run makes its own step).
 //   pen.edit(view, from, to, replacement): strike [from, to], view.dispatch the change, write `replacement` over it,
-//     and remove every mark it added. The change is dispatched exactly once, whatever happens. With
-//     prefers-reduced-motion the pen does not fly, leaves no trail and draws no equation: the old words dim briefly
-//     and the change is made.
-//   pen.destroy(): removes the pen, its ink and its decorations from every window, and stops its timers.
+//     and remove every mark it added. The change is dispatched exactly once, whatever happens, unless the writer
+//     changed the words to be replaced before the pen had struck them: then it is not made, and edit() resolves to
+//     {skipped: why}. With prefers-reduced-motion the pen does not fly, leaves no trail and draws no equation: the
+//     old words dim briefly and the change is made.
+//   pen.finish(): ends the edit being written, synchronously: its change is made if it had not been, and the pen,
+//     its ink and its handwriting are gone when it returns.
+//   pen.extension: the editor extension the pen needs; the plugin registers it in every editor (else the pen adds it
+//     at its first edit there).
+//   pen.destroy(): removes the pen, its ink and its decorations from every editor, and stops its timers.
+const penWrite = Annotation.define();   // on every change Lagrange itself makes to a note during a run of edits
 function createPen(app, settings) {
   const setGone = StateEffect.define();   // a DecorationSet, or null to clear
   const goneField = StateField.define({
@@ -2482,13 +2578,45 @@ function createPen(app, settings) {
   const unwrittenMark = Decoration.mark({ class: 'lagrange-pen-unwritten' });   // new text the pen has yet to write
   const SVGNS = 'http://www.w3.org/2000/svg';
   const views = new Set();
-  const layers = new Map();               // document -> { svg, marks, pen, pos, lift, idle, win, trail }
+  const layers = new Map();               // EditorView -> { sheet, svg, marks, pen, pos, lift, idle, win, trail }
   const TRAIL_MS = 520, TRAIL_BANDS = 5;  // how long the ink trail lasts, and how many strokes it is drawn in
+  const STOP = { penStop: true };         // what a wait is rejected with when the edit it belongs to is ended early
+  const tracked = new Set();              // the edits being written: their places in the note are kept up (see track)
   let destroyed = false;
+  let current = null;                     // the edit being written: { ctx, finish() }
 
+  /* The writer may change the note while the pen writes (see runEdits): every change that is not the pen's own
+     moves the places the pen holds, and a change inside words the pen is about to strike spoils that edit. */
+  const watch = EditorView.updateListener.of(update => {
+    if (!update.docChanged || !tracked.size) return;
+    for (const tr of update.transactions) {
+      if (!tr.docChanged || tr.annotation(penWrite)) continue;
+      for (const p of tracked) if (p.view === update.view) p.map(tr.changes);
+    }
+  });
+  const extension = [goneField, watch];   // the plugin registers it in every editor; else it is added at the first edit
   const install = view => {
-    if (view.state.field(goneField, false) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(goneField) });
+    if (view.state.field(goneField, false) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(extension) });
     views.add(view);
+  };
+  const track = (view, from, to) => {
+    const p = {
+      view, from, to, start: null, end: null, dirty: false, committed: false,
+      map(changes) {
+        if (!p.committed) {
+          if (p.to > p.from) changes.iterChangedRanges((a, b) => { if (a < p.to && b > p.from) p.dirty = true; });
+          const insertion = p.from === p.to;
+          p.from = changes.mapPos(p.from, 1);
+          p.to = insertion ? p.from : Math.max(p.from, changes.mapPos(p.to, -1));
+        } else {
+          p.from = changes.mapPos(p.from, 1);
+          p.to = Math.max(p.from, changes.mapPos(p.to, -1));
+          if (p.start !== null) { p.start = changes.mapPos(p.start, 1); p.end = Math.max(p.start, changes.mapPos(p.end, -1)); }
+        }
+      },
+    };
+    tracked.add(p);
+    return p;
   };
   const mk = (doc, tag, attrs, parent) => {
     const e = doc.createElementNS(SVGNS, tag);
@@ -2497,11 +2625,20 @@ function createPen(app, settings) {
     return e;
   };
 
-  function layerFor(doc) {
-    let L = layers.get(doc);
-    if (L && L.svg.isConnected) return L;
-    const svg = mk(doc, 'svg', { class: 'lagrange-pen-layer', 'aria-hidden': 'true' });
-    doc.body.appendChild(svg);
+  /* The pen's sheet: a layer inside the editor's scroller, as tall as the note, on which the pen, its ink and its
+     handwriting are placed. It scrolls with the note and is clipped where the note is, so whatever the pen has drawn
+     stays on its words when the writer scrolls, resizes the pane or zooms. Everything the pen places is measured from
+     the sheet's top left corner (rel, org). */
+  function layerFor(view) {
+    let L = layers.get(view);
+    if (L && L.sheet.isConnected) return L;
+    const doc = view.dom.ownerDocument;
+    const sheet = doc.createElement('div');
+    sheet.className = 'lagrange-pen-sheet';
+    sheet.setAttribute('aria-hidden', 'true');
+    view.scrollDOM.appendChild(sheet);
+    const svg = mk(doc, 'svg', { class: 'lagrange-pen-layer', 'aria-hidden': 'true' }, null);
+    sheet.appendChild(svg);
     const defs = mk(doc, 'defs', {}, svg);
     const pat = mk(doc, 'pattern', { id: 'lagrange-pen-hatch', width: 3, height: 3, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(80)' }, defs);
     mk(doc, 'rect', { width: 3, height: 3, fill: 'var(--lg-plate)' }, pat);
@@ -2534,10 +2671,64 @@ function createPen(app, settings) {
       }
     }
     type.style.display = 'none';
-    L = { svg, marks, pen, type, pos: null, lift: 0, idle: 0, win: doc.defaultView || window, trail: { g: trailG, pts: [], paths: [], on: false } };
-    layers.set(doc, L);
+    const win = doc.defaultView || window;
+    L = { view, sheet, svg, marks, pen, type, pos: null, lift: 0, idle: 0, win, ctx: null, observer: null, trail: { g: trailG, pts: [], paths: [], on: false } };
+    // as tall as the note, and no taller (a taller sheet would let the note scroll past its end)
+    L.fit = () => {
+      if (!sheet.isConnected) return;
+      const h = Math.max(0, view.contentDOM.getBoundingClientRect().bottom - sheet.getBoundingClientRect().top);
+      if (Math.abs(h - (L.height || 0)) > 0.5) { L.height = h; sheet.style.height = `${h.toFixed(1)}px`; }
+    };
+    L.fit();
+    try {
+      if (typeof win.ResizeObserver === 'function') { L.observer = new win.ResizeObserver(() => L.fit()); L.observer.observe(view.contentDOM); }
+    } catch (e) { /* fitted at each edit instead */ }
+    layers.set(view, L);
     return L;
   }
+  /* The sheet's top left corner in the window, and a rectangle or a point of the window as the sheet measures it. */
+  const org = L => { const r = L.sheet.getBoundingClientRect(); return { x: r.left, y: r.top }; };
+  const rel = (L, r, o) => {
+    o = o || org(L);
+    return { left: r.left - o.x, top: r.top - o.y, right: r.right - o.x, bottom: r.bottom - o.y, width: r.right - r.left, height: r.bottom - r.top };
+  };
+
+  /* One edit's waits (frames, tweens, pauses). When the edit is ended early (the writer clicked or typed, or the pen
+     was put away) every wait is rejected with STOP at once, so nothing more of the animation runs. */
+  const context = () => {
+    const waits = new Set();
+    const ctx = {
+      stopped: false,
+      wait(begin) {
+        return new Promise((resolve, reject) => {
+          if (ctx.stopped || destroyed) { reject(STOP); return; }
+          const entry = { cancel: null, reject };
+          entry.cancel = begin(v => { waits.delete(entry); resolve(v); });
+          waits.add(entry);
+        });
+      },
+      stop() {
+        ctx.stopped = true;
+        for (const w of Array.from(waits)) { try { if (w.cancel) w.cancel(); } catch (e) { /* a timer that is gone */ } w.reject(STOP); }
+        waits.clear();
+      },
+    };
+    return ctx;
+  };
+  const pause = (L, ms) => L.ctx.wait(done => { const id = L.win.setTimeout(done, Math.max(0, ms)); return () => L.win.clearTimeout(id); });
+  const frame = L => L.ctx.wait(done => { const id = L.win.requestAnimationFrame(() => done()); return () => L.win.cancelAnimationFrame(id); });
+  const tween = (L, ms, fn) => L.ctx.wait(done => {
+    const win = L.win, ctx = L.ctx, t0 = win.performance.now(), dur = Math.max(1, ms);
+    let id = 0;
+    const step = now => {
+      if (ctx.stopped || destroyed) return;
+      const k = Math.min(1, (now - t0) / dur);
+      fn(k);
+      if (k < 1) id = win.requestAnimationFrame(step); else done();
+    };
+    id = win.requestAnimationFrame(step);
+    return () => win.cancelAnimationFrame(id);
+  });
 
   /* The trail: the nib's recent positions, redrawn each frame as a few strokes that thin and fade with age (see
      trailBands). The loop runs only while there is ink left to fade. */
@@ -2566,30 +2757,25 @@ function createPen(app, settings) {
     if (T.pts.length > 240) T.pts.shift();
     if (!T.on) { T.on = true; L.win.requestAnimationFrame(() => drawTrail(L)); }
   };
+  const wipeTrail = L => { L.trail.pts.length = 0; for (const p of L.trail.paths) p.setAttribute('d', ''); };
 
+  // (x, y): on the sheet
   const place = (L, x, y) => {
     L.pos = { x, y };
     L.pen.setAttribute('transform', `translate(${x.toFixed(1)} ${(y - L.lift).toFixed(1)}) scale(${(1 + L.lift * 0.012).toFixed(3)})`);
     if (settings && settings.penTrail !== false && L.pen.style.display !== 'none') inkTrail(L, x, y - L.lift);
   };
-  const tween = (win, ms, fn) => new Promise(resolve => {
-    const t0 = win.performance.now(), dur = Math.max(1, ms);
-    const frame = now => {
-      if (destroyed) { resolve(); return; }
-      const k = Math.min(1, (now - t0) / dur);
-      fn(k);
-      if (k < 1) win.requestAnimationFrame(frame); else resolve();
-    };
-    win.requestAnimationFrame(frame);
-  });
   const ease = k => (k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2);
-  const fly = async (L, x, y, ms, lift = 14) => {
-    const a = L.pos ? { ...L.pos } : { x, y };
+  const arc = (a, x, y) => {
     const mx = (a.x + x) / 2, my = Math.min(a.y, y) - Math.min(60, 20 + Math.hypot(x - a.x, y - a.y) * 0.15);
-    await tween(L.win, ms, k => {
-      const e = ease(k), u = 1 - e;
+    return k => { const e = ease(k), u = 1 - e; return { x: u * u * a.x + 2 * u * e * mx + e * e * x, y: u * u * a.y + 2 * u * e * my + e * e * y }; };
+  };
+  const fly = async (L, x, y, ms, lift = 14) => {
+    const at = arc(L.pos ? { ...L.pos } : { x, y }, x, y);
+    await tween(L, ms, k => {
       L.lift = Math.sin(k * Math.PI) * lift;
-      place(L, u * u * a.x + 2 * u * e * mx + e * e * x, u * u * a.y + 2 * u * e * my + e * e * y);
+      const q = at(k);
+      place(L, q.x, q.y);
     });
     L.lift = 0;
     place(L, x, y);
@@ -2598,12 +2784,18 @@ function createPen(app, settings) {
      second or two, more on a slow disk), and one drawn before it is there would come out as its source.
      -> {renderer, loaded, error}, for equationPlan. */
   const MATHJAX_WAIT = 9000;
-  const mathReady = async () => {
+  const mathReady = async L => {
     if (typeof obsidian.renderMath !== 'function') return { renderer: false };
     let error = '';
     try {
-      if (typeof obsidian.loadMathJax === 'function') await Promise.race([obsidian.loadMathJax(), sleep(MATHJAX_WAIT)]);
-    } catch (e) { error = String((e && e.message) || e || 'an error'); }
+      if (typeof obsidian.loadMathJax === 'function') {
+        await L.ctx.wait(done => {
+          const id = L.win.setTimeout(done, MATHJAX_WAIT);
+          Promise.resolve(obsidian.loadMathJax()).then(() => done(), e => { error = String((e && e.message) || e || 'an error'); done(); });
+          return () => L.win.clearTimeout(id);
+        });
+      }
+    } catch (e) { if (e === STOP) throw e; error = String((e && e.message) || e || 'an error'); }
     return { renderer: true, loaded: typeof window.MathJax !== 'undefined' && window.MathJax !== null, error };
   };
   /* The symbols of a typeset equation, in the order TeX reads them: MathJax's CHTML output (Obsidian's) has one
@@ -2614,10 +2806,10 @@ function createPen(app, settings) {
     return Array.from(el.querySelectorAll('mjx-c'));
   };
   /* Draws one symbol over ms: an SVG outline is traced by the nib and then filled; a CHTML character is uncovered
-     from left to right under it. onX(x) reports how far right (viewport x) the ink has reached. */
+     from left to right under it. onX(x) reports how far right (in the window) the ink has reached. */
   const drawGlyph = async (L, g, ms, onX) => {
-    const win = L.win, r = g.getBoundingClientRect();
-    if (r.width < 0.5 && r.height < 0.5) { g.style.opacity = ''; g.style.clipPath = ''; return; }
+    const win = L.win, box = g.getBoundingClientRect();
+    if (box.width < 0.5 && box.height < 0.5) { g.style.opacity = ''; g.style.clipPath = ''; return; }
     let outline = null, len = 0, ctm = null;
     if (g.ownerSVGElement) {
       try {
@@ -2627,29 +2819,32 @@ function createPen(app, settings) {
         ctm = len ? g.getScreenCTM() : null;
       } catch (e) { len = 0; }
     }
-    if (Math.hypot(r.left - L.pos.x, r.bottom - L.pos.y) > 6) await fly(L, r.left, r.top + r.height * 0.6, Math.min(110, ms), 3);
+    const r0 = rel(L, box);
+    if (Math.hypot(r0.left - L.pos.x, r0.bottom - L.pos.y) > 6) await fly(L, r0.left, r0.top + r0.height * 0.6, Math.min(110, ms), 3);
     if (len && ctm) {
       g.style.opacity = '';
       g.style.fillOpacity = '0';
       g.style.stroke = 'currentColor';
       g.style.strokeWidth = '34';                     // MathJax draws in thousandths of an em
       g.style.strokeDasharray = String(len);
-      await tween(win, ms, t => {
+      await tween(L, ms, t => {
         g.style.strokeDashoffset = (len * (1 - t)).toFixed(1);
         let q = outline.getPointAtLength(len * t);
-        q = new win.DOMPoint(q.x, q.y).matrixTransform(ctm);
-        place(L, q.x, q.y);
-        onX(r.left + r.width * t);
+        q = new win.DOMPoint(q.x, q.y).matrixTransform(g.getScreenCTM() || ctm);
+        const o = org(L), now = g.getBoundingClientRect();
+        place(L, q.x - o.x, q.y - o.y);
+        onX(now.left + now.width * t);
       });
       for (const k of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) g.style[k] = '';
     } else {
       g.style.opacity = '';
-      await tween(win, ms, t => {
+      await tween(L, ms, t => {
         g.style.clipPath = `inset(-60% ${((1 - t) * 100).toFixed(1)}% -60% -20%)`;
         // down the symbol's left side, then up and across to its right shoulder
+        const now = g.getBoundingClientRect(), r = rel(L, now);
         const y = t < 0.45 ? r.top + r.height * (0.25 + t * 1.6) : r.bottom - r.height * (t - 0.45) * 1.3;
         place(L, r.left + r.width * t, y);
-        onX(r.left + r.width * t);
+        onX(now.left + now.width * t);
       });
       g.style.clipPath = '';
     }
@@ -2658,10 +2853,10 @@ function createPen(app, settings) {
   /* Types one piece of code (see penScript): the typewriter takes the pen's place, sits under the letter it is
      typing and dips at each stroke; a line end is a carriage return. Then the pen comes back, where the typing ended. */
   const typeCode = async (L, piece, k) => {
-    const win = L.win, [typed, mark, rest] = piece.el.childNodes;
+    const [typed, mark, rest] = piece.el.childNodes;
     const text = piece.text;
     const pauses = typeCadence(text, 5200, text.length * 2654435761);
-    const at = () => { const r = mark.getBoundingClientRect(); return { x: r.left, y: r.bottom }; };
+    const at = () => { const r = rel(L, mark.getBoundingClientRect()); return { x: r.left, y: r.bottom }; };
     const put = (q, dip) => L.type.setAttribute('transform', `translate(${q.x.toFixed(1)} ${(q.y + 2 + (dip ? 1.4 : 0)).toFixed(1)})`);
     L.pen.style.display = 'none';
     L.trail.pts.length = 0;                          // no ink while typing
@@ -2669,7 +2864,6 @@ function createPen(app, settings) {
     put(at());
     let i = 0, n = 0;
     for (const ch of text) {
-      if (destroyed) break;
       const before = at();
       i += ch.length;
       typed.textContent = text.slice(0, i);
@@ -2677,12 +2871,12 @@ function createPen(app, settings) {
       const ms = pauses[n++] * k;
       if (ch === '\n') {
         const after = at();                          // the carriage runs back to the start of the next line
-        await tween(win, ms, t => { const e = ease(t); put({ x: before.x + (after.x - before.x) * e, y: before.y + (after.y - before.y) * e }); });
+        await tween(L, ms, t => { const e = ease(t); put({ x: before.x + (after.x - before.x) * e, y: before.y + (after.y - before.y) * e }); });
       } else {
         put(at(), true);
-        await sleep(ms * 0.4);
+        await pause(L, ms * 0.4);
         put(at(), false);
-        await sleep(ms * 0.6);
+        await pause(L, ms * 0.6);
       }
     }
     const end = at();
@@ -2693,11 +2887,9 @@ function createPen(app, settings) {
     place(L, end.x, end.y - 4);
   };
 
-  /* A moment after the last edit the pen flies off. If another edit begins while it is leaving (L.busy counts the
-     edits begun), it stops where it is and is not put away: otherwise the next edit would be written by no pen. */
-  /* Where the character at pos stands: {x, top, bottom, baseline} in the viewport, or null if it is not drawn (off
+  /* Where the character at pos stands: {x, top, bottom, baseline} on the sheet, or null if it is not drawn (off
      screen). The baseline is found from the font's own ascent and descent, which is what the character's box is. */
-  const charBox = (view, pos) => {
+  const charBox = (L, view, pos) => {
     const c = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
     if (!c) return null;
     let ratio = 0.8;
@@ -2710,26 +2902,28 @@ function createPen(app, settings) {
       const m = ctx.measureText('x');
       if (m.fontBoundingBoxAscent > 0) ratio = m.fontBoundingBoxAscent / (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent);
     } catch (e) { /* the usual proportion */ }
-    return { x: c.left, top: c.top, bottom: c.bottom, baseline: c.top + (c.bottom - c.top) * ratio };
+    const o = org(L);
+    return { x: c.left - o.x, top: c.top - o.y, bottom: c.bottom - o.y, baseline: c.top - o.y + (c.bottom - c.top) * ratio };
   };
-  /* The text column at pos: the left and right edges between which the note's line wraps, and the height of its lines. */
-  const columnAt = (view, pos) => {
-    const win = view.dom.ownerDocument.defaultView || window;
+  /* The text column at pos: the left and right edges (on the sheet) between which the note's line wraps, and the
+     height of its lines. */
+  const columnAt = (L, view, pos) => {
+    const win = L.win;
     let el = null;
     try { const at = view.domAtPos(pos); el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line'); } catch (e) { el = null; }
-    const box = (el || view.contentDOM).getBoundingClientRect(), cs = win.getComputedStyle(el || view.contentDOM);
+    const box = rel(L, (el || view.contentDOM).getBoundingClientRect()), cs = win.getComputedStyle(el || view.contentDOM);
     const left = box.left + (parseFloat(cs.paddingLeft) || 0), right = box.right - (parseFloat(cs.paddingRight) || 0);
     const fs = parseFloat(cs.fontSize) || 16;
     return { left, right: Math.max(right, left + 40), lineHeight: parseFloat(cs.lineHeight) || fs * 1.5, fontSize: fs };
   };
-  /* Waits until the character at pos stands still (the change, Typewriter Mode and smooth scrolling move the text
-     for a few frames), bringing it on screen if it is not. -> its charBox, or null if it cannot be measured. */
-  const settled = async (view, win, pos) => {
+  /* Waits until the character at pos stands still on the sheet (the change and a reflow move the text for a few
+     frames), bringing it on screen if it is not. -> its charBox, or null if it cannot be measured. */
+  const settled = async (L, view, at) => {
     let box = null, prev = null, steady = 0, asked = false;
-    for (let i = 0; i < 60 && steady < 3 && !destroyed; i++) {
-      await nextFrame(win);
-      box = charBox(view, pos);
-      if (!box && !asked) { asked = true; view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) }); }
+    for (let i = 0; i < 60 && steady < 3; i++) {
+      await frame(L);
+      box = charBox(L, view, at());
+      if (!box && !asked) { asked = true; view.dispatch({ effects: EditorView.scrollIntoView(at(), { y: 'center' }) }); }
       steady = box && prev && Math.abs(box.top - prev.top) < 0.5 && Math.abs(box.x - prev.x) < 0.5 ? steady + 1 : 0;
       prev = box;
     }
@@ -2771,17 +2965,18 @@ function createPen(app, settings) {
       box.style.opacity = '';
       const each = Math.min(170, 3600 / glyphs.length) * k;
       for (const g of glyphs) {
-        if (destroyed || !box.isConnected) break;
+        if (!box.isConnected) break;
         await drawGlyph(L, g, each, reveal);
       }
       for (const g of glyphs) { g.style.opacity = ''; g.style.clipPath = ''; }
     } else {
       box.style.opacity = '';
-      await fly(L, start.left, start.top + start.height * 0.6, 280 * k, 6);
-      await tween(win, Math.min(2400, start.width * 9) * k, t => {
-        const r = box.getBoundingClientRect(), x = r.left + r.width * t;
-        reveal(x);
-        place(L, x, r.top + r.height * 0.6 + Math.sin((x - r.left) * 0.55) * 3.2 - 2);
+      const s = rel(L, start);
+      await fly(L, s.left, s.top + s.height * 0.6, 280 * k, 6);
+      await tween(L, Math.min(2400, start.width * 9) * k, t => {
+        const now = box.getBoundingClientRect(), r = rel(L, now), x = r.left + r.width * t;
+        reveal(now.left + now.width * t);
+        place(L, x, r.top + r.height * 0.6 + Math.sin(r.width * t * 0.55) * 3.2 - 2);
       });
     }
     box.style.clipPath = '';
@@ -2790,77 +2985,181 @@ function createPen(app, settings) {
     win.setTimeout(() => { box.style.transition = ''; }, 480);
   };
 
+  /* A moment after the last edit the pen flies off. If another edit begins while it is leaving (L.busy counts the
+     edits begun), it stops where it is and is not put away: otherwise the next edit would be written by no pen. */
   const park = (L, view) => {
     L.win.clearTimeout(L.idle);
     const busy = L.busy;
-    L.idle = L.win.setTimeout(async () => {
-      if (destroyed || !L.pos || L.busy !== busy) return;
-      const r = view.dom.getBoundingClientRect();
-      const a = { ...L.pos }, x = r.right + 80, y = r.top - 60;
-      const mx = (a.x + x) / 2, my = Math.min(a.y, y) - Math.min(60, 20 + Math.hypot(x - a.x, y - a.y) * 0.15);
-      await tween(L.win, 700, k => {
-        if (L.busy !== busy) return;
-        const e = ease(k), u = 1 - e;
+    L.idle = L.win.setTimeout(() => {
+      if (destroyed || !L.pos || L.busy !== busy || !L.sheet.isConnected) return;
+      const r = rel(L, view.scrollDOM.getBoundingClientRect());
+      const at = arc({ ...L.pos }, r.right + 40, r.top - 60);
+      const t0 = L.win.performance.now();
+      const step = now => {
+        if (destroyed || L.busy !== busy) return;
+        const k = Math.min(1, (now - t0) / 700);
         L.lift = Math.sin(k * Math.PI) * 14;
-        place(L, u * u * a.x + 2 * u * e * mx + e * e * x, u * u * a.y + 2 * u * e * my + e * e * y);
-      });
-      if (L.busy !== busy) return;
-      L.lift = 0;
-      L.pen.style.display = 'none';
-      L.pos = null;
+        const q = at(k);
+        place(L, q.x, q.y);
+        if (k < 1) { L.win.requestAnimationFrame(step); return; }
+        L.lift = 0;
+        L.pen.style.display = 'none';
+        L.pos = null;
+      };
+      L.win.requestAnimationFrame(step);
     }, 1400);
+  };
+  /* Puts the pen out of sight at once (an edit ended early). */
+  const putAway = L => {
+    L.win.clearTimeout(L.idle);
+    L.busy = (L.busy || 0) + 1;
+    L.lift = 0;
+    L.pen.style.display = 'none';
+    L.type.style.display = 'none';
+    L.pos = null;
+    wipeTrail(L);
+  };
+
+  /* Cuts a line of handwriting (a span holding one text node) into one piece per line it takes: each a
+     .lagrange-pen-seg of its own, so that each line is uncovered by itself (see the styles: a piece's box reaches
+     past its line for the tails and loops of its letters, and nothing of another line shows through it). The white
+     space between two pieces stays outside them, where a line may still break. -> the pieces, in order. */
+  const cutLines = (doc, el, lineHeight) => {
+    const node = el.firstChild;
+    if (!node || node.nodeType !== 3 || el.childNodes.length !== 1) return [];
+    const text = node.data, range = doc.createRange(), tops = [];
+    for (let i = 0; i < text.length; i++) {
+      range.setStart(node, i);
+      range.setEnd(node, i + 1);
+      const rects = range.getClientRects(), r = rects.length ? rects[rects.length - 1] : null;
+      tops.push(r && r.width > 0.01 && /\S/.test(text[i]) ? (r.top + r.bottom) / 2 : null);
+    }
+    const starts = lineStarts(tops, lineHeight * 0.5);
+    const segs = [];
+    el.textContent = '';
+    starts.forEach((s, n) => {
+      const chunk = text.slice(s, n + 1 < starts.length ? starts[n + 1] : text.length);
+      const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(chunk);
+      if (m[1]) el.appendChild(doc.createTextNode(m[1]));
+      if (m[2]) {
+        const seg = doc.createElement('span');
+        seg.className = 'lagrange-pen-seg';
+        seg.textContent = m[2];
+        el.appendChild(seg);
+        segs.push(seg);
+      }
+      if (m[3]) el.appendChild(doc.createTextNode(m[3]));
+    });
+    return segs;
   };
 
   return {
+    extension,
+    /* Writes one edit. Resolves to undefined, or to {skipped: why} if the edit was not made: the writer changed the
+       words it was to replace while the pen was on its way (the change is then not dispatched at all). */
     async edit(view, from, to, replacement, run) {
       if (destroyed) throw new Error('The pen was put away.');
       const doc = view.dom.ownerDocument, win = doc.defaultView || window;
       const still = prefersReducedMotion(win);
       const speed = Number(settings && settings.penSpeed) > 0 ? Number(settings.penSpeed) : 1;
       const k = 1 / speed;
-      install(view);
-      view.dispatch({ effects: EditorView.scrollIntoView(from, { y: 'center' }) });
-      // Wait for the text to stop moving (Typewriter Mode and smooth scrolling keep it moving for a few frames).
-      let rects = [], prev = null, steady = 0;
-      for (let i = 0; i < 90 && steady < 4; i++) {
-        await nextFrame(win);
-        rects = rangeRects(view, from, Math.max(from, to));
-        const top = rects.length ? rects[0].top : null;
-        steady = prev !== null && top !== null && Math.abs(top - prev) < 0.5 ? steady + 1 : 0;
-        prev = top;
-      }
-      if (still || !rects.length) {
-        if (to > from) {
-          view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(from, to)])) });
-          await sleep(220 * k);
-        }
-        view.dispatch({ changes: { from, to, insert: replacement }, effects: setGone.of(null) });
-        return;
-      }
-      const L = layerFor(doc);
-      win.clearTimeout(L.idle);
-      L.busy = (L.busy || 0) + 1;
-      L.lift = 0;
-      const vr = view.dom.getBoundingClientRect();
-      if (!L.pos) place(L, Math.min(win.innerWidth - 20, vr.right + 80), Math.max(10, vr.top - 40));
-      L.pen.style.display = '';
-      const r0 = rects[0];
-      const mid = r => r.top + r.height * 0.58;
       const text = String(replacement == null ? '' : replacement);
+      install(view);
+      const at = track(view, from, to);                 // where the edit is, kept up while the writer types elsewhere
+      const own = run ? [penWrite.of(true), Transaction.addToHistory.of(false)] : [penWrite.of(true)];   // a run makes its own undo step
       const ink = [];                                   // the strokes that strike the old words out
       const claimed = new Set();                        // the note's own equations the pen has taken to draw
-      let committed = false, hand = null, following = false;
+      let hand = null, following = false, cleared = false, L = null, skipped = null;
       const commit = spec => {
-        if (committed) return;
-        committed = true;
-        view.dispatch(Object.assign({ changes: { from, to, insert: text } }, spec));
+        if (at.committed || skipped) return;
+        if (at.dirty) { skipped = 'you changed this text while the pen was on its way'; return; }
+        at.committed = true;
+        at.start = at.from + inkOffset(text);
+        at.end = at.from + text.length;
+        const tr = Object.assign({ changes: { from: at.from, to: at.to, insert: text }, annotations: own }, spec);
+        // The writer's selection stays where it is, unless it is on the words being replaced: then the cursor goes
+        // just before the new text (in Live Preview, text the cursor is in shows its Markdown).
+        const sel = view.state.selection.main;
+        if (!tr.selection && sel.to >= at.from && sel.from <= at.to && (sel.from !== sel.to || at.to > at.from)) tr.selection = { anchor: at.from };
+        at.to = at.end;
+        view.dispatch(tr);
       };
+      /* Everything the edit put on the page comes off; at once when the edit is ended early, else with a short fade. */
+      const clear = instant => {
+        if (cleared) return;
+        cleared = true;
+        following = false;
+        tracked.delete(at);
+        for (const el of claimed) { el.style.opacity = ''; el.style.clipPath = ''; el.classList.remove('lagrange-pen-drawing'); for (const g of mathGlyphs(el)) { g.style.opacity = ''; g.style.clipPath = ''; for (const p of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) g.style[p] = ''; } }
+        const fade = Math.round(300 * k), gone = hand, strokes = ink.splice(0);
+        if (instant) {
+          for (const n of strokes) n.remove();
+          if (gone) gone.remove();
+        } else {
+          for (const n of strokes) { n.style.transition = `opacity ${fade}ms ease`; n.style.opacity = '0'; }
+          if (gone) { gone.style.transition = `opacity ${fade}ms ease`; gone.style.opacity = '0'; }
+          win.setTimeout(() => { for (const n of strokes) n.remove(); if (gone) gone.remove(); }, fade + 40);
+        }
+        // The text is in full view by now (or the pen was put away): the marks on it come off.
+        try { if (view.state.field(goneField, false) !== undefined) view.dispatch({ effects: setGone.of(null) }); } catch (e) { /* the view is gone */ }
+        view.dom.classList.remove('lagrange-pen-revealing');
+        view.dom.style.removeProperty('--lagrange-pen-reveal');
+        if (L) {
+          L.type.style.display = 'none';
+          if (instant) putAway(L); else if (L.pos) { L.pen.style.display = ''; park(L, view); }
+        }
+      };
+      const ctx = context();
+      const me = { ctx, finish() { ctx.stop(); commit({}); clear(true); } };
+      current = me;
       try {
+        // The edit is brought on screen if it is not comfortably there already; a writer who has it in view is not moved.
+        const near = () => {
+          const c = view.coordsAtPos(at.from, 1), s = view.scrollDOM.getBoundingClientRect();
+          return Boolean(c && c.top >= s.top + s.height * 0.12 && c.bottom <= s.top + s.height * 0.72);
+        };
+        if (!near()) view.dispatch({ effects: EditorView.scrollIntoView(at.from, { y: 'center' }) });
+        L = layerFor(view);
+        L.ctx = ctx;
+        L.fit();
+        // Wait for the text to stop moving (Typewriter Mode and smooth scrolling keep it moving for a few frames).
+        let rects = [], prev = null, steady = 0;
+        for (let i = 0; i < 90 && steady < 4; i++) {
+          await frame(L);
+          rects = rangeRects(view, at.from, Math.max(at.from, at.to));
+          const top = rects.length ? rects[0].top : null;
+          steady = prev !== null && top !== null && Math.abs(top - prev) < 0.5 ? steady + 1 : 0;
+          prev = top;
+        }
+        if (still || !rects.length) {
+          if (at.to > at.from && !at.dirty) {
+            view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(at.from, at.to)])) });
+            await pause(L, 220 * k);
+          }
+          commit({ effects: setGone.of(null) });
+          return skipped ? { skipped } : undefined;
+        }
+        win.clearTimeout(L.idle);
+        L.busy = (L.busy || 0) + 1;
+        L.lift = 0;
+        {
+          const o = org(L);
+          rects = rects.map(r => rel(L, r, o));
+          const vr = rel(L, view.scrollDOM.getBoundingClientRect(), o);
+          if (!L.pos) place(L, vr.right + 40, vr.top - 40);
+        }
+        L.pen.style.display = '';
+        const r0 = rects[0];
+        const mid = r => r.top + r.height * 0.58;
+        const flyOff = async () => {
+          const vr = rel(L, view.scrollDOM.getBoundingClientRect());
+          await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
+        };
         await fly(L, r0.left - 2, mid(r0), 650 * k);
-        if (to > from) {
+        if (at.to > at.from && !at.dirty) {
           ink.push(mk(doc, 'circle', { cx: r0.left - 2, cy: mid(r0), r: 1.6, fill: 'var(--lg-rubric)', opacity: 0.8 }, L.marks));
-          view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(from, to)])) });
-          for (let i = 0; i < rects.length && !destroyed; i++) {
+          view.dispatch({ effects: setGone.of(Decoration.set([goneMark.range(at.from, at.to)])) });
+          for (let i = 0; i < rects.length; i++) {
             const r = rects[i], y0 = mid(r), x0 = r.left - 2, x1 = r.right + 2;
             const p = mk(doc, 'path', {
               d: `M${x0} ${y0} C ${x0 + (x1 - x0) * 0.3} ${y0 - 1.6}, ${x0 + (x1 - x0) * 0.7} ${y0 + 1.6}, ${x1} ${y0 - 0.6}`,
@@ -2871,17 +3170,17 @@ function createPen(app, settings) {
             p.style.strokeDasharray = String(len);
             p.style.strokeDashoffset = String(len);
             if (i) await fly(L, x0, y0, 240 * k, 6);
-            await tween(win, Math.min(len * 3.2, 900) * k, t => {
+            await tween(L, Math.min(len * 3.2, 900) * k, t => {
               p.style.strokeDashoffset = (len * (1 - t)).toFixed(1);
               const q = p.getPointAtLength(len * t);
               place(L, q.x, q.y);
             });
           }
-          if (text) await sleep(200 * k);               // the struck words are seen struck, before they go
+          if (text) await pause(L, 200 * k);            // the struck words are seen struck, before they go
         }
-        const lead = inkOffset(text), start = from + lead, end = from + text.length;
-        if (destroyed || lead >= text.length) {
-          if (!text && to > from) await sleep(260 * k);
+        const lead = inkOffset(text);
+        if (lead >= text.length || at.dirty) {
+          if (!text && at.to > at.from && !at.dirty) await pause(L, 260 * k);
           commit({ effects: setGone.of(null) });
         } else {
           // The new text goes into the note now, unseen, so that everything after it is where it will stay and the
@@ -2890,26 +3189,30 @@ function createPen(app, settings) {
           // equation the cursor touches).
           const live = Boolean(view.dom.closest('.is-live-preview'));
           const maths = mathSegments(text).filter(g => g.type === 'math');
-          const mj = maths.length ? await mathReady() : null;
+          const mj = maths.length ? await mathReady(L) : null;
           const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
-          const spec = { effects: setGone.of(Decoration.set([unwrittenMark.range(start, end)])) };
-          if (before && from > 0 && /^(?:\$|\\\(|\\\[|\\begin\{)/.test(text)) spec.selection = { anchor: from - 1 };
-          commit(spec);
+          if (!at.dirty) {
+            const spec = { effects: setGone.of(Decoration.set([unwrittenMark.range(at.from + lead, at.from + text.length)])) };
+            const sel = view.state.selection.main;
+            if (before && at.from > 0 && /^(?:\$|\\\(|\\\[|\\begin\{)/.test(text) && sel.to >= at.from && sel.from <= at.to) spec.selection = { anchor: at.from - 1 };
+            commit(spec);
+          } else commit({});
+          if (skipped) return { skipped };
           const fadeInk = Math.round(160 * k);
           for (const n of ink) { n.style.transition = `opacity ${fadeInk}ms ease`; n.style.opacity = '0'; }
-          win.setTimeout(() => { for (const n of ink.splice(0)) n.remove(); }, fadeInk + 40);
+          { const old = ink.splice(0); win.setTimeout(() => { for (const n of old) n.remove(); }, fadeInk + 40); }
           let targets = before ? newEquations(view, before, maths, claimed) : [];
-          let at = await settled(view, win, start);
+          let first = await settled(L, view, () => at.start);
           if (before) targets = targets.concat(newEquations(view, before, maths, claimed));
           const inNote = targets.map(t => bare(t.source));
           if (before && targets.length < maths.length) {
             console.debug(`Lagrange: ${maths.length - targets.length} of ${maths.length} equation(s) in this edit are not typeset in the note here (off screen, the cursor is in one, or Obsidian does not read their delimiters), so the pen draws them in its script.`);
           }
           // The pen's script: the words (and code), and the equations the note does not typeset itself.
-          const lines = rangeRects(view, start, end);
-          const col = columnAt(view, start);
+          const lines = rangeRects(view, at.start, at.end);
+          const col = columnAt(L, view, at.start);
           const mayWrite = penLines(settings && settings.penLines, lines.length, run && run.spent, speed);
-          const script = (at ? penScript(text, Math.min(520, 150 * mayWrite)) : []).filter(g => {
+          const script = (first ? penScript(text, Math.min(520, 150 * mayWrite)) : []).filter(g => {
             if (g.type !== 'math') return true;
             const i = inNote.indexOf(bare(g.source));
             if (i < 0) return true;
@@ -2930,12 +3233,12 @@ function createPen(app, settings) {
                 span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-mark';
                 span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-rest';
                 span.lastChild.textContent = g.text;
-                span.style.visibility = 'hidden';         // the slip is laid down when its turn comes
                 hand.appendChild(span);
                 pieces.push({ el: span, code: true, text: g.text });
                 continue;
               }
               if (g.type !== 'math') {
+                span.className = 'lagrange-pen-words';
                 span.textContent = g.text;
                 hand.appendChild(span);
                 pieces.push({ el: span, math: false, prose: true });
@@ -2949,6 +3252,7 @@ function createPen(app, settings) {
               if (plan.how === 'draw') { span.className = 'lagrange-pen-math'; span.appendChild(m); }
               else {
                 console.debug(`Lagrange: an equation was written as text, not drawn: ${plan.why}.`, mathSource(g));
+                span.className = 'lagrange-pen-words';
                 span.textContent = mathSource(g);
               }
               hand.appendChild(span);
@@ -2962,19 +3266,20 @@ function createPen(app, settings) {
               hand.style.lineHeight = `${col.lineHeight.toFixed(2)}px`;
               hand.style.left = `${col.left.toFixed(2)}px`;
               hand.style.width = `${(col.right - col.left).toFixed(2)}px`;
-              hand.style.textIndent = `${Math.max(0, at.x - col.left).toFixed(2)}px`;
+              hand.style.textIndent = `${Math.max(0, first.x - col.left).toFixed(2)}px`;
               hand.style.top = '0px';
               const base = hand.firstChild.getBoundingClientRect().bottom - hand.getBoundingClientRect().top;
-              hand.style.top = `${(at.baseline - base).toFixed(2)}px`;
+              hand.style.top = `${(first.baseline - base).toFixed(2)}px`;
             };
-            doc.body.appendChild(hand);
+            L.sheet.appendChild(hand);
             lay();
             if (pieces.some(q => q.math)) {
               // MathJax adds the styles for the symbols it used; wait for them, and for the fonts, before measuring.
               try { if (typeof obsidian.finishRenderMath === 'function') await Promise.race([obsidian.finishRenderMath(), sleep(1200)]); } catch (e) { /* drawn as it is */ }
               try { if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(900)]); } catch (e) { /* drawn as it is */ }
-              await nextFrame(win);
-              at = charBox(view, start) || at;
+              if (ctx.stopped) throw STOP;
+              await frame(L);
+              first = charBox(L, view, at.start) || first;
               lay();
             }
             // No more lines than it may write, and on one line no further than the text itself goes (what follows it
@@ -2985,8 +3290,30 @@ function createPen(app, settings) {
               if (Math.round(hb.height / col.lineHeight) > mayWrite) return false;
               if (lines.length !== 1 || !last) return true;
               const tail = pieces.length ? pieces[pieces.length - 1].el.getClientRects() : [];
-              return !tail.length || tail[tail.length - 1].right <= Math.max(last.right, at.x + 24) + 6;
+              const o = org(L);
+              return !tail.length || tail[tail.length - 1].right - o.x <= Math.max(last.right - o.x, first.x + 24) + 6;
             };
+            // In a narrow column the first word may not fit in what is left of the first line, and would drop to the
+            // next: the hand is made smaller (down to about the note's own size) until it starts where the text does.
+            const dropped = () => {
+              const el = pieces[0] && pieces[0].el, node = el && pieces[0].prose ? el.firstChild : null;
+              const top = () => {
+                if (node && node.nodeType === 3 && node.length) {
+                  const r = doc.createRange(), i = Math.max(0, node.data.search(/\S/));
+                  r.setStart(node, i);
+                  r.setEnd(node, Math.min(node.length, i + 1));
+                  const q = r.getClientRects()[0];
+                  if (q) return q.top;
+                }
+                return el ? el.getBoundingClientRect().top : 0;
+              };
+              const now = top();
+              hand.style.whiteSpace = 'nowrap';              // where it would stand on the first line
+              const want = top();
+              hand.style.whiteSpace = '';
+              return now - want > col.lineHeight * 0.5;
+            };
+            for (let i = 0; i < 6 && dropped(); i++) { fs *= 0.94; lay(); }
             for (let i = 0; i < 4 && lines.length === 1 && !fits(); i++) { fs *= 0.94; lay(); }
             for (let i = 0; i < 80 && pieces.length && !fits(); i++) {
               const q = pieces[pieces.length - 1];
@@ -3005,137 +3332,132 @@ function createPen(app, settings) {
               }
               q.el.textContent = cut + ' …';
             }
-            // While it is written the hand stays on the text, wherever the note scrolls or reflows to.
+            // Each line of words becomes a piece of its own, uncovered by itself (cutLines).
+            for (const q of pieces) if (q.prose) q.segs = cutLines(doc, q.el, col.lineHeight);
+            // While it is written the hand stays on the text, wherever the note reflows to (scrolling moves the sheet,
+            // and the hand with it).
             following = true;
             const follow = () => {
               if (!following || destroyed || !hand.isConnected) return;
-              const now = charBox(view, start);
-              if (now && (Math.abs(now.x - at.x) > 0.4 || Math.abs(now.baseline - at.baseline) > 0.4)) { at = now; lay(); }
+              const now = charBox(L, view, at.start), c = now ? columnAt(L, view, at.start) : null;
+              if (now && (Math.abs(now.x - first.x) > 0.4 || Math.abs(now.baseline - first.baseline) > 0.4 || Math.abs(c.left - col.left) > 0.4 || Math.abs(c.right - col.right) > 0.4)) {
+                first = now; col.left = c.left; col.right = c.right;
+                lay();
+              }
               win.requestAnimationFrame(follow);
             };
             win.requestAnimationFrame(follow);
-            // The ink shows where the nib has been: each stretch of a line it has passed, kept as a box in the hand's own
-            // measure (so it holds when the hand moves).
-            const shown = [];
-            const clip = () => { hand.style.clipPath = shown.length ? `path("${shown.map(b => `M${b.l.toFixed(1)} ${b.t.toFixed(1)}H${b.r.toFixed(1)}V${b.b.toFixed(1)}H${b.l.toFixed(1)}Z`).join('')}")` : 'inset(0 100% 0 0)'; };
-            // (a line's box is the note's line and a little below it, for the tails of its letters: not the line under it)
-            const within = (r, whole) => {
-              const hb = hand.getBoundingClientRect(), half = whole ? r.height / 2 + 2 : col.lineHeight / 2, c = (r.top + r.bottom) / 2 - hb.top;
-              return { l: r.left - hb.left - 2, t: c - half, r: r.right - hb.left + 2, b: c + half + (whole ? 0 : col.lineHeight * 0.03) };
-            };
-            clip();
             const widthOf = q => Array.from(q.el.getClientRects()).reduce((a, r) => a + r.width, 0);
             const pace = penPace(pieces.filter(q => q.prose).reduce((a, q) => a + widthOf(q), 0));
             const t0 = win.performance.now();
             for (const piece of pieces) {
-              if (destroyed) break;
               if (piece.code) {
-                shown.push(within(piece.el.getBoundingClientRect(), true));   // the slip is laid down empty; its letters are typed
-                clip();
-                piece.el.style.visibility = '';
+                piece.el.classList.add('is-on');             // the slip is laid down empty; its letters are typed
                 await typeCode(L, piece, k);
                 continue;
               }
               if (piece.math) {
                 const glyphs = mathGlyphs(piece.el);
-                const box = within(piece.el.getBoundingClientRect(), true), right = box.r;
-                const upTo = x => { box.r = Math.max(box.r, Math.min(right, x - hand.getBoundingClientRect().left)); clip(); };
-                box.r = box.l;
-                shown.push(box);
                 if (glyphs.length && glyphs.length <= 90) {
                   for (const g of glyphs) g.style.opacity = '0';
+                  piece.el.classList.add('is-on');
                   const each = Math.min(170, 3600 / glyphs.length) * k;
-                  for (const g of glyphs) {
-                    if (destroyed) break;
-                    await drawGlyph(L, g, each, upTo);
-                  }
+                  for (const g of glyphs) await drawGlyph(L, g, each, () => {});
                 } else {
-                  const pr = piece.el.getBoundingClientRect();
+                  const pr = rel(L, piece.el.getBoundingClientRect());
+                  piece.el.style.clipPath = 'inset(-0.6em 100% -0.6em -0.2em)';
+                  piece.el.classList.add('is-on');
                   await fly(L, pr.left, pr.top + pr.height * 0.7, 280 * k, 6);
-                  await tween(win, Math.min(2400, pr.width * 9) * k, t => {
-                    const r = piece.el.getBoundingClientRect(), x = r.left + r.width * t;
-                    upTo(x);
-                    place(L, x, r.top + r.height * 0.7 + Math.sin(x * 0.55) * 3.2 - 2);
+                  await tween(L, Math.min(2400, pr.width * 9) * k, t => {
+                    const r = rel(L, piece.el.getBoundingClientRect());
+                    piece.el.style.clipPath = `inset(-0.6em ${(r.width * (1 - t)).toFixed(1)}px -0.6em -0.2em)`;
+                    place(L, r.left + r.width * t, r.top + r.height * 0.7 + Math.sin(r.width * t * 0.55) * 3.2 - 2);
                   });
+                  piece.el.style.clipPath = '';
                 }
-                box.r = right;
-                clip();
                 continue;
               }
-              // words: along each line they take, the nib a little above the baseline and never still
-              const n = piece.el.getClientRects().length;
-              for (let i = 0; i < n && !destroyed; i++) {
-                const first = piece.el.getClientRects()[i];
-                if (!first || first.width < 0.5) continue;
-                const box = within(first), right = box.r, width = first.width;
-                box.r = box.l;
-                shown.push(box);
-                const y0 = first.top + first.height * 0.72;
-                if (Math.hypot(first.left - L.pos.x, y0 - L.pos.y) > 4) await fly(L, first.left, y0, (i ? 240 : 280) * k, 6);
-                await tween(win, Math.max(60, width * pace) * k, t => {
-                  const r = piece.el.getClientRects()[i] || first, x = r.left + r.width * t;
-                  box.r = box.l + (right - box.l) * t;
-                  clip();
-                  place(L, x, r.top + r.height * 0.72 + Math.sin(x * 0.55) * 3.2 - 2);
+              // words: along each line they take, the nib a little above the baseline and never still. The ink shows
+              // up to the nib, through a soft edge (the styles: --lagrange-pen-x), and only on the line being written.
+              for (const seg of piece.segs || []) {
+                const cs = win.getComputedStyle(seg), padX = parseFloat(cs.paddingLeft) || 0, padY = parseFloat(cs.paddingTop) || 0;
+                const inner = () => {
+                  const r = rel(L, seg.getBoundingClientRect());
+                  return { left: r.left + padX, top: r.top + padY, width: Math.max(0, r.width - 2 * padX), height: Math.max(0, r.height - 2 * padY) };
+                };
+                const a = inner();
+                if (a.width < 0.5) { seg.classList.add('is-written'); continue; }
+                const y0 = a.top + a.height * 0.72;
+                if (Math.hypot(a.left - L.pos.x, y0 - L.pos.y) > 4) await fly(L, a.left, y0, 260 * k, 6);
+                seg.style.setProperty('--lagrange-pen-x', '0px');
+                seg.classList.add('is-writing');
+                await tween(L, Math.max(60, a.width * pace) * k, t => {
+                  const r = inner(), x = r.width * t;
+                  seg.style.setProperty('--lagrange-pen-x', `${(padX + x + 2).toFixed(1)}px`);
+                  place(L, r.left + x, r.top + r.height * 0.72 + Math.sin(x * 0.55) * 3.2 - 2);
                 });
-                box.r = right;
+                seg.classList.remove('is-writing');
+                seg.classList.add('is-written');
+                seg.style.removeProperty('--lagrange-pen-x');
               }
             }
-            hand.style.clipPath = 'none';
+            hand.classList.add('is-done');
             if (run) run.spent = (run.spent || 0) + (win.performance.now() - t0);
-            await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
-            await sleep(380 * k);
+            await flyOff();
+            await pause(L, 380 * k);
           }
           // The handwriting gives way to the text, which is already where it belongs.
           const fade = Math.round(300 * k);
           view.dom.style.setProperty('--lagrange-pen-reveal', `${fade}ms`);
           view.dom.classList.add('lagrange-pen-revealing');
           if (hand) { hand.style.transition = `opacity ${fade}ms ease`; hand.style.opacity = '0'; }
-          if (targets.length && !destroyed) {
-            await sleep(fade * 0.6);
+          if (targets.length) {
+            await pause(L, fade * 0.6);
             // Then the equations, each where the note has it.
-            for (const t of targets.slice(0, SCRIPT_EQUATIONS)) {
-              if (destroyed) break;
-              await drawInPlace(L, t.el, k);
-            }
-            if (!destroyed) {
-              await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
-              await sleep(380 * k);                       // the finished equation is looked at for a moment
-            }
+            for (const t of targets.slice(0, SCRIPT_EQUATIONS)) await drawInPlace(L, t.el, k);
+            await flyOff();
+            await pause(L, 380 * k);                      // the finished equation is looked at for a moment
           } else if (!hand) {
-            await sleep(120 * k);
+            await pause(L, 120 * k);
           } else {
-            await sleep(fade);
+            await pause(L, fade);
           }
         }
+      } catch (e) {
+        if (e !== STOP) throw e;                          // ended early: what is left is done in `finally`
       } finally {
-        following = false;
-        L.type.style.display = 'none';
-        L.pen.style.display = '';
+        if (current === me) current = null;
+        if (L && L.ctx === ctx) L.ctx = null;
+        ctx.stop();
         commit({});
-        for (const el of claimed) { el.style.opacity = ''; el.style.clipPath = ''; el.classList.remove('lagrange-pen-drawing'); for (const g of mathGlyphs(el)) { g.style.opacity = ''; g.style.clipPath = ''; } }
-        const fade = Math.round(300 * k);
-        const gone = hand;
-        for (const n of ink) { n.style.transition = `opacity ${fade}ms ease`; n.style.opacity = '0'; }
-        if (gone) { gone.style.transition = `opacity ${fade}ms ease`; gone.style.opacity = '0'; }
-        win.setTimeout(() => { for (const n of ink) n.remove(); if (gone) gone.remove(); }, fade + 40);
-        // The text is in full view by now (or the pen was put away): the marks on it come off.
-        try { view.dispatch({ effects: setGone.of(null) }); } catch (e) { /* the view is gone */ }
-        view.dom.classList.remove('lagrange-pen-revealing');
-        view.dom.style.removeProperty('--lagrange-pen-reveal');
-        park(L, view);
+        clear(false);
       }
+      return skipped ? { skipped } : undefined;
+    },
+    /* Ends the edit being written, at once and before it returns: its change is made in the note if it had not been
+       yet, the handwriting, the ink and the pen go, and the marks on the note come off. Returns whether there was
+       an edit to end. (The promise edit() gave resolves a moment later.) */
+    finish() {
+      const me = current;
+      if (!me) {
+        for (const L of layers.values()) putAway(L);    // a pen that was leaving goes at once
+        return false;
+      }
+      me.finish();
+      return true;
     },
     destroy() {
       destroyed = true;
+      if (current) { try { current.finish(); } catch (e) { /* the view is gone */ } }
       for (const view of views) {
         try { if (view.state.field(goneField, false) !== undefined) view.dispatch({ effects: setGone.of(null) }); } catch (e) { /* view gone */ }
       }
       views.clear();
-      for (const [doc, L] of layers) {
+      tracked.clear();
+      for (const L of layers.values()) {
         try { L.win.clearTimeout(L.idle); } catch (e) { /* window closed */ }
-        L.svg.remove();
-        for (const n of doc.querySelectorAll('.lagrange-pen-hand')) n.remove();
+        try { if (L.observer) L.observer.disconnect(); } catch (e) { /* gone */ }
+        L.sheet.remove();
       }
       layers.clear();
     },
@@ -3147,35 +3469,115 @@ function createPen(app, settings) {
 /* ---------------------------------------------------------------------------------------------------------------
  * 6. Edit runs
  *
- * A run applies one request's edits to an editor. With the pen, each edit is written in turn; meanwhile the editor is
- * locked (not editable, read-only) and no change goes into the undo history. At the end the run's changes are taken
- * back and made again in one transaction, which becomes a single undo step. Without the pen, all edits go in one
- * transaction straight away.
+ * A run applies one request's edits to an editor. With the pen, each edit is written in turn, and Lagrange's changes
+ * stay out of the undo history; at the end they are taken back and made again in one transaction, which becomes a
+ * single undo step. The editor is not locked meanwhile: a click or an editing key in the note ends the run at once
+ * (the edits still to come are all made), or, with "Let me edit while the pen writes", the writer's changes go in
+ * alongside the pen's. The view the writer watched is the view they are left with. Without the pen, all edits go in
+ * one transaction straight away.
  * ------------------------------------------------------------------------------------------------------------- */
 
-const lockCompartment = new Compartment();
 const EDIT_RECORDS = 30;   // how many runs of edits Undo and Redo remember
 
-function lockExtension(run) {
-  return [
-    EditorView.editable.of(false),
-    EditorState.readOnly.of(true),
-    EditorState.transactionExtender.of(tr => (tr.docChanged ? { annotations: Transaction.addToHistory.of(false) } : null)),
-    EditorView.updateListener.of(update => {
-      if (run.closed) return;
-      for (const tr of update.transactions) if (tr.docChanged) run.composed = run.composed.compose(tr.changes);
-    }),
-    EditorView.editorAttributes.of({ class: 'lagrange-writing' }),
-  ];
+/* The run of edits going on in each editor, and the extension that keeps its account. The editor stays editable
+   while the pen writes (a writer who clicks or types ends the run, or, with settings.editWhileWriting, writes
+   alongside the pen); the listener notes every change: run.composed is all of them since the run began, and run.undo
+   is the change that takes Lagrange's own out of the note as it now is, leaving what the writer has typed meanwhile.
+   The plugin registers the extension in every editor once (runExtension); a run never reconfigures the editor, which
+   other plugins take as a reason to scroll back to the cursor (Typewriter Mode does). */
+const activeRuns = new WeakMap();   // EditorView -> run
+const runMarker = StateField.define({ create: () => true, update: v => v });
+let runExt = null;
+const runExtension = () => runExt || (runExt = [
+  runMarker,
+  EditorView.updateListener.of(update => {
+    const run = activeRuns.get(update.view);
+    if (!run || run.closed) return;
+    for (const tr of update.transactions) {
+      if (!tr.docChanged) continue;
+      run.composed = run.composed.compose(tr.changes);
+      if (run.tap) run.tap = run.tap.compose(tr.changes);
+      if (tr.annotation(penWrite)) run.undo = tr.changes.invert(tr.startState.doc).compose(run.undo);
+      else {
+        run.undo = run.undo.map(tr.changes);
+        run.touched = true;
+        if (run.onUserChange) run.onUserChange();
+      }
+    }
+  }),
+]);
+function watchRun(view, run) {
+  // (an editor the plugin did not set up: the extension is added now, once)
+  if (view.state.field(runMarker, false) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(runExtension()) });
+  activeRuns.set(view, run);
 }
 
-function setLock(view, content) {
-  if (lockCompartment.get(view.state) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(lockCompartment.of(content)) });
-  else view.dispatch({ effects: lockCompartment.reconfigure(content) });
+/* A place in the note and where it stands in the window, so that it can be put back there after the note changes or
+   something scrolls it: {pos, top}, or null. The place is `prefer` (a position in the note) if that is on screen,
+   else the text at height y of the window (by default, a little above the middle of the editor).
+   keepInPlace(view, anchor, pos) scrolls the editor so that the character at pos is where the anchor was. */
+function scrollAnchor(view, y, prefer) {
+  try {
+    const s = view.scrollDOM.getBoundingClientRect(), c = view.contentDOM.getBoundingClientRect();
+    // (only a place in a line of text will do: inside a block the editor draws as one piece, a callout or a table,
+    // a position has no steady place on the screen)
+    const inText = pos => { const at = view.domAtPos(pos), el = at.node.nodeType === 1 ? at.node : at.node.parentElement; return Boolean(el && el.closest('.cm-line')); };
+    if (prefer != null && inText(prefer)) {
+      const p = view.coordsAtPos(prefer, 1) || view.coordsAtPos(prefer, -1);
+      if (p && p.top >= s.top && p.bottom <= s.bottom) return { pos: prefer, top: p.top };
+    }
+    for (const yy of y == null ? [0.4, 0.3, 0.5, 0.2, 0.6, 0.75, 0.1].map(f => s.top + s.height * f) : [y, y - 24, y + 24]) {
+      const pos = view.posAtCoords({ x: c.left + 12, y: yy }, false);
+      if (!inText(pos)) continue;
+      const at = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
+      if (at) return { pos, top: at.top };
+    }
+    return null;
+  } catch (e) { return null; }
+}
+function keepInPlace(view, anchor, pos) {
+  if (!anchor) return 0;
+  try {
+    const p = pos == null ? anchor.pos : pos;
+    const at = view.coordsAtPos(p, 1) || view.coordsAtPos(p, -1);
+    if (!at) return 0;
+    const d = at.top - anchor.top;
+    if (Math.abs(d) > 0.5) view.scrollDOM.scrollTop += d;
+    return d;
+  } catch (e) { return 0; }
+}
+/* Keeps the editor's view where it is for a few frames after a run ends (other plugins re-centre the cursor's line
+   when the note changes: Typewriter Mode does), until the writer scrolls, clicks or presses a key. */
+function holdView(view, anchor, frames) {
+  if (!anchor) return;
+  const win = view.dom.ownerDocument.defaultView || window, doc = view.dom.ownerDocument;
+  let left = frames || 24, on = true;
+  const off = () => { on = false; for (const t of ['wheel', 'pointerdown', 'mousedown', 'keydown', 'touchstart']) doc.removeEventListener(t, off, true); };
+  for (const t of ['wheel', 'pointerdown', 'mousedown', 'keydown', 'touchstart']) doc.addEventListener(t, off, true);
+  const step = () => {
+    if (!on || !view.dom.isConnected) { off(); return; }
+    keepInPlace(view, anchor);
+    if (--left > 0) win.requestAnimationFrame(step); else off();
+  };
+  keepInPlace(view, anchor);
+  win.requestAnimationFrame(step);
 }
 
 /* Applies located edits ({from, to, matched, replace}, in document order, offsets in the current document) to view.
-   Returns {applied, skipped, changes, docBefore}: changes is a ChangeSet from docBefore to the document after. */
+   Returns {applied, skipped, changes, docBefore, docAfter, touched, ended}: changes is a ChangeSet from docBefore to
+   docAfter, the note as the run left it. With the pen, docBefore is the note without Lagrange's edits but with
+   whatever the writer typed during the run (touched says whether they did), so `changes` is Lagrange's alone.
+
+   With the pen, while it writes:
+   - by default, a click in the note, a key that would change it, a paste, a drop or an input method ends the run at
+     once (ended: 'click' | 'key' | 'input' | 'edit'): the pen stops, the edits not yet written are all made, the run
+     becomes its one undo step, and only then does the click or the key take effect, on the note as it now is;
+   - with opts.concurrent (the setting "Let me edit while the pen writes"), the writer's changes go into the note as
+     they are made and the pen goes on: each edit still to come is carried to where its words now are (remapEdit),
+     and one whose words the writer has changed is skipped;
+   - Escape, or opts.signal, stops the run: the edits not yet written are not made.
+   opts.onDone(result), if given, is called as soon as the run's undo step is made (before a key that ended the run
+   takes effect), with {changes, docBefore, docAfter}. */
 async function runEdits(view, located, opts) {
   const applied = [];
   const skipped = [];
@@ -3183,58 +3585,129 @@ async function runEdits(view, located, opts) {
   if (!opts.pen) {
     const ok = located.filter(e => view.state.sliceDoc(e.from, e.to) === e.matched);
     for (const e of located) if (!ok.includes(e)) skipped.push(Object.assign({}, e, { why: 'the text changed' }));
-    if (!ok.length) return { applied, skipped, changes: ChangeSet.empty(docBefore.length), docBefore };
+    if (!ok.length) return { applied, skipped, changes: ChangeSet.empty(docBefore.length), docBefore, docAfter: docBefore };
     const changes = ChangeSet.of(ok.map(e => ({ from: e.from, to: e.to, insert: e.replace })), docBefore.length);
     view.dispatch({ changes, userEvent: 'lagrange.edit', scrollIntoView: true });
-    return { applied: ok, skipped, changes, docBefore };
+    return { applied: ok, skipped, changes, docBefore, docAfter: view.state.doc };
   }
 
-  const run = { composed: ChangeSet.empty(docBefore.length), closed: false, cancelled: false, spent: 0 };   // spent: see createPen
-  const doc = view.dom.ownerDocument;
-  const onKey = ev => { if (ev.key === 'Escape') run.cancelled = true; };
-  doc.addEventListener('keydown', onKey, true);
+  const run = {
+    composed: ChangeSet.empty(docBefore.length), undo: ChangeSet.empty(docBefore.length), tap: null,
+    closed: false, cancelled: false, touched: false, ended: null, spent: 0, next: 0, onUserChange: null,   // spent: see createPen
+  };
+  const doc = view.dom.ownerDocument, win = doc.defaultView || window;
+  const outcome = new Array(located.length).fill(null);    // per edit: true (made), or why it was not
+  const own = [penWrite.of(true), Transaction.addToHistory.of(false)];
+  const here = e => remapEdit(e, (p, a) => run.composed.mapPos(p, a), (a, b) => view.state.sliceDoc(a, b));
+  const changed = () => (run.touched ? 'you changed this text while the pen was writing' : 'the text changed');
+  let result = null;
+
+  /* The end of the run: Lagrange's changes are taken out (outside the history) and made again in one transaction,
+     which becomes a single undo step; the selection and the scroll position are as they were. */
+  const finalize = () => {
+    if (run.closed) return;
+    run.closed = true;
+    for (const [type, fn] of listeners) doc.removeEventListener(type, fn, true);
+    const undo = run.undo;
+    activeRuns.delete(view);
+    if (undo.empty) {
+      result = { changes: ChangeSet.empty(view.state.doc.length), docBefore: view.state.doc, docAfter: view.state.doc };
+    } else {
+      const after = view.state.doc, selection = view.state.selection;
+      const redo = undo.invert(after);
+      view.dispatch({ changes: undo, annotations: own });
+      const without = view.state.doc;
+      view.dispatch({ changes: redo, selection, userEvent: 'lagrange.edit' });
+      result = { changes: redo, docBefore: without, docAfter: view.state.doc };
+    }
+    if (opts.onDone) { try { opts.onDone(result); } catch (e) { console.error('Lagrange', e); } }
+  };
+
+  /* Ends the run at once, synchronously (it is called from the event that the writer's click or key press is):
+     the edit being written is set down, the others are made in one change, and the run is closed. The text under
+     the pointer (or, for a key, in the middle of the view) stays where it is on the screen. */
+  const finishNow = (why, y) => {
+    if (run.closed || run.ended) return;
+    run.ended = why;
+    const anchor = scrollAnchor(view, y);
+    run.tap = ChangeSet.empty(view.state.doc.length);
+    try {
+      opts.pen.finish();
+      if (!run.cancelled) {
+        const changes = [];
+        for (let i = run.next; i < located.length; i++) {
+          const at = here(located[i]);
+          if (at.skip) { outcome[i] = changed(); continue; }
+          changes.push({ from: at.from, to: at.to, insert: located[i].replace });
+          outcome[i] = true;
+        }
+        if (changes.length) view.dispatch({ changes, annotations: own });
+      }
+      run.next = located.length;
+    } catch (e) {
+      console.error('Lagrange: the run could not be finished at once', e);
+    }
+    const tap = run.tap;
+    run.tap = null;
+    finalize();
+    if (anchor) keepInPlace(view, anchor, tap.mapPos(anchor.pos, 1));
+  };
+
+  const inNote = ev => Boolean(ev.target && ev.target.nodeType && view.dom.contains(ev.target));
+  const onScrollbar = ev => {
+    if (ev.target !== view.scrollDOM || typeof ev.clientX !== 'number') return false;
+    const r = view.scrollDOM.getBoundingClientRect();
+    return ev.clientX >= r.left + view.scrollDOM.clientWidth || ev.clientY >= r.top + view.scrollDOM.clientHeight;
+  };
+  const listeners = [
+    ['keydown', ev => {
+      if (ev.key === 'Escape') { run.cancelled = true; return; }
+      if (!opts.concurrent && inNote(ev) && isEditKey(ev)) finishNow('key');
+    }],
+  ];
+  if (!opts.concurrent) {
+    const pointer = ev => { if (inNote(ev) && !onScrollbar(ev)) finishNow('click', typeof ev.clientY === 'number' && ev.clientY > 0 ? ev.clientY : null); };
+    const input = ev => { if (inNote(ev)) finishNow('input'); };
+    listeners.push(['pointerdown', pointer], ['mousedown', pointer], ['touchstart', pointer],
+      ['beforeinput', input], ['paste', input], ['cut', input], ['drop', input], ['compositionstart', input]);
+    // a change that came by none of those roads (a command, another plugin): the run ends right after it
+    run.onUserChange = () => { Promise.resolve().then(() => finishNow('edit')); };
+  }
+  for (const [type, fn] of listeners) doc.addEventListener(type, fn, true);
   if (opts.signal) opts.signal.addEventListener('abort', () => { run.cancelled = true; }, { once: true });
-  setLock(view, lockExtension(run));
+  watchRun(view, run);
   let failure = null;
   try {
-    for (const e of located) {
-      if (run.cancelled) { skipped.push(Object.assign({}, e, { why: 'stopped' })); continue; }
-      const from = run.composed.mapPos(e.from, 1);
-      const to = run.composed.mapPos(e.to, -1);
-      if (to < from || view.state.sliceDoc(from, to) !== e.matched) {
-        skipped.push(Object.assign({}, e, { why: 'the text changed' }));
-        continue;
-      }
+    while (run.next < located.length && !run.closed) {
+      const i = run.next++, e = located[i];
+      if (run.cancelled) { outcome[i] = 'stopped'; continue; }
+      const at = here(e);
+      if (at.skip) { outcome[i] = changed(); continue; }
       try {
-        // The cursor goes to the edit first, so the edit is on screen even with typewriter scrolling (Typewriter
-        // Mode keeps the cursor's line centred).
-        view.dispatch({ selection: { anchor: from }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
-        await opts.pen.edit(view, from, to, e.replace, run);
+        const res = await opts.pen.edit(view, at.from, at.to, e.replace, run);
+        outcome[i] = res && res.skipped ? res.skipped : true;
       } catch (err) {
         failure = err;
-        skipped.push(Object.assign({}, e, { why: 'the pen failed' }));
+        outcome[i] = 'the pen failed';
         break;
       }
-      applied.push(e);
     }
   } finally {
-    doc.removeEventListener('keydown', onKey, true);
-    run.closed = true;
-    const cs = run.composed;
-    if (cs.empty) {
-      setLock(view, []);
-    } else {
-      // Back to the text as it was (outside the history), then all of the run's changes as one undo step.
-      view.dispatch({ changes: cs.invert(docBefore), effects: lockCompartment.reconfigure([]), annotations: Transaction.addToHistory.of(false) });
-      view.dispatch({ changes: cs, userEvent: 'lagrange.edit' });
+    if (!run.closed) {
+      // The view the writer has watched is the view they are left with: the text last written stays where it is.
+      let last = null;
+      for (let i = located.length - 1; i >= 0 && last === null; i--) if (outcome[i] === true) last = run.composed.mapPos(located[i].from, 1);
+      const anchor = scrollAnchor(view, null, last);
+      finalize();
+      holdView(view, anchor);
     }
   }
-  if (failure) {
-    const leftover = located.slice(applied.length + skipped.length);
-    for (const e of leftover) skipped.push(Object.assign({}, e, { why: 'not attempted' }));
-    console.error('Lagrange: the pen failed', failure);
-  }
-  return { applied, skipped, changes: run.composed, docBefore, failure };
+  located.forEach((e, i) => {
+    if (outcome[i] === true) applied.push(e);
+    else skipped.push(Object.assign({}, e, { why: outcome[i] || (failure ? 'not attempted' : 'stopped') }));
+  });
+  if (failure) console.error('Lagrange: the pen failed', failure);
+  return Object.assign({ applied, skipped, failure, touched: run.touched, ended: run.ended }, result);
 }
 
 
@@ -3293,7 +3766,15 @@ class LagrangeChatView extends ItemView {
 
     this.logEl = root.createDiv({ cls: 'lagrange-log', attr: { 'aria-live': 'polite' } });
     this.logEl.addEventListener('click', ev => this.onLinkClick(ev));
-    this.logEl.addEventListener('scroll', () => { this.stick = this.isNearBottom(); });
+    // The log keeps to its bottom (the newest words, the loader) until the writer scrolls up; see stickAfterScroll.
+    this.stick = true;
+    this.lastTop = 0;
+    this.logEl.addEventListener('scroll', () => {
+      const el = this.logEl;
+      this.stick = stickAfterScroll(this.stick, this.lastTop, el.scrollTop, el.scrollHeight, el.clientHeight);
+      this.lastTop = el.scrollTop;
+    });
+    this.watchLog();
 
     const compose = root.createDiv({ cls: 'lagrange-compose' });
     this.inputEl = compose.createEl('textarea', {
@@ -3359,8 +3840,8 @@ class LagrangeChatView extends ItemView {
     this.modelEl.empty();
     this.modelEl.createSpan({ cls: 'lagrange-model-name', text: footLabel(s) });
     this.modelEl.createSpan({ cls: 'lagrange-model-caret', text: '▾', attr: { 'aria-hidden': 'true' } });
+    // (a name for assistive technology only: the styles keep Obsidian from showing aria-labels as bubbles, --no-tooltip)
     this.modelEl.setAttribute('aria-label', `Model: ${footLabel(s)}. Change the model or the effort`);
-    this.modelEl.setAttribute('title', 'Change the model or the effort');
   }
 
   /* The picker: a small sheet over the footer with the current provider's models (and a field to type another), and
@@ -3514,8 +3995,30 @@ class LagrangeChatView extends ItemView {
     return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   }
 
+  /* To the bottom of the log, if the writer is keeping to it (or force: they have just sent a message, which takes
+     hold of the bottom again). */
   scrollDown(force) {
-    if (force || this.stick) this.logEl.scrollTop = this.logEl.scrollHeight;
+    if (force) this.stick = true;
+    if (!this.stick) return;
+    const el = this.logEl;
+    el.scrollTop = el.scrollHeight;
+    this.lastTop = el.scrollTop;
+  }
+
+  /* Whatever is added to the log or grows in it (the loader's plate, a caption, a reply as it streams, a picture that
+     loads, the panel being resized) keeps the bottom in view while the writer is keeping to it. */
+  watchLog() {
+    const el = this.logEl, win = el.ownerDocument.defaultView || window;
+    const follow = () => this.scrollDown();
+    try {
+      const grown = new win.ResizeObserver(follow);
+      grown.observe(el);
+      const watchKids = () => { for (const k of el.children) grown.observe(k); };
+      const added = new win.MutationObserver(() => { watchKids(); follow(); });
+      added.observe(el, { childList: true, subtree: true, characterData: true });
+      watchKids();
+      this.register(() => { grown.disconnect(); added.disconnect(); });
+    } catch (e) { /* the log is scrolled where its content is added instead */ }
   }
 
   clear() {
@@ -3627,6 +4130,7 @@ class LagrangeChatView extends ItemView {
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--reply' });
     const body = el.createDiv({ cls: 'lagrange-turn-body markdown-rendered' });
     let loader = mountLoader(body.createDiv({ cls: 'lagrange-loader-slot' }), this.plugin.settings.loaderTheme);
+    this.scrollDown();
     let md = '', shown = null, timer = null, comp = null, status = null;
     const render = () => {
       timer = null;
@@ -3709,6 +4213,7 @@ class LagrangeChatView extends ItemView {
     }
     this.history.push({ role: 'user', content: text });
     const reply = this.addReply(note && note.path);
+    this.scrollDown(true);       // the loader has just come in under the message: it is in view
     const controller = new AbortController();
     this.setPending({ controller });
     const settings = this.plugin.settings;
@@ -3721,7 +4226,7 @@ class LagrangeChatView extends ItemView {
       if (part.blocks.length) reply.status('Taking up the pen…');
       return part.text;
     };
-    let partial = '', raw = '';
+    let partial = '', raw = '', ran = null;
     try {
       const res = await complete(settings, {
         purpose: 'chat',
@@ -3740,7 +4245,7 @@ class LagrangeChatView extends ItemView {
       if (res.text && res.stopReason !== 'refusal') this.history.push({ role: 'assistant', content: res.text });
       else this.history.pop();
       if (editing) {
-        await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
+        ran = await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
       } else if (parsed.error) {
         reply.note(`Lagrange meant to edit the note, but its edits could not be read. ${parsed.error}` +
           `${res.stopReason === 'max_tokens' ? ' (The reply reached its length limit.)' : ''} Nothing was changed; ask again.`, 'is-warn');
@@ -3772,8 +4277,10 @@ class LagrangeChatView extends ItemView {
       // oldest checkpoints give up their copies of the note.
       if (checkpoint.path && this.checkpoints.includes(checkpoint)) {
         try {
-          const now = await this.plugin.noteText(checkpoint.path);
+          // (what the run itself left, if there was one: a key that ended the run has changed the note since)
+          const now = ran && ran.docAfter ? ran.docAfter.toString() : await this.plugin.noteText(checkpoint.path);
           checkpoint.after = now === null || now === checkpoint.before ? null : now;
+          checkpoint.userTyped = Boolean(ran && ran.touched);
         } catch (e) { /* the note is gone: nothing to remember */ }
       }
       for (const cp of pruneCheckpoints(this.checkpoints, CHECKPOINTS_KEPT, CHECKPOINT_CHARS)) this.labelRewind(cp);
@@ -4180,18 +4687,33 @@ class LagrangeSettingTab extends PluginSettingTab {
       .setDesc('Write each edit with a pen: strike the old text, write the new, then set it in the note. Off: edits ' +
         'are applied at once. Either way, one undo takes back all the edits of a request.')
       .addToggle(t => t.setValue(s.showPen).onChange(async v => { s.showPen = v; await save(true); }));
-    new Setting(containerEl)
+    // (a slider's value is shown beside it, not in a bubble over it)
+    const valued = (setting, value, show) => {
+      const el = setting.controlEl.createSpan({ cls: 'lagrange-slider-value', text: show(value) });
+      return v => el.setText(show(v));
+    };
+    const speed = new Setting(containerEl)
       .setName('Pen speed')
-      .setDesc('From unhurried (0.5) to brisk (3).')
-      .addSlider(sl => sl.setLimits(0.5, 3, 0.25).setValue(s.penSpeed).setDynamicTooltip()
-        .onChange(async v => { s.penSpeed = v; await save(); }))
+      .setDesc('From unhurried (0.5) to brisk (3).');
+    const showSpeed = valued(speed, s.penSpeed, v => `${v}×`);
+    speed.addSlider(sl => sl.setLimits(0.5, 3, 0.25).setValue(s.penSpeed)
+      .onChange(async v => { s.penSpeed = v; showSpeed(v); await save(); }))
       .setDisabled(!s.showPen);
-    new Setting(containerEl)
+    const lines = new Setting(containerEl)
       .setName('Lines the pen writes')
       .setDesc('A long edit is written out for this many lines of the page, then the rest is set down at once; a shorter ' +
-        'edit is written in full. In a run of many edits, later ones get a single line once the writing has taken about ten seconds.')
-      .addSlider(sl => sl.setLimits(1, 8, 1).setValue(s.penLines).setDynamicTooltip()
-        .onChange(async v => { s.penLines = v; await save(); }))
+        'edit is written in full. In a run of many edits, later ones get a single line once the writing has taken about ten seconds.');
+    const showLines = valued(lines, s.penLines, v => String(v));
+    lines.addSlider(sl => sl.setLimits(1, 8, 1).setValue(s.penLines)
+      .onChange(async v => { s.penLines = v; showLines(v); await save(); }))
+      .setDisabled(!s.showPen);
+    new Setting(containerEl)
+      .setName('Let me edit while the pen writes')
+      .setDesc('Off: a click in the note, or a key that would change it, ends the pen’s animation: the rest of its edits ' +
+        'are set down at once, and then your click or key takes effect. On: the pen goes on writing while you edit ' +
+        'elsewhere in the note; an edit whose words you have changed meanwhile is skipped, and the chat says so. ' +
+        'Either way, Esc stops the pen, and scrolling never does.')
+      .addToggle(t => t.setValue(s.editWhileWriting).onChange(async v => { s.editWhileWriting = v; await save(); }))
       .setDisabled(!s.showPen);
     new Setting(containerEl)
       .setName('Ink trail')
@@ -4212,7 +4734,8 @@ class LagrangePlugin extends Plugin {
     this.pen = createPen(this.app, this.settings);
 
     this.registerEditorExtension([
-      lockCompartment.of([]),
+      runExtension(),
+      this.pen.extension,
       EditorView.updateListener.of(update => this.trackEdits(update)),
     ]);
     this.registerView(VIEW_TYPE, leaf => new LagrangeChatView(leaf, this));
@@ -4327,7 +4850,7 @@ class LagrangePlugin extends Plugin {
     // The note has moved on: runs taken back before this one can no longer be made again.
     for (const r of this.edits) if (r.view === cm && r.undone && r.redo) { r.redo = null; this.announce(r); }
     const record = {
-      view: cm, editor, path, clock: ++this.editClock, docBefore: result.docBefore, docAfter: cm.state.doc,
+      view: cm, editor, path, clock: ++this.editClock, docBefore: result.docBefore, docAfter: result.docAfter || cm.state.doc,
       inverse: result.changes.invert(result.docBefore), since: ChangeSet.empty(cm.state.doc.length),
       viaHistory: false, undone: false, redo: null, sinceUndo: null, redoStale: false, byHistory: false, undoneAt: 0,
       expecting: null, listeners: [],
@@ -4483,16 +5006,23 @@ class LagrangePlugin extends Plugin {
   /* Applies edits that were located in the editor's current text; reports in the chat (if open) and in a notice. */
   async applyEdits(view, located, skippedBefore, task, signal) {
     const cm = view.editor && view.editor.cm;
-    let result;
+    let result, record = null;
     if (!cm) {
       // No CodeMirror 6 view (should not happen in current Obsidian): apply everything at once through the Editor API.
       const ed = view.editor;
       ed.transaction({ changes: located.map(e => ({ from: ed.offsetToPos(e.from), to: ed.offsetToPos(e.to), text: e.replace })) });
       result = { applied: located, skipped: [] };
     } else {
-      const writing = this.settings.showPen ? new Notice('Lagrange is writing… (Esc to stop)', 0) : null;
+      const concurrent = Boolean(this.settings.editWhileWriting);
+      const writing = this.settings.showPen
+        ? new Notice(concurrent ? 'Lagrange is writing… (Esc to stop)' : 'Lagrange is writing… (Esc to stop; click or type in the note to have it all at once)', 0)
+        : null;
       try {
-        result = await runEdits(cm, located, { pen: this.settings.showPen ? this.pen : null, signal });
+        // The run is recorded for Undo and Redo the moment it closes: a key press that ended it comes after.
+        result = await runEdits(cm, located, {
+          pen: this.settings.showPen ? this.pen : null, signal, concurrent,
+          onDone: res => { if (res.changes && !res.changes.empty) record = this.recordEdit(cm, view.editor, view.file ? view.file.path : null, res); },
+        });
       } finally {
         if (writing) writing.hide();
       }
@@ -4500,11 +5030,10 @@ class LagrangePlugin extends Plugin {
         this.pen.destroy();
         this.pen = createPen(this.app, this.settings);
       }
-      if (this.app.workspace.getActiveViewOfType(MarkdownView) === view) cm.focus();
+      if (this.app.workspace.getActiveViewOfType(MarkdownView) === view && !cm.hasFocus) cm.focus();
     }
     const skipped = skippedBefore.concat(result.skipped);
-    let record = null;
-    if (cm && result.applied.length && result.changes && !result.changes.empty) {
+    if (cm && !record && result.applied.length && result.changes && !result.changes.empty) {
       record = this.recordEdit(cm, view.editor, view.file ? view.file.path : null, result);
     }
     const onUndo = record ? () => this.undoEdit(record) : null;
@@ -4550,12 +5079,13 @@ class LagrangePlugin extends Plugin {
       const { located, skipped } = locateOps(docText, parsed.ops);
       if (parsed.error) reply.note(`Some of the edits could not be read. ${parsed.error}`, 'is-warn');
       if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
-      await this.applyEdits(view, located, skipped, task, signal);
+      return await this.applyEdits(view, located, skipped, task, signal);
     } catch (err) {
       this.reportFailure(err, task);
     } finally {
       this.editing = false;
     }
+    return null;
   }
 
   chatView() {
@@ -4760,7 +5290,7 @@ LagrangePlugin.internals = {
   LOADER_THEMES, LOADER_CAPTIONS, EFFORTS, CLAUDE_CODE_MODELS, effortSupported, effortFor, modelChoices, setModel, footLabel, modelLabel,
   rewindTo, userChangedSince, pruneCheckpoints, spliceChange, undoTarget, redoTarget, CHECKPOINTS_KEPT, CHECKPOINT_CHARS,
   splitAgentReply, parseAgentReply, locateOps, demoChatEdits, mathSegments, mathSource, looksLikeMath, hasMath, hasCode, typeCadence, penScript, renderPenMath, trailBands,
-  equationPlan, repairJsonLatex, inkOffset, penLines, penPace, PEN_RUN_MS,
+  equationPlan, repairJsonLatex, inkOffset, penLines, penPace, PEN_RUN_MS, wordCut, lineStarts, isEditKey, mapOffset, remapEdit, stickAfterScroll,
   createSSEParser, jsonValuesIn, parseEdits, findAll, looseFindAll, locateEdits, clipText, cleanRevision,
   parseErrorBody, describeError, noteStats, excerpt, demoProofreadEdits, demoRevise, demoChatReply,
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,

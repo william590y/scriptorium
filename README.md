@@ -163,6 +163,15 @@ the rest is set down at once. An equation is drawn symbol by symbol where the no
 it comes, and code (a fenced block, or a code span) is typed on a small typewriter that takes the pen's place. The
 edits are then listed in the chat with their reasons.
 
+**While the pen writes.** The handwriting is on the page itself: scroll the note, resize the pane or zoom, and it
+stays on its words. When the pen has finished, the note is where you were looking; nothing scrolls. If you click in
+the note, or press a key that would change it, the pen stops at once: the rest of its edits are set down together
+(the note is exactly as it would have been, and it is still one undo step), and then your click or key takes effect.
+If you would rather write alongside it, turn on **Settings → Lagrange → Let me edit while the pen writes**: your
+typing goes in as you type, the pen carries on, and an edit whose words you have changed in the meantime is skipped
+and listed as such in the chat. **Esc** stops the pen either way (edits not yet written are not made). The chat keeps
+to its newest line while Lagrange thinks and writes, unless you scroll up.
+
 **Undo and redo.** One **Undo** in the editor takes back all the edits of a request. The two arrows at the head of the
 chat do the same for Lagrange's edits only: **Undo** takes back its latest run of edits and **Redo** makes it again,
 run by run, and each run in the chat has its own **Undo Lagrange's edits** button. If you have typed in the note
