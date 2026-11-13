@@ -325,6 +325,37 @@ test('drive: finding Claude Code and the Google Drive connector', async () => {
   assert.ok(r.steps.some(s => /Connectors/.test(s)));
 });
 
+test('drive: the check says what it saw, for the diagnostic report, and stops a Claude Code that does not answer', async () => {
+  const seen = {};
+  const cli = {
+    findCli: () => 'C:\\Users\\Ada\\.local\\bin\\claude.exe',
+    runCli: async (which, exe, args, input, onLine) => {
+      for (const l of (args[0] === 'auth' ? '{"loggedIn": true, "authMethod": "claude.ai"}' : 'claude.ai Google Drive: https://drivemcp.googleapis.com/mcp/v1 - ! Needs authentication').split('\n')) onLine(l);
+      return { code: 0, stderr: '' };
+    },
+  };
+  const r = await S.driveCheck(cli, '', seen);
+  assert.equal(r.ok, false);
+  assert.deepEqual(seen, { exe: 'C:\\Users\\Ada\\.local\\bin\\claude.exe', auth: 'claude.ai', connector: 'claude.ai Google Drive: - ! Needs authentication' });
+  // Not found, with no path set: where it was looked for, and where to say where it is.
+  const none = await S.driveCheck({ findCli: () => null }, '');
+  assert.match(none.problem, /not found on this computer.*Lagrange’s settings/);
+  // A Claude Code that hangs is stopped, and the command to try by hand is named.
+  const limit = S.DRIVE_LIMITS.checkMs;
+  S.DRIVE_LIMITS.checkMs = 30;
+  try {
+    const hung = {
+      findCli: () => '/bin/claude',
+      runCli: (which, exe, args, input, onLine, hooks) => new Promise((resolve, reject) => hooks.signal.addEventListener('abort', () => { const e = new Error('Stopped.'); e.name = 'AbortError'; reject(e); })),
+    };
+    const h = await S.driveCheck(hung, '');
+    assert.equal(h.ok, false);
+    assert.match(h.problem, /did not answer within 0 seconds \(“claude auth status”\)/);
+  } finally {
+    S.DRIVE_LIMITS.checkMs = limit;
+  }
+});
+
 /* ---------- whole backups against the pretend Drive ---------- */
 
 test('drive: a first backup sends the notes and Scriptorium\'s settings, and nothing private', async t => {
