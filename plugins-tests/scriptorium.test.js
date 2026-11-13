@@ -682,3 +682,36 @@ test('sets of drop caps: the snippet draws an image where the initial would be, 
   assert.match(css, /scriptorium-dropcap-inked\.scriptorium-dropcap-image\.scriptorium-dropcap-mono > p::before \{[\s\S]{0,900}mask-composite: intersect/, 'the pen’s edge and the image’s own mask both hold');
   assert.doesNotMatch(css.replace(/@media \(prefers-reduced-motion: no-preference\) \{[\s\S]*?\n\}\n/g, ''), /animation: scriptorium-(ink|uncover)/, 'no animation outside that media query');
 });
+
+/* ---------- a family whose upright face is missing ---------- */
+
+/* A letter I as ink in an RGBA image: a stem 14 px wide from row 30 to row 170, leaning by `lean` (run over rise). */
+function stem(lean) {
+  const width = 240, height = 200, data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 30; y < 170; y++) {
+    const x0 = Math.round(100 + (170 - y) * lean);
+    for (let x = x0; x < x0 + 14; x++) data[(y * width + x) * 4 + 3] = 255;
+  }
+  return { data, width, height };
+}
+
+test('the lean of a drawn letter tells an upright face from an italic one', () => {
+  const up = stem(0), italic = stem(0.21), back = stem(-0.2);
+  assert.ok(Math.abs(S.inkSlant(up.data, up.width, up.height)) < 0.01);
+  assert.ok(Math.abs(S.inkSlant(italic.data, italic.width, italic.height) - 0.21) < 0.03);
+  assert.ok(S.inkSlant(back.data, back.width, back.height) < -0.15);
+  assert.equal(S.inkSlant(new Uint8ClampedArray(240 * 200 * 4), 240, 200), null, 'no ink, no answer');
+});
+
+test('a family that is there but draws upright text leaning is reported; a family that is not there is not', () => {
+  // A pretend canvas: `installed` families measure differently from the fallback, and `leaning` ones draw the I leaning.
+  const doc = (installed, leaning) => ({ createElement: () => ({ getContext: () => {
+    const g = { font: '', measureText: () => ({ width: installed.some(f => g.font.includes(`"${f}"`)) ? 500 : 700 }), clearRect() {}, fillText() {},
+      getImageData: () => stem(leaning.some(f => g.font.includes(`"${f}"`)) ? 0.2 : 0) };
+    return g;
+  } }) });
+  assert.equal(S.uprightMissing(doc(['Cormorant Garamond'], ['Cormorant Garamond']), 'Cormorant Garamond'), true);
+  assert.equal(S.uprightMissing(doc(['Cormorant Garamond'], []), 'Cormorant Garamond'), false);
+  assert.equal(S.uprightMissing(doc([], []), 'Cormorant Garamond'), null, 'not installed at all: nothing to say');
+  assert.equal(S.uprightMissing({ createElement: () => { throw new Error('no canvas'); } }, 'EB Garamond'), null);
+});

@@ -69,6 +69,20 @@ namespace ScriptoriumSetup
         [STAThread]
         static int Main(string[] args)
         {
+            // For the tests: --font-root <folder> is a pretend Windows for the fonts; --font-source <folder> has the font
+            // files, so that none is downloaded. Both may go with any other command.
+            for (int i = 0; i + 1 < args.Length; )
+            {
+                if (args[i] == "--font-root" || args[i] == "--font-source")
+                {
+                    if (args[i] == "--font-root") Fonts.FakeRoot = Path.GetFullPath(args[i + 1]); else Fonts.Source = Path.GetFullPath(args[i + 1]);
+                    args = args.Take(i).Concat(args.Skip(i + 2)).ToArray();
+                }
+                else i++;
+            }
+            // Headless, for support: the state of each of the four font faces (--check-fonts), and putting them right
+            // (--repair-fonts). Exit code 0 if all four are in order at the end.
+            if (args.Length == 1 && (args[0] == "--check-fonts" || args[0] == "--repair-fonts")) return Fonts.Cli(args[0] == "--repair-fonts");
             // Headless check used by the build script: unpack the embedded vault into a new (or empty) folder and exit.
             if (args.Length == 2 && args[0] == "--extract-only")
             {
@@ -84,6 +98,7 @@ namespace ScriptoriumSetup
                     if (Vaults.Classify(vault) != Vaults.Target.Vault) throw new InvalidOperationException("This folder is not a Scriptorium vault: " + vault);
                     Vaults.Report report = Vaults.Update(vault, null, Console.WriteLine);
                     Console.WriteLine(Vaults.UpdatedMessage(vault, report));
+                    Fonts.Headless(Console.WriteLine);
                     return 0;
                 }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
@@ -106,6 +121,7 @@ namespace ScriptoriumSetup
                     }
                     Vaults.Report report = Vaults.SetUp(vault, null, Console.WriteLine);
                     Console.WriteLine(Vaults.SetUpMessage(vault, report));
+                    Fonts.Headless(Console.WriteLine);
                     return 0;
                 }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
@@ -407,40 +423,497 @@ namespace ScriptoriumSetup
         }
 
         // ---------- fonts ----------
-        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
-        static extern int AddFontResourceEx(string path, uint flags, IntPtr reserved);
+        // (Checking and installing the fonts, face by face, is the class Fonts below.)
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
-
-        public static bool FontFamilyInstalled(string family)
-        {
-            using (var fonts = new InstalledFontCollection())
-                return fonts.Families.Any(f => string.Equals(f.Name, family, StringComparison.OrdinalIgnoreCase));
-        }
-
-        // Per-user font install (no administrator rights needed, Windows 10 1809 and later).
-        public static void InstallFont(Pinned font, string downloaded)
-        {
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Microsoft\Windows\Fonts");
-            string target = Path.Combine(dir, font.File);
-            if (File.Exists(target))
-            {
-                if (Sha256(target) != font.Sha256) throw new InvalidOperationException("A different font file is already installed at " + target);
-            }
-            else
-            {
-                Directory.CreateDirectory(dir);
-                File.Copy(downloaded, target);
-            }
-            using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows NT\CurrentVersion\Fonts"))
-                k.SetValue(font.Label, target, RegistryValueKind.String);
-            if (AddFontResourceEx(target, 0, IntPtr.Zero) == 0) throw new InvalidOperationException("Windows could not load the font " + target);
-        }
 
         public static void AnnounceFontChange()
         {
             UIntPtr result;
             SendMessageTimeout((IntPtr)0xffff, 0x001D /* WM_FONTCHANGE */, UIntPtr.Zero, IntPtr.Zero, 2 /* SMTO_ABORTIFHUNG */, 5000, out result);
+        }
+    }
+
+    // ---------- the fonts, face by face ----------
+    // The typography needs four faces: EB Garamond and Cormorant Garamond, each upright and italic. They are checked and
+    // repaired one face at a time. A family with only its italic registered shows every heading in italics (Windows
+    // gives the italic when asked for the upright), and a check by family name calls that "already installed".
+    // A face is in order only if (a) a Fonts registry value, the user's or the machine's, names a file that exists and
+    // is that face (Scriptorium's own file with the pinned SHA-256, or any font file whose name table says so: the
+    // user's own copy), and (b) Windows lists the family with that style. Everything else needs repair.
+    // What is touched is behind ISystem, so that the logic runs in the tests on any system (--font-root <folder>).
+    static class Fonts
+    {
+        public sealed class Face
+        {
+            public readonly string Family; public readonly bool Italic; public readonly Pinned Pin;
+            public Face(string family, bool italic, Pinned pin) { Family = family; Italic = italic; Pin = pin; }
+            public string Name { get { return Family + (Italic ? " italic" : " upright"); } }
+            // The registry value Scriptorium writes: its own name, so that another program that installs or removes
+            // "Cormorant Garamond Regular (TrueType)" does not write over it or take it away.
+            public string ValueName { get { return "Scriptorium " + Family + (Italic ? " Italic" : " Regular") + " (TrueType)"; } }
+            public string LegacyValueName { get { return Pin.Label; } }   // what Scriptorium 1.2.3 and earlier wrote
+        }
+
+        // The order matters: the upright face of a family comes before its italic.
+        public static readonly Face[] Faces = {
+            new Face("EB Garamond", false, Installer.EbGaramond[0]), new Face("EB Garamond", true, Installer.EbGaramond[1]),
+            new Face("Cormorant Garamond", false, Installer.Cormorant[0]), new Face("Cormorant Garamond", true, Installer.Cormorant[1]),
+        };
+
+        public enum Problem { None, NotInstalled, FileMissing, FileDiffers, NotRegistered, NotListed }
+
+        public sealed class State
+        {
+            public Face Face; public Problem Problem; public string Path;
+            public bool Ok { get { return Problem == Problem.None; } }
+            public string Says
+            {
+                get
+                {
+                    switch (Problem)
+                    {
+                        case Problem.None: return "installed";
+                        case Problem.NotInstalled: return "not installed";
+                        case Problem.FileMissing: return "registered with Windows, but its file is gone";
+                        case Problem.FileDiffers: return "its file is damaged, or is another font";
+                        case Problem.NotRegistered: return "its file is there, but it is not registered with Windows";
+                        default: return "registered, but Windows does not list it";
+                    }
+                }
+            }
+        }
+
+        public sealed class Registered { public bool Machine; public string Name, Path; }
+        public sealed class Identity { public string Family; public bool Italic; }
+
+        public interface ISystem
+        {
+            string FontDir { get; }
+            List<Registered> Registry();                 // the Fonts values of the user and of the machine, paths resolved
+            bool Exists(string path);
+            string Hash(string path);
+            Identity Identify(string path);              // what the font file says it is, or null
+            bool[] Styles(string family);                // { upright listed, italic listed }
+            void Copy(string from, string to);           // throws IOException if the target is in use
+            void SetValue(string name, string path);     // in the user's Fonts key
+            void DeleteValue(string name);
+            bool Load(string path);                      // AddFontResourceEx
+            void Announce();                             // WM_FONTCHANGE to every window
+        }
+
+        // --font-root <folder>: a pretend Windows kept in that folder (the tests). --font-source <folder>: take the font
+        // files from there instead of downloading them (they are checked against the pinned SHA-256 all the same).
+        public static string FakeRoot, Source;
+        public static ISystem Current { get { return FakeRoot != null ? (ISystem)new FakeSystem(FakeRoot) : Installer.IsWindows ? new WindowsSystem() : null; } }
+
+        static bool SamePath(string a, string b)
+        {
+            try { return string.Equals(Path.GetFullPath(a).TrimEnd('\\', '/'), Path.GetFullPath(b).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase); }
+            catch { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+        }
+
+        static bool Is(Identity id, Face face)
+        {
+            return id != null && id.Italic == face.Italic && id.Family != null &&
+                   (string.Equals(id.Family, face.Family, StringComparison.OrdinalIgnoreCase) || id.Family.StartsWith(face.Family + " ", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Only values that could be one of our families are opened and read: a computer has hundreds of fonts.
+        static bool Candidate(Registered r)
+        {
+            string both = (r.Name + " " + Path.GetFileName(r.Path)).Replace(" ", "").Replace("-", "").Replace("_", "");
+            return both.IndexOf("garamond", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static State[] Check(ISystem s)
+        {
+            List<Registered> registry = s.Registry().Where(Candidate).ToList();
+            var identities = new Dictionary<string, Identity>(StringComparer.OrdinalIgnoreCase);
+            var styles = new Dictionary<string, bool[]>();
+            var states = new List<State>();
+            foreach (Face face in Faces)
+            {
+                string target = Path.Combine(s.FontDir, face.Pin.File);
+                string good = null; bool stale = false;
+                foreach (Registered r in registry)
+                {
+                    if (!s.Exists(r.Path))
+                    {
+                        if (SamePath(r.Path, target) || r.Name == face.ValueName || r.Name == face.LegacyValueName) stale = true;
+                        continue;
+                    }
+                    Identity id;
+                    if (!identities.TryGetValue(r.Path, out id)) { try { id = s.Identify(r.Path); } catch { id = null; } identities[r.Path] = id; }
+                    if (Is(id, face) || (SamePath(r.Path, target) && s.Hash(target) == face.Pin.Sha256)) { good = r.Path; break; }
+                }
+                if (!styles.ContainsKey(face.Family)) styles[face.Family] = s.Styles(face.Family);
+                bool listed = styles[face.Family][face.Italic ? 1 : 0];
+                var st = new State { Face = face, Path = good ?? target };
+                if (good != null) st.Problem = listed ? Problem.None : Problem.NotListed;
+                else if (!s.Exists(target)) st.Problem = stale ? Problem.FileMissing : Problem.NotInstalled;
+                else if (s.Hash(target) != face.Pin.Sha256) st.Problem = Problem.FileDiffers;
+                else st.Problem = Problem.NotRegistered;
+                states.Add(st);
+            }
+            return states.ToArray();
+        }
+
+        public static bool AllOk(State[] states) { return states.All(st => st.Ok); }
+
+        // For --check-fonts and the log: one line a face.
+        public static IEnumerable<string> Lines(State[] states)
+        {
+            foreach (State st in states) yield return (st.Ok ? "ok      " : "REPAIR  ") + st.Face.Name + ": " + st.Says + (st.Problem != Problem.NotInstalled ? " (" + st.Path + ")" : "");
+        }
+
+        static string Join(IList<string> items)
+        {
+            if (items.Count <= 1) return string.Concat(items);
+            return string.Join(", ", items.Take(items.Count - 1)) + " and " + items[items.Count - 1];
+        }
+
+        // What the checkbox says. null: all four faces are in order.
+        public static string Offer(State[] states)
+        {
+            if (AllOk(states)) return null;
+            if (states.All(st => st.Problem == Problem.NotInstalled)) return "Install the fonts it uses for me (EB Garamond, Cormorant Garamond)";
+            List<State> bad = states.Where(st => !st.Ok).ToList();
+            bool missing = bad.All(st => st.Problem == Problem.NotInstalled || st.Problem == Problem.NotRegistered || st.Problem == Problem.FileMissing);
+            return "Repair the fonts (" + Join(bad.Select(st => st.Face.Name).ToList()) + (bad.Count == 1 ? " is " : " are ") + (missing ? "missing" : "not in order") + ")";
+        }
+
+        public sealed class Outcome
+        {
+            public State[] After; public readonly List<string> Repaired = new List<string>(), Failed = new List<string>();
+            public bool Ok { get { return AllOk(After); } }
+        }
+
+        // Puts right whatever Check finds wrong, and looks again. fetch gives a verified copy of a face's file. A family's
+        // upright face is always done first, and if it cannot be put right its italic is not installed either: an italic
+        // alone is the fault this is here to mend. Never throws for a face: what could not be done is in Failed.
+        public static Outcome Repair(ISystem s, Func<Face, string> fetch, Action<string> log)
+        {
+            if (log == null) log = line => { };
+            var outcome = new Outcome();
+            State[] before = Check(s);
+            bool changed = false;
+            var uprightFailed = new HashSet<string>();
+            for (int i = 0; i < Faces.Length; i++)
+            {
+                Face face = Faces[i]; State st = before[i];
+                if (st.Ok) continue;
+                if (face.Italic && uprightFailed.Contains(face.Family))
+                {
+                    outcome.Failed.Add(face.Name + ": left as it was, because the upright face could not be installed");
+                    continue;
+                }
+                try
+                {
+                    string target = Path.Combine(s.FontDir, face.Pin.File);
+                    if (st.Problem == Problem.NotListed)
+                    {
+                        if (!s.Load(st.Path)) throw new InvalidOperationException("Windows could not load " + st.Path + ". Sign out of Windows and in again, then run Scriptorium Setup once more.");
+                    }
+                    else
+                    {
+                        if (!s.Exists(target) || s.Hash(target) != face.Pin.Sha256)
+                        {
+                            string file = fetch(face);
+                            try { s.Copy(file, target); }
+                            catch (Exception e)
+                            {
+                                if (!(e is IOException) && !(e is UnauthorizedAccessException)) throw;
+                                throw new InvalidOperationException("its file is in use and could not be replaced (" + target + "). Close Obsidian and any other program that shows this font, then run Scriptorium Setup again.");
+                            }
+                        }
+                        s.SetValue(face.ValueName, target);
+                        foreach (Registered r in s.Registry())
+                            if (!r.Machine && r.Name == face.LegacyValueName && SamePath(r.Path, target)) s.DeleteValue(r.Name);
+                        if (!s.Load(target)) throw new InvalidOperationException("Windows could not load " + target + ". Sign out of Windows and in again, then run Scriptorium Setup once more.");
+                    }
+                    changed = true;
+                    outcome.Repaired.Add(face.Name);
+                    log((st.Problem == Problem.NotInstalled ? "Installed " : "Repaired ") + face.Name + (st.Problem == Problem.NotInstalled ? "" : " (it was: " + st.Says + ")"));
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception e)
+                {
+                    if (!face.Italic) uprightFailed.Add(face.Family);
+                    outcome.Failed.Add(face.Name + ": " + e.Message);
+                    log("Could not " + (st.Problem == Problem.NotInstalled ? "install " : "repair ") + face.Name + ": " + e.Message);
+                }
+            }
+            if (changed) s.Announce();
+            outcome.After = Check(s);
+            for (int i = 0; i < Faces.Length; i++)
+            {
+                State st = outcome.After[i];
+                if (st.Ok || outcome.Failed.Any(f => f.StartsWith(st.Face.Name + ":", StringComparison.Ordinal))) continue;
+                outcome.Repaired.Remove(st.Face.Name);
+                outcome.Failed.Add(st.Face.Name + ": still " + st.Says);
+                log("After the repair, " + st.Face.Name + " is still " + st.Says);
+            }
+            return outcome;
+        }
+
+        // A face's file from --font-source, or downloaded; either way with the pinned SHA-256.
+        public static string Fetch(Face face, string temp, Action<long, long> progress, CancellationToken cancel)
+        {
+            if (Source != null)
+            {
+                string given = Path.Combine(Source, face.Pin.File);
+                if (!File.Exists(given)) throw new InvalidOperationException("no " + face.Pin.File + " in " + Source);
+                if (Installer.Sha256(given) != face.Pin.Sha256) throw new InvalidOperationException(given + " is not the pinned " + face.Pin.Label);
+                return given;
+            }
+            string file = Path.Combine(temp, face.Pin.File);
+            Installer.Download(face.Pin, file, progress, cancel);
+            return file;
+        }
+
+        // What Setup says after a repair, in one or two sentences.
+        public static string Report(Outcome o)
+        {
+            var parts = new List<string>();
+            if (o.Repaired.Count > 0) parts.Add("Fonts put right: " + Join(o.Repaired) + ".");
+            if (o.Failed.Count > 0) parts.Add("Fonts NOT put right: " + string.Join("; ", o.Failed) + ".");
+            if (parts.Count == 0) parts.Add("The fonts were in order already.");
+            return string.Join(" ", parts);
+        }
+
+        // --check-fonts and --repair-fonts: the state of each face, for support. Exit code 0 if all four are in order.
+        public static int Cli(bool repair)
+        {
+            ISystem s = Current;
+            if (s == null) { Console.Error.WriteLine("FAILED: the fonts can be checked on Windows only"); return 2; }
+            State[] states = Check(s);
+            Console.WriteLine("Fonts folder: " + s.FontDir);
+            foreach (string line in Lines(states)) Console.WriteLine(line);
+            if (!repair || AllOk(states)) { Console.WriteLine(AllOk(states) ? "All four faces are in order." : "Needs repair: run Scriptorium-Setup.exe --repair-fonts, or Scriptorium Setup itself."); return AllOk(states) ? 0 : 1; }
+            string temp = Path.Combine(Path.GetTempPath(), "scriptorium-fonts-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                Outcome o = Repair(s, f => Fetch(f, temp, null, CancellationToken.None), Console.WriteLine);
+                Console.WriteLine("After the repair:");
+                foreach (string line in Lines(o.After)) Console.WriteLine(line);
+                Console.WriteLine(Report(o));
+                return o.Ok ? 0 : 1;
+            }
+            catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
+            finally { try { Directory.Delete(temp, true); } catch { } }
+        }
+
+        // The headless update and set-up look at the fonts too, and repair them, as the window does (unless
+        // SCRIPTORIUM_NO_FONTS is set: the tests, which must not need the network).
+        public static void Headless(Action<string> log)
+        {
+            ISystem s = Current;
+            if (s == null || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SCRIPTORIUM_NO_FONTS"))) return;
+            try
+            {
+                if (AllOk(Check(s))) return;
+                string temp = Path.Combine(Path.GetTempPath(), "scriptorium-fonts-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(temp);
+                try { log(Report(Repair(s, f => Fetch(f, temp, null, CancellationToken.None), log))); }
+                finally { try { Directory.Delete(temp, true); } catch { } }
+            }
+            catch (Exception e) { log("The fonts could not be checked: " + e.Message); }
+        }
+
+        // What a TrueType or OpenType file says it is: the family (the typographic one if it has one: a variable font's
+        // first family name is that of its default instance, "Cormorant Garamond Light") and whether it is italic.
+        public static Identity ReadIdentity(string path)
+        {
+            byte[] d = File.ReadAllBytes(path);
+            Func<int, int> u16 = o => (d[o] << 8) | d[o + 1];
+            Func<int, long> u32 = o => ((long)d[o] << 24) | ((long)d[o + 1] << 16) | ((long)d[o + 2] << 8) | d[o + 3];
+            if (d.Length < 12) return null;
+            long magic = u32(0);
+            if (magic != 0x00010000 && magic != 0x4F54544F /* OTTO */ && magic != 0x74727565 /* true */) return null;
+            int tables = u16(4), name = -1, os2 = -1, head = -1;
+            for (int i = 0; i < tables && 28 + 16 * i <= d.Length; i++)
+            {
+                string tag = Encoding.ASCII.GetString(d, 12 + 16 * i, 4);
+                int offset = (int)u32(12 + 16 * i + 8);
+                if (tag == "name") name = offset; else if (tag == "OS/2") os2 = offset; else if (tag == "head") head = offset;
+            }
+            if (name < 0 || name + 6 > d.Length) return null;
+            int count = u16(name + 2), strings = name + u16(name + 4);
+            string family = null, typographic = null;
+            for (int i = 0; i < count && name + 18 + 12 * i <= d.Length; i++)
+            {
+                int r = name + 6 + 12 * i, platform = u16(r), id = u16(r + 6), length = u16(r + 8), at = strings + u16(r + 10);
+                if (platform != 3 || (id != 1 && id != 16) || at + length > d.Length) continue;
+                string text = Encoding.BigEndianUnicode.GetString(d, at, length);
+                if (id == 1 && family == null) family = text;
+                if (id == 16 && typographic == null) typographic = text;
+            }
+            bool italic = (os2 >= 0 && os2 + 64 <= d.Length && (u16(os2 + 62) & 1) != 0) || (head >= 0 && head + 46 <= d.Length && (u16(head + 44) & 2) != 0);
+            if (family == null && typographic == null) return null;
+            return new Identity { Family = typographic ?? family, Italic = italic };
+        }
+
+        // ----- Windows itself -----
+        sealed class WindowsSystem : ISystem
+        {
+            const string Key = @"Software\Microsoft\Windows NT\CurrentVersion\Fonts";
+            [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern int AddFontResourceEx(string path, uint flags, IntPtr reserved);
+            [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr window);
+            [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr window, IntPtr dc);
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+            struct LOGFONT
+            {
+                public int Height, Width, Escapement, Orientation, Weight;
+                public byte Italic, Underline, StrikeOut, Charset, OutPrecision, ClipPrecision, Quality, PitchAndFamily;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FaceName;
+            }
+            delegate int EnumProc(IntPtr logfont, IntPtr metric, uint type, IntPtr lparam);
+            [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern int EnumFontFamiliesEx(IntPtr dc, ref LOGFONT logfont, EnumProc proc, IntPtr lparam, uint flags);
+
+            public string FontDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Microsoft\Windows\Fonts"); } }
+
+            public List<Registered> Registry()
+            {
+                var list = new List<Registered>();
+                string system = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts");
+                foreach (bool machine in new[] { false, true })
+                {
+                    try
+                    {
+                        using (RegistryKey k = (machine ? Microsoft.Win32.Registry.LocalMachine : Microsoft.Win32.Registry.CurrentUser).OpenSubKey(Key))
+                        {
+                            if (k == null) continue;
+                            foreach (string name in k.GetValueNames())
+                            {
+                                string value = k.GetValue(name) as string;
+                                if (string.IsNullOrEmpty(value)) continue;
+                                string path;
+                                try { path = Path.IsPathRooted(value) ? value : Path.Combine(system, value); } catch { continue; }
+                                list.Add(new Registered { Machine = machine, Name = name, Path = path });
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                return list;
+            }
+
+            public bool Exists(string path) { try { return File.Exists(path); } catch { return false; } }
+            public string Hash(string path) { try { return Installer.Sha256(path); } catch { return null; } }
+            public Identity Identify(string path) { return ReadIdentity(path); }
+
+            // The faces GDI lists under the family's name, or under "<family> <weight>" (a variable font's other
+            // instances are families of their own to GDI: "Cormorant Garamond Light").
+            public bool[] Styles(string family)
+            {
+                var found = new bool[2];
+                IntPtr dc = GetDC(IntPtr.Zero);
+                try
+                {
+                    var names = new List<string>();
+                    var all = new LOGFONT { Charset = 1 /* DEFAULT_CHARSET */, FaceName = "" };
+                    EnumProc collect = (lf, tm, type, lp) =>
+                    {
+                        string face = ((LOGFONT)Marshal.PtrToStructure(lf, typeof(LOGFONT))).FaceName ?? "";
+                        if ((string.Equals(face, family, StringComparison.OrdinalIgnoreCase) || face.StartsWith(family + " ", StringComparison.OrdinalIgnoreCase)) && !names.Contains(face)) names.Add(face);
+                        return 1;
+                    };
+                    EnumFontFamiliesEx(dc, ref all, collect, IntPtr.Zero, 0);
+                    EnumProc look = (lf, tm, type, lp) =>
+                    {
+                        found[((LOGFONT)Marshal.PtrToStructure(lf, typeof(LOGFONT))).Italic != 0 ? 1 : 0] = true;
+                        return 1;
+                    };
+                    foreach (string name in names)
+                    {
+                        var one = new LOGFONT { Charset = 1, FaceName = name };
+                        EnumFontFamiliesEx(dc, ref one, look, IntPtr.Zero, 0);
+                    }
+                    GC.KeepAlive(collect); GC.KeepAlive(look);
+                }
+                finally { ReleaseDC(IntPtr.Zero, dc); }
+                return found;
+            }
+
+            public void Copy(string from, string to) { Directory.CreateDirectory(Path.GetDirectoryName(to)); File.Copy(from, to, true); }
+            public void SetValue(string name, string path)
+            {
+                using (RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key)) k.SetValue(name, path, RegistryValueKind.String);
+            }
+            public void DeleteValue(string name)
+            {
+                using (RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key)) k.DeleteValue(name, false);
+            }
+            public bool Load(string path) { return AddFontResourceEx(path, 0, IntPtr.Zero) != 0; }
+            public void Announce() { Installer.AnnounceFontChange(); }
+        }
+
+        // ----- a pretend Windows in a folder (the tests) -----
+        // <root>/Fonts is the user's font folder; registry.txt has a line "HKCU|name|path" or "HKLM|name|path" for each
+        // Fonts value; a face is listed if a value names an existing file of it, unless unlisted.txt names the file (a
+        // font Windows has registered but not loaded), or once it is loaded (loaded.txt). fail.txt makes things fail:
+        // "copy <file name>" (the file is in use), "load <file name>". announced.txt counts the WM_FONTCHANGE broadcasts.
+        sealed class FakeSystem : ISystem
+        {
+            readonly string root;
+            public FakeSystem(string root) { this.root = Path.GetFullPath(root); Directory.CreateDirectory(this.root); }
+            string F(string name) { return Path.Combine(root, name); }
+            string[] Read(string name) { return File.Exists(F(name)) ? File.ReadAllLines(F(name)).Where(l => l.Trim().Length > 0).ToArray() : new string[0]; }
+            bool Fails(string what, string path) { return Read("fail.txt").Any(l => l.Trim() == what + " " + Path.GetFileName(path)); }
+
+            public string FontDir { get { return F("Fonts"); } }
+            public List<Registered> Registry()
+            {
+                var list = new List<Registered>();
+                foreach (string line in Read("registry.txt"))
+                {
+                    string[] p = line.Split(new[] { '|' }, 3);
+                    if (p.Length == 3) list.Add(new Registered { Machine = p[0] == "HKLM", Name = p[1], Path = Path.IsPathRooted(p[2]) ? p[2] : Path.Combine(root, p[2]) });
+                }
+                return list;
+            }
+            public bool Exists(string path) { return File.Exists(path); }
+            public string Hash(string path) { return Installer.Sha256(path); }
+            public Identity Identify(string path) { return ReadIdentity(path); }
+            public bool[] Styles(string family)
+            {
+                var found = new bool[2];
+                string[] unlisted = Read("unlisted.txt"), loaded = Read("loaded.txt");
+                var paths = Registry().Where(r => !unlisted.Contains(Path.GetFileName(r.Path))).Select(r => r.Path).Concat(loaded).Distinct().ToList();
+                foreach (string path in paths)
+                {
+                    if (!File.Exists(path)) continue;
+                    Identity id = null;
+                    try { id = ReadIdentity(path); } catch { }
+                    if (id != null && id.Family != null && (string.Equals(id.Family, family, StringComparison.OrdinalIgnoreCase) || id.Family.StartsWith(family + " ", StringComparison.OrdinalIgnoreCase)))
+                        found[id.Italic ? 1 : 0] = true;
+                }
+                return found;
+            }
+            public void Copy(string from, string to)
+            {
+                if (Fails("copy", to)) throw new IOException("The process cannot access the file because it is being used by another process.");
+                Directory.CreateDirectory(Path.GetDirectoryName(to)); File.Copy(from, to, true);
+            }
+            public void SetValue(string name, string path)
+            {
+                var lines = Read("registry.txt").Where(l => !l.StartsWith("HKCU|" + name + "|", StringComparison.Ordinal)).ToList();
+                lines.Add("HKCU|" + name + "|" + path);
+                File.WriteAllLines(F("registry.txt"), lines);
+            }
+            public void DeleteValue(string name)
+            {
+                File.WriteAllLines(F("registry.txt"), Read("registry.txt").Where(l => !l.StartsWith("HKCU|" + name + "|", StringComparison.Ordinal)));
+            }
+            public bool Load(string path)
+            {
+                if (Fails("load", path)) return false;
+                File.AppendAllLines(F("loaded.txt"), new[] { path });
+                return true;
+            }
+            public void Announce() { File.AppendAllLines(F("announced.txt"), new[] { "WM_FONTCHANGE" }); }
         }
     }
 
@@ -2424,7 +2897,7 @@ namespace ScriptoriumSetup
             pathBox.EnabledChanged += (s, e) => { pathBox.Visible = pathBox.Enabled; Invalidate(); };
             browse.Name = "browse"; browse.Click += OnBrowse;
 
-            ShowInstalled(FontsInstalled(), ObsidianInstalled());
+            ShowInstalled(FontsOffer(), ObsidianInstalled());
             fontsBox.Name = "fonts"; obsidianBox.Name = "obsidian"; longformBox.Name = "longform"; openBox.Name = "open";
             longformBox.Text = "Download the Longform plugin from its official release"; longformBox.Checked = true;
             openBox.Text = OpenNew; openBox.Checked = true;
@@ -2458,10 +2931,11 @@ namespace ScriptoriumSetup
             }
         }
 
-        void ShowInstalled(bool hasFonts, bool hasObsidian)
+        // fontsOffer: what the fonts need ("Install the fonts …", "Repair the fonts (…)"), or null if all four faces are in order.
+        void ShowInstalled(string fontsOffer, bool hasObsidian)
         {
-            fontsBox.Text = hasFonts ? "EB Garamond and Cormorant Garamond are already installed"
-                                     : "Install the fonts it uses for me (EB Garamond, Cormorant Garamond)";
+            bool hasFonts = fontsOffer == null;
+            fontsBox.Text = hasFonts ? "EB Garamond and Cormorant Garamond are already installed" : fontsOffer;
             fontsBox.Checked = !hasFonts; fontsBox.Enabled = !hasFonts;
             obsidianBox.Text = hasObsidian ? "Obsidian is already installed" : "Download and install Obsidian 1.15.0 for me";
             obsidianBox.Checked = !hasObsidian; obsidianBox.Enabled = !hasObsidian;
@@ -2512,7 +2986,14 @@ namespace ScriptoriumSetup
             else Status("Ready.");
         }
 
-        bool FontsInstalled() { return !preview && Installer.FontFamilyInstalled("EB Garamond") && Installer.FontFamilyInstalled("Cormorant Garamond"); }
+        // What the fonts need, face by face (Fonts.Offer); in a preview, and where the fonts cannot be looked at, to be installed.
+        string FontsOffer()
+        {
+            const string install = "Install the fonts it uses for me (EB Garamond, Cormorant Garamond)";
+            if (preview) return install;
+            try { Fonts.ISystem s = Fonts.Current; return s == null ? install : Fonts.Offer(Fonts.Check(s)); }
+            catch { return install; }
+        }
         // Only a program on the disk counts (Installer.FindObsidian): not the obsidian:// link an uninstalled Obsidian leaves.
         bool ObsidianInstalled() { return !preview && Installer.FindObsidian() != null; }
 
@@ -2767,20 +3248,19 @@ namespace ScriptoriumSetup
                 }
                 if (fonts)
                 {
-                    var wanted = new List<Pinned>();
-                    if (!Installer.FontFamilyInstalled("EB Garamond")) wanted.AddRange(Installer.EbGaramond);
-                    if (!Installer.FontFamilyInstalled("Cormorant Garamond")) wanted.AddRange(Installer.Cormorant);
-                    for (int i = 0; i < wanted.Count; i++)
+                    // Face by face: whatever is missing, unregistered or damaged is put right, and looked at again.
+                    Fonts.ISystem system = Fonts.Current;
+                    if (system != null)
                     {
-                        Pinned f = wanted[i];
-                        Status("Downloading fonts (" + (i + 1) + " of " + wanted.Count + ") …");
-                        string file = Path.Combine(temp, f.File);
-                        int k = i;
-                        Installer.Download(f, file, (d, t) => Progress((int)(100.0 * (k + (t > 0 ? (double)d / t : 0)) / wanted.Count), false), cancel.Token);
-                        Installer.InstallFont(f, file);
-                        Log("Installed " + f.Label);
+                        int need = Math.Max(1, Fonts.Check(system).Count(st => !st.Ok)), done = 0;
+                        Fonts.Outcome o = Fonts.Repair(system, face =>
+                        {
+                            int k = done++;
+                            Status("Downloading fonts (" + (k + 1) + " of " + need + ") …");
+                            return Fonts.Fetch(face, temp, (d, t) => Progress((int)(100.0 * (k + (t > 0 ? (double)d / t : 0)) / need), false), cancel.Token);
+                        }, Log);
+                        if (o.Failed.Count > 0) Log(Fonts.Report(o), true);
                     }
-                    if (wanted.Count > 0) Installer.AnnounceFontChange();
                 }
                 cancel.Token.ThrowIfCancellationRequested();
                 if (target == Vaults.Target.Vault || target == Vaults.Target.Folder) { UpdateVault(dest, temp, longform, open, exe, target == Vaults.Target.Folder); return; }
@@ -2969,7 +3449,9 @@ namespace ScriptoriumSetup
             ShowRecord(false);
             Progress(0, false);
             foreach (Control c in new Control[] { pathBox, browse, longformBox, openBox, installButton }) c.Enabled = true;
-            fontsBox.Enabled = !FontsInstalled();
+            string offer = FontsOffer();   // after an install or a repair the fonts are looked at again
+            fontsBox.Text = offer ?? "EB Garamond and Cormorant Garamond are already installed";
+            fontsBox.Enabled = offer != null; fontsBox.Checked = offer != null;
             obsidianBox.Enabled = !ObsidianInstalled();
         }
 
@@ -2980,7 +3462,7 @@ namespace ScriptoriumSetup
         internal InkProgress Bar { get { return bar; } }
         internal string PreviewPath { get { return pathBox.Text; } }
         internal void PreviewTarget(Vaults.Target t, string version) { ShowTarget(t, true, version); }
-        internal void PreviewInstalled() { ShowInstalled(true, true); }
+        internal void PreviewInstalled() { ShowInstalled(null, true); }
     }
 
     // The question asked before an update, drawn like the setup window: a heading in rubric, a short pen rule, what will

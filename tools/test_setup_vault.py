@@ -66,7 +66,7 @@ class Tool:
     def _run(self, cmd):
         # The children write UTF-8 (the script and Node do when asked; the exe's few non-ASCII characters may not
         # survive a Windows console code page, which is fine: the checks look at ASCII text and at the files).
-        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", SCRIPTORIUM_NO_FONTS="1")   # the fonts have tests of their own (test_fonts.py)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace", env=env)
         for line in (r.stdout + r.stderr).splitlines():
             print("      | " + line)

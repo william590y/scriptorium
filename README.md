@@ -264,6 +264,34 @@ Obsidian, or in `obsidian.json` once Obsidian has closed (if Obsidian stops answ
 waits for it to close). An Obsidian older than 1.12 has no command line interface: the vault is opened and Obsidian
 asks. To review the plugins later, or to turn them off, use **Settings → Community plugins → Restricted mode**.
 
+### The fonts, face by face
+
+The typography uses four font faces: EB Garamond and Cormorant Garamond, each upright and italic. Every installer
+checks them **one face at a time**, and puts right whatever is missing, unregistered or damaged, each time it runs
+(installing, updating and setting up a vault alike). This matters because a family with only its *italic* face
+installed is still "installed" as far as a list of font families goes, and the system then draws upright text with
+the italic: every heading stands in italics. That happened to a writer on Windows (both Cormorant Garamond files
+were on disk, only the italic was registered), and versions up to 1.2.4, which asked only "is the family there?",
+would never have repaired it.
+
+- **Windows** (Scriptorium Setup and the `.cmd` script): a face is in order only if a Fonts registry value (yours or
+  the machine's) names a file that exists and is that face (Scriptorium's file with its pinned SHA-256, or a copy of
+  your own), *and* Windows lists the family with that style. The checkbox then reads "… are already installed";
+  otherwise it says what is wrong, for example "Repair the fonts (Cormorant Garamond upright is missing)", and is
+  ticked. A repair copies the file if needed, registers it under a value name of Scriptorium's own
+  (`Scriptorium Cormorant Garamond Regular (TrueType)`, so that another program's install or uninstall of a font of the
+  same name cannot take it away), loads it, tells running programs, and looks again. The upright face of a family
+  always goes first; if it cannot be installed, the italic is not installed either. If a font file is in use, Setup
+  says to close Obsidian and run it again.
+- **For support**: `Scriptorium-Setup.exe --check-fonts` prints the state of each face (exit code 0 if all four are
+  in order), and `--repair-fonts` puts them right without the window.
+- **macOS and Linux scripts**: each file in `~/Library/Fonts`, or in `~/.local/share/fonts/scriptorium` with
+  `fc-list` asked for an upright and an italic style of each family; a copy of your own counts. The two faces of a
+  family used to be downloaded side by side, so a failed download could leave the italic alone; now the upright
+  goes first.
+- **In Obsidian**: if a family is on the computer but draws upright text leaning, the Scriptorium plugin says so
+  once ("the upright face is missing on this computer … run Scriptorium Setup"), so that the symptom explains itself.
+
 ## Setting up a vault you already have
 
 Any vault can be made a Scriptorium vault in one step: a vault you already write in, a new vault Obsidian has just
@@ -554,7 +582,7 @@ vault/        the vault template (the Scriptorium and Lagrange plugins and the s
 plugins-tests/ unit tests for Lagrange's plain functions (not packaged)
 installer/    Scriptorium Setup: ScriptoriumSetup.cs, app.manifest, scriptorium.ico, and fonts/ (the window's type)
 installers/   the script installers, and Setup-Scriptorium-Vault.py (sets up a vault you already have)
-tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py, test_auto_open.py, test_setup_vault.py
+tools/        build_zip.py, build_exe.sh, build_fonts.py, test_update.py, test_auto_open.py, test_setup_vault.py, test_fonts.py
 plugins-tests/ tests for the Scriptorium plugin's layout and parsing (node --test plugins-tests/scriptorium.test.js)
               and for its Google Drive sync: rclone-sync.test.js (with a pretend rclone, fake-rclone.js) and
               rclone-real.test.js (with the real rclone and a second folder standing in for Drive)

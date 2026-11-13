@@ -83,40 +83,85 @@ if [ -z "$app_path" ]; then
     printf 'Installed Obsidian (%s)\n' "$app_path"
   fi
 fi
-# Install missing font families for the current user.
-font_jobs=()
+# FONTS_START
+# The fonts, face by face: EB Garamond and Cormorant Garamond, each upright and italic. A family with only its italic
+# installed shows every heading in italics, and a check by family name would call that "installed"; so each face is
+# looked at by itself: Scriptorium's own file in ~/Library/Fonts with the right SHA-256, or a copy of your own that
+# macOS lists with that family and style. (tools/test_fonts.py runs this part.)
 font_dir="$HOME/Library/Fonts"
-installed_fonts="$(system_profiler SPFontsDataType 2>/dev/null || true)"
-install_font() {
-  local filename="$1" url="$2" checksum="$3"
-  if [ -f "$font_dir/$filename" ]; then
-    verify_hash "$font_dir/$filename" "$checksum"
-    return
+font_listing=''   # "family|style" lines from system_profiler, asked for once and only if a file of ours is not there
+font_listed() {
+  if [ -z "$font_listing" ]; then
+    font_listing="$(system_profiler SPFontsDataType 2>/dev/null | awk '
+      /^ *Family: / { sub(/^ *Family: /, ""); family = $0 }
+      /^ *Style: / { sub(/^ *Style: /, ""); print family "|" $0 }' || true)"
+    [ -n "$font_listing" ] || font_listing='none'
   fi
-  curl --progress-bar --fail --location --proto '=https' --tlsv1.2 "$url" -o "$work_dir/$filename"
-  verify_hash "$work_dir/$filename" "$checksum"
-  mkdir -p "$font_dir"
-  install -m 644 "$work_dir/$filename" "$font_dir/$filename"
+  printf '%s\n' "$font_listing" | awk -v family="$1" -v want="$2" -F'|' '
+    $1 == family { italic = ($2 ~ /Italic|Oblique/); if ((want == "italic" && italic) || (want == "upright" && !italic)) found = 1 }
+    END { exit found ? 0 : 1 }'
 }
-if ! printf '%s\n' "$installed_fonts" | grep -Fq 'EB Garamond'; then
-  printf 'Installing EB Garamond ...\n'
-  install_font 'EBGaramond-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/ebgaramond/EBGaramond%5Bwght%5D.ttf' 'ef9512f92f6d579e5dc75af59a5a4b1b8b47d2eda89e00b954d44520e5369027' &
-  font_jobs+=("$!")
-  install_font 'EBGaramond-Italic-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/ebgaramond/EBGaramond-Italic%5Bwght%5D.ttf' 'bba2c4499c93c9612b90b9825d32b07da52fce2fe57562a1eb6b833553f93c4e' &
-  font_jobs+=("$!")
-fi
-if ! printf '%s\n' "$installed_fonts" | grep -Fq 'Cormorant Garamond'; then
-  printf 'Installing Cormorant Garamond ...\n'
-  install_font 'CormorantGaramond-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/cormorantgaramond/CormorantGaramond%5Bwght%5D.ttf' 'b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0' &
-  font_jobs+=("$!")
-  install_font 'CormorantGaramond-Italic-Scriptorium.ttf' 'https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/cormorantgaramond/CormorantGaramond-Italic%5Bwght%5D.ttf' '0f48ea6abb2084537854f7174c470991a463b13036309e3b50a81511611c530d' &
-  font_jobs+=("$!")
-fi
-font_download_failed=0
-for job in ${font_jobs[*]-}; do
-  wait "$job" || font_download_failed=1
+font_state() {
+  if [ -f "$font_dir/$3" ]; then
+    if [ "$(font_hash "$font_dir/$3")" = "$4" ]; then echo ok; else echo damaged; fi
+  elif font_listed "$1" "$2"; then echo ok
+  else echo missing; fi
+}
+font_refresh() { :; }   # macOS notices a new file in ~/Library/Fonts by itself
+font_base='https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl'
+# family|upright or italic|file|address|SHA-256. A family's upright face comes before its italic.
+font_faces=(
+  "EB Garamond|upright|EBGaramond-Scriptorium.ttf|$font_base/ebgaramond/EBGaramond%5Bwght%5D.ttf|ef9512f92f6d579e5dc75af59a5a4b1b8b47d2eda89e00b954d44520e5369027"
+  "EB Garamond|italic|EBGaramond-Italic-Scriptorium.ttf|$font_base/ebgaramond/EBGaramond-Italic%5Bwght%5D.ttf|bba2c4499c93c9612b90b9825d32b07da52fce2fe57562a1eb6b833553f93c4e"
+  "Cormorant Garamond|upright|CormorantGaramond-Scriptorium.ttf|$font_base/cormorantgaramond/CormorantGaramond%5Bwght%5D.ttf|b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0"
+  "Cormorant Garamond|italic|CormorantGaramond-Italic-Scriptorium.ttf|$font_base/cormorantgaramond/CormorantGaramond-Italic%5Bwght%5D.ttf|0f48ea6abb2084537854f7174c470991a463b13036309e3b50a81511611c530d"
+)
+font_hash() {
+  if command -v shasum >/dev/null; then shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+  else sha256sum "$1" 2>/dev/null | cut -d' ' -f1; fi
+}
+# Puts right every face that is not in order (font_state says: ok, missing, damaged or unlisted), the upright of a family
+# first; if an upright cannot be installed, its italic is not installed either. Then looks again.
+font_problems=()
+font_changed=0
+font_upright_failed='|'
+for font_face in "${font_faces[@]}"; do
+  IFS='|' read -r font_family font_style font_file font_url font_sha <<< "$font_face"
+  font_was="$(font_state "$font_family" "$font_style" "$font_file" "$font_sha")"
+  [ "$font_was" = ok ] && continue
+  if [ "$font_style" = italic ] && [ "${font_upright_failed#*|$font_family|}" != "$font_upright_failed" ]; then
+    font_problems+=("$font_family $font_style: left as it was, because the upright face could not be installed")
+    continue
+  fi
+  if [ "$font_was" = unlisted ]; then
+    font_changed=1   # the file is right; the list of fonts is made again below
+    printf 'Repaired %s %s (its file was there, but the system did not list it)\n' "$font_family" "$font_style"
+    continue
+  fi
+  if curl --progress-bar --fail --location --proto '=https' --tlsv1.2 "$font_url" -o "$work_dir/$font_file" \
+     && [ "$(font_hash "$work_dir/$font_file")" = "$font_sha" ] \
+     && mkdir -p "$font_dir" && install -m 644 "$work_dir/$font_file" "$font_dir/$font_file"; then
+    font_changed=1
+    if [ "$font_was" = missing ]; then printf 'Installed %s %s\n' "$font_family" "$font_style"
+    else printf 'Repaired %s %s (its file was damaged, or another font)\n' "$font_family" "$font_style"; fi
+  else
+    [ "$font_style" = upright ] && font_upright_failed="$font_upright_failed$font_family|"
+    font_problems+=("$font_family $font_style: it could not be downloaded or written to $font_dir")
+  fi
 done
-[ "$font_download_failed" -eq 0 ] || { echo "Font installation failed. Please try again."; exit 1; }
+if [ "$font_changed" -eq 1 ]; then font_refresh; fi
+for font_face in "${font_faces[@]}"; do
+  IFS='|' read -r font_family font_style font_file font_url font_sha <<< "$font_face"
+  font_now="$(font_state "$font_family" "$font_style" "$font_file" "$font_sha")"
+  [ "$font_now" = ok ] && continue
+  case "${font_problems[*]-}" in *"$font_family $font_style:"*) ;; *) font_problems+=("$font_family $font_style: still $font_now") ;; esac
+done
+fonts_line='Fonts are ready.'
+if [ "${#font_problems[@]}" -gt 0 ]; then
+  for font_problem in "${font_problems[@]}"; do printf 'FONT NOT PUT RIGHT: %s\n' "$font_problem"; done
+  fonts_line='Some fonts could not be put right (see the lines above): run this installer again.'
+fi
+# FONTS_END
 # mkdir fails if the destination appeared during the download; never merge into an existing vault.
 mkdir -p "$(dirname "$destination")"
 mkdir "$destination"
@@ -282,10 +327,10 @@ opened=0
 open_new_vault || opened=$?
 case "$opened" in
   0) printf 'Opened it in Obsidian with its community plugins on (as "Trust author and enable plugins" does).\n'
-     printf 'Fonts are ready. Open Lorem Ipsum in Reading view.\n' ;;
+     printf '%s Open Lorem Ipsum in Reading view.\n' "$fonts_line" ;;
   2) printf 'When Obsidian asks, choose "Trust author and enable plugins" (or Restricted mode, to review them first).\n'
-     printf 'Fonts are ready. Open Lorem Ipsum in Reading view.\n' ;;
-  *) printf 'Fonts are ready. Restart any running Obsidian windows to load newly installed fonts.\nOpen Lorem Ipsum in Reading view. Review community plugins before enabling them.\n'
+     printf '%s Open Lorem Ipsum in Reading view.\n' "$fonts_line" ;;
+  *) printf '%s Restart any running Obsidian windows to load newly installed fonts.\nOpen Lorem Ipsum in Reading view. Review community plugins before enabling them.\n' "$fonts_line"
      printf 'In Obsidian, choose Open folder as vault and select %s\n' "$destination"
      open -a "$app_path" obsidian://choose-vault ;;
 esac
