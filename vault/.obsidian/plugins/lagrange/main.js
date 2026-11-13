@@ -1373,10 +1373,36 @@ function wordCut(text, max) {
 /* A line that only marks where Scriptorium centres text or sets it to the right ("::: center", "::: right", ":::";
    see ALIGN_STYLE). The note does not show it as text, so the pen never writes it. */
 const ALIGN_MARK = /^[ \t]*:{3,}[ \t]*(?:\{?[ \t]*\.?(?:cent(?:er|re|ered|red)|right)(?![\w-])[^\n]*)?$/;
-function penScript(replacement, limit) {
+/* Prose as the page shows it: without the Markdown marks that the rendered text hides. Emphasis (*…*, _…_, **…**,
+   __…__), ~~struck~~ and ==marked== text and code spans keep their words; a link keeps its text, a wikilink its
+   alias or its target; a comment (%%…%%) and HTML tags go; a heading's # and a quotation's > at the start of a line
+   go; an escaped character (\*) stays as the character. What is not closed stays as it is written. Pure. */
+function plainInline(text) {
+  // (an escaped character is put out of the way as a private-use character, and put back at the end)
+  let t = String(text == null ? '' : text)
+    .replace(/\\([\\`*_{}[\]()#+\-.!~=|>$%])/g, (m, c) => String.fromCharCode(0xE100 + c.charCodeAt(0)))
+    .replace(/(^|\n)[ \t]*(?:#{1,6}[ \t]+|>[ \t]?)+/g, '$1')
+    .replace(/%%[\s\S]*?%%/g, '')
+    .replace(/!?\[\[([^\]|\n]*)\|([^\]\n]*)\]\]/g, '$2')
+    .replace(/!?\[\[([^\]\n]*)\]\]/g, '$1')
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/<\/?[A-Za-z][^<>\n]*>/g, '');
+  for (let i = 0; i < 3; i++) {
+    t = t.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+      .replace(/\*(?=[^\s*])([^*\n]*?[^\s*])\*/g, '$1')
+      .replace(/(^|[^A-Za-z0-9_])_(?=[^\s_])([^_\n]*?[^\s_])_(?![A-Za-z0-9_])/g, '$1$2')
+      .replace(/~~(?=\S)([^\n]*?\S)~~/g, '$1')
+      .replace(/==(?=\S)([^\n]*?\S)==/g, '$1');
+  }
+  return t.replace(/[\uE100-\uE1FF]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE100));
+}
+
+/* (plain: the text is written as Live Preview shows it, without its Markdown marks; see plainInline) */
+function penScript(replacement, limit, plain) {
   const max = limit || 48;
   const segs = mathSegments(String(replacement == null ? '' : replacement).split('\n').filter(l => !ALIGN_MARK.test(l)).join('\n').trim(), { code: true })
-    .map(g => (g.type === 'text' ? { type: 'text', text: g.text.replace(/\s+/g, ' ') } : g))
+    .map(g => (g.type === 'text' ? { type: 'text', text: (plain ? plainInline(g.text) : g.text).replace(/\s+/g, ' ') } : g))
     .filter(g => g.type !== 'text' || g.text);
   if (segs.length && segs[0].type === 'text') segs[0].text = segs[0].text.trimStart();
   if (segs.length && segs[segs.length - 1].type === 'text') segs[segs.length - 1].text = segs[segs.length - 1].text.trimEnd();
@@ -4253,12 +4279,12 @@ function createPen(app, settings) {
             const out = [];
             rows.slice(0, mayWrite).forEach((r, i) => {
               out.push({ type: 'row', row: r, gap: i ? Math.max(1, Math.round((r.top - rows[i - 1].top) / col.lineHeight)) : 0 });
-              for (const g of penScript(r.text, 150)) out.push(g);
+              for (const g of penScript(r.text, 150, live)) out.push(g);
             });
             if (rows.length > mayWrite || rows.more) out.push({ type: 'text', text: ' …' });
             return out;
           };
-          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite))).filter(g => {
+          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite), live)).filter(g => {
             if (g.type !== 'math') return true;
             const i = inNote.indexOf(bare(g.source));
             if (i < 0) return true;
@@ -7464,4 +7490,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

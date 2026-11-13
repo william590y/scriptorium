@@ -2452,3 +2452,22 @@ test('Edits that build on one another: an edit is looked for in the note as the 
   assert.deepEqual([w.text, w.spans.map(x => [x.start, x.end])], ['One 2 three. Four five six. Seven.\n', [[4, 5]]]);
   assert.deepEqual(L.foldEdit(doc, [{ from: 4, to: 7, replace: '2', matched: 'two' }], 6, 11, 'THREE', {}).map(e => [e.from, e.to, e.replace]), [[4, 7, '2'], [8, 13, 'THREE']], 'an untouched change keeps to the note’s own offsets');
 });
+
+test('plainInline: the pen writes prose as the page shows it, without the Markdown marks the rendered text hides', () => {
+  const eq = (a, b) => assert.equal(L.plainInline(a), b, a);
+  eq('*Songs of Experience* (1794)', 'Songs of Experience (1794)');
+  eq('a **bold** word, an _italic_ one, and __both__ *again*', 'a bold word, an italic one, and both again');
+  eq('***very*** ~~gone~~ ==marked==', 'very gone marked');
+  eq('snake_case_name and 2 * 3 * 4 stay', 'snake_case_name and 2 * 3 * 4 stay');
+  eq('an \\*escaped\\* star and \\_underscore\\_', 'an *escaped* star and _underscore_');
+  eq('see [the paper](https://example.org/a_b) and [[Note|its note]] and [[Other]]', 'see the paper and its note and Other');
+  eq('a `code` span', 'a code span');
+  eq('## A heading\n\n> quoted *words*', 'A heading\n\nquoted words');
+  eq('a %%hidden%% comment and <u>underlined</u>', 'a  comment and underlined');
+  eq('an unclosed *star and a lone _ and 5 < 6', 'an unclosed *star and a lone _ and 5 < 6');
+  eq('', '');
+  const show = s => s.map(g => (g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  assert.equal(show(L.penScript('— William Blake, *Songs of Experience* (1794)', 80, true)), '— William Blake, Songs of Experience (1794)');
+  assert.equal(show(L.penScript('— William Blake, *Songs of Experience* (1794)', 80)), '— William Blake, *Songs of Experience* (1794)', 'in Source mode the marks are on the page, and are written');
+  assert.equal(show(L.penScript('the *mass* $m_1 * m_2$ of **both**', 80, true)), 'the mass <m_1 * m_2> of both', 'mathematics is not touched');
+});
