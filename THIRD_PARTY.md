@@ -184,7 +184,9 @@ is ticked. They are not part of this repository, the zip or the installer (apart
 - Not bundled, and not redistributed: Scriptorium neither contains nor hosts any of its files. The installers download
   the three files from the plugin's own release, as above, into `.obsidian/plugins/obsidian-excalidraw-plugin`, on the
   computer of the person installing; they are checked against the pinned SHA-256 and otherwise left exactly as the
-  author published them. "Set up another vault" does not copy the plugin from one vault to another either: it
+  author published them. With a new install, where the plugin has no settings yet, the installers write a `data.json`
+  with the single setting `previousRelease` (so that its welcome window does not open); that file is the installers'
+  own, not the plugin's. "Set up another vault" does not copy the plugin from one vault to another either: it
   downloads it again. Lagrange makes free-form drawings through the plugin's own interface (`ExcalidrawAutomate`)
   inside Obsidian.
 

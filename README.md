@@ -354,7 +354,7 @@ free-form sketches with the [Excalidraw](https://github.com/zsviczian/obsidian-e
 part of Scriptorium, and their code is not in this repository, in `Scriptorium.zip` or in `Scriptorium-Setup.exe`.
 Instead, every way of installing, updating or setting up a vault downloads them at that moment from each plugin's own
 GitHub release, into `.obsidian/plugins/obsidian-tikzjax` and `.obsidian/plugins/obsidian-excalidraw-plugin`, and
-turns them on like Scriptorium's own plugins: Scriptorium Setup (a new vault, **Update** and **Set up**, while **Download
+turns on the ones it installs: Scriptorium Setup (a new vault, **Update** and **Set up**, while **Download
 the TikZJax and Excalidraw plugins** is ticked), the three script installers, `Setup-Scriptorium-Vault.py`
 (`--no-diagram-plugins` leaves them out), and **Scriptorium: Set up another vault** / **Set up this vault** in Obsidian.
 
@@ -362,6 +362,13 @@ the TikZJax and Excalidraw plugins** is ticked), the three script installers, `S
   a file that does not match is not installed.
 - A copy the vault already has is left exactly as it is if it is the pinned version or a newer one; an older copy is
   replaced by the pinned one. A plugin's settings (`data.json`) are never touched, and nothing is deleted.
+- Only a plugin that is installed new is turned on. One the vault already had and you turned off (it is in
+  `.obsidian/plugins` but not in `community-plugins.json`) stays off, also when its older files are replaced.
+- Excalidraw opens a "Welcome to Excalidraw" window the first time it runs. So that a new vault does not open on it,
+  Excalidraw is installed with one setting, `{"previousRelease": "<its version>"}`, which is what closing that window
+  writes; Excalidraw fills in all its other settings with its defaults when it loads, and still shows its release
+  notes after a later update (its **Display Release Notes after update** switch is left on). This file is written
+  only with a new install and only where Excalidraw has no `data.json`; one that is there is never changed.
 - If a plugin cannot be downloaded (no connection, GitHub not answering, a file that does not match), Scriptorium is
   installed all the same; the installer names the plugin that is missing. To add it by hand: in Obsidian, **Settings →
   Community plugins → Browse**, search for its name, **Install**, then **Enable**.

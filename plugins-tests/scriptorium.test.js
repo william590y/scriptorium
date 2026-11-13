@@ -963,6 +963,9 @@ test('Setting up a vault adds the TikZJax and Excalidraw plugins: fresh, already
   assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'installed' });
   assert.deepEqual(on(v), ['scriptorium', tikz.id, ex.id]);
   assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'main.js'), 'utf8'), `// ${ex.id}`);
+  // Excalidraw, installed new, gets the one setting that keeps its welcome window shut; TikZJax gets none
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json'), 'utf8'), `{\n  "previousRelease": "${ex.version}"\n}\n`);
+  assert.ok(!fs.existsSync(path.join(v, '.obsidian', 'plugins', tikz.id, 'data.json')));
   assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, async () => { throw new Error('must not download again'); }, plugins), { [tikz.id]: 'kept', [ex.id]: 'kept' });
   assert.deepEqual(S.diagramPluginsWanted(fs, path, v, plugins), []);
   // a newer copy and its settings are left alone
@@ -988,6 +991,24 @@ test('Setting up a vault adds the TikZJax and Excalidraw plugins: fresh, already
   assert.equal(fs.readFileSync(path.join(old, 'main.js'), 'utf8'), `// ${tikz.id}`);
   assert.equal(fs.readFileSync(path.join(old, 'data.json'), 'utf8'), '{"mine":1}');
   assert.deepEqual(on(v), { not: 'a list' });
+  // installed and turned off: stays off (an older copy's files are still updated), and gets no settings; settings
+  // that are there without the plugin are kept byte for byte
+  v = vault(['calendar']);
+  for (const [p, version] of [[ex, ex.version], [tikz, '0.1.0']]) {
+    const d = path.join(v, '.obsidian', 'plugins', p.id);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'manifest.json'), JSON.stringify({ id: p.id, version }));
+    fs.writeFileSync(path.join(d, 'main.js'), '// off');
+  }
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'updated', [ex.id]: 'kept' });
+  assert.deepEqual(on(v), ['calendar']);
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', tikz.id, 'main.js'), 'utf8'), `// ${tikz.id}`);
+  assert.ok(!fs.existsSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json')));
+  v = vault([]);
+  fs.mkdirSync(path.join(v, '.obsidian', 'plugins', ex.id), { recursive: true });
+  fs.writeFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json'), '{"previousRelease":"1.0.0",  "mine": true}');
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'installed' });
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json'), 'utf8'), '{"previousRelease":"1.0.0",  "mine": true}');
   // a failed download, and a file that does not match: nothing of that plugin is written, and it is not turned on
   v = vault(['scriptorium']);
   const r = await S.installDiagramPlugins(fs, path, crypto, v, async url => (url.startsWith(tikz.base) ? Promise.reject(new Error('offline')) : url.endsWith('styles.css') ? Buffer.from('tampered') : content.get(url)), plugins);

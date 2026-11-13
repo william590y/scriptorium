@@ -98,11 +98,11 @@ try {
     # downloaded, the installation goes on without it and says so at the end.
     $diagramMissing = @()
     $diagramPlugins = @(
-        @{ Id = 'obsidian-tikzjax'; Name = 'TikZJax'; Base = 'https://github.com/artisticat1/obsidian-tikzjax/releases/download/0.5.2/'; Files = @{
+        @{ Id = 'obsidian-tikzjax'; Name = 'TikZJax'; Version = '0.5.2'; Base = 'https://github.com/artisticat1/obsidian-tikzjax/releases/download/0.5.2/'; Files = @{
             'main.js' = 'cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41'
             'manifest.json' = '09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1'
             'styles.css' = 'd9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d' } },
-        @{ Id = 'obsidian-excalidraw-plugin'; Name = 'Excalidraw'; Base = 'https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/download/2.29.2/'; Files = @{
+        @{ Id = 'obsidian-excalidraw-plugin'; Name = 'Excalidraw'; Version = '2.29.2'; Base = 'https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/download/2.29.2/'; Files = @{
             'main.js' = '49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541'
             'manifest.json' = '8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9'
             'styles.css' = '6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0' } }
@@ -120,6 +120,13 @@ try {
             $pluginTarget = Join-Path $staging ('.obsidian/plugins/' + $plugin.Id)
             New-Item -ItemType Directory -Force -Path $pluginTarget | Out-Null
             Copy-Item -Path (Join-Path $pluginTemp '*') -Destination $pluginTarget -Force
+            # Excalidraw opens a "Welcome to Excalidraw" window the first time it runs, until its previousRelease is its
+            # own version: that one setting is written with it (only where it has no settings yet), and Excalidraw
+            # fills in the rest.
+            $pluginData = Join-Path $pluginTarget 'data.json'
+            if ($plugin.Id -eq 'obsidian-excalidraw-plugin' -and !(Test-Path -LiteralPath $pluginData)) {
+                [IO.File]::WriteAllText($pluginData, "{`n  `"previousRelease`": `"$($plugin.Version)`"`n}`n", (New-Object Text.UTF8Encoding($false)))
+            }
             $pluginListPath = Join-Path $staging '.obsidian/community-plugins.json'
             $pluginList = New-Object System.Collections.ArrayList
             foreach ($entry in (Get-Content -LiteralPath $pluginListPath -Raw | ConvertFrom-Json)) { [void]$pluginList.Add([string]$entry) }

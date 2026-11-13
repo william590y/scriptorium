@@ -2152,7 +2152,8 @@ function describeVaultSetup(plan) {
    and every file is checked against its SHA-256 before anything is written (the same pins as the installers').
    TikZJax is MIT-licensed; the Excalidraw plugin is AGPL-3.0.
    installDiagramPlugins(fs, path, crypto, dir, fetch) -> {id: 'installed' | 'updated' | 'kept' | 'failed'}: a plugin
-   the vault has at the pinned version or a newer one is left exactly as it is, and so are its settings; one that
+   the vault has at the pinned version or a newer one is left exactly as it is, and so are its settings; only a
+   plugin installed new is turned on (one the writer turned off stays off, even if its files are updated); one that
    cannot be downloaded, or does not match, is not installed, and nothing of it is written. fetch(url) resolves to
    the bytes (a Buffer or a Uint8Array). */
 const DIAGRAM_PLUGINS = [
@@ -2184,6 +2185,13 @@ function diagramPluginsWanted(fs, path, dir, plugins) {
     return !(had !== null && versionAtLeast(had, p.version) && fs.existsSync(path.join(folder, 'main.js')));
   }).map(p => p.name);
 }
+/* The data.json written with a plugin that is installed new, where it has none; null for most. Excalidraw opens a
+   "Welcome to Excalidraw" window the first time it runs, while its previousRelease is older than the plugin, and sets
+   previousRelease to its own version when that window is closed: writing that one setting keeps the window shut.
+   Excalidraw fills in the rest with its defaults, and still shows release notes after a later update. */
+function diagramFirstSettings(p) {
+  return p.id === 'obsidian-excalidraw-plugin' ? `{\n  "previousRelease": "${p.version}"\n}\n` : null;
+}
 async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
   const result = {};
   for (const p of plugins || DIAGRAM_PLUGINS) {
@@ -2200,17 +2208,21 @@ async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
           files[name] = data;
         }
         fs.mkdirSync(folder, { recursive: true });
-        for (const name of Object.keys(files)) {         // (its settings, data.json, are never touched)
+        for (const name of Object.keys(files)) {         // (settings that are there, data.json, are never touched)
           const tmp = path.join(folder, `${name}.scriptorium-tmp`);
           fs.writeFileSync(tmp, files[name]);
           fs.renameSync(tmp, path.join(folder, name));
         }
         result[p.id] = had !== null ? 'updated' : 'installed';
+        const settings = had === null ? diagramFirstSettings(p) : null;
+        if (settings && !fs.existsSync(path.join(folder, 'data.json'))) fs.writeFileSync(path.join(folder, 'data.json'), settings);
       } catch (e) {
         result[p.id] = 'failed';
         continue;
       }
     }
+    // Only a plugin installed new is turned on: one that was there and is not in the list was turned off by the writer.
+    if (result[p.id] !== 'installed') continue;
     const listing = path.join(dir, '.obsidian', 'community-plugins.json');
     // (a list that is there but is not a JSON list is left as it is: the plugin is installed, and is turned on in Settings)
     let on = [];

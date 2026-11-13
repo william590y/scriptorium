@@ -76,6 +76,9 @@ check(r == {tikz["id"]: "installed", excalidraw["id"]: "installed"}, "fresh vaul
 check(all((v / ".obsidian" / "plugins" / p["id"] / n).read_bytes() == content[p["base"] + n] for p in S.DIAGRAM_PLUGINS for n in p["files"]), "fresh vault: the three files of each are written as downloaded")
 check(on(v) == ["scriptorium", "lagrange", tikz["id"], excalidraw["id"]], "fresh vault: both are turned on, and what was on stays on")
 check(not list(v.rglob("*.scriptorium-tmp")), "fresh vault: no temporary file is left")
+SEEN = ('{\n  "previousRelease": "%s"\n}\n' % excalidraw["version"]).encode()   # what keeps Excalidraw's welcome window shut
+check((v / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").read_bytes() == SEEN and not (v / ".obsidian" / "plugins" / tikz["id"] / "data.json").exists(),
+      "fresh vault: Excalidraw gets one setting (previousRelease, its own version), TikZJax none")
 r = S.install_diagram_plugins(v, fetch, log.append)
 check(set(r.values()) == {"kept"}, "run again: nothing is downloaded or written twice")
 
@@ -95,7 +98,25 @@ r = S.install_diagram_plugins(v, fetch, log.append)
 check(r == {tikz["id"]: "updated", excalidraw["id"]: "kept"}, "already installed: an older TikZJax is updated, a newer Excalidraw is kept")
 check((ex / "main.js").read_text(encoding="utf-8") == "// the writer's newer copy" and json.loads((ex / "manifest.json").read_text(encoding="utf-8"))["version"] == "99.0.0", "already installed: the newer version is not overwritten")
 check((ex / "data.json").read_text(encoding="utf-8") == '{"theirs": true}' and (tz / "data.json").read_text(encoding="utf-8") == '{"invertColorsInDarkMode": false}', "already installed: neither plugin's settings are touched")
-check(on(v) == ["calendar", excalidraw["id"], tikz["id"]], "already installed: listed once each")
+check(on(v) == ["calendar", excalidraw["id"]], "already installed: the TikZJax that was there and off is updated but not turned on; Excalidraw stays on")
+# a plugin that is installed and turned off stays off; settings without a plugin are kept, byte for byte
+v = vault_with(["calendar"])
+ex = v / ".obsidian" / "plugins" / excalidraw["id"]
+ex.mkdir(parents=True)
+(ex / "manifest.json").write_text(json.dumps({"id": excalidraw["id"], "version": excalidraw["version"]}), encoding="utf-8")
+(ex / "main.js").write_text("// off", encoding="utf-8")
+tz = v / ".obsidian" / "plugins" / tikz["id"]
+tz.mkdir(parents=True)
+(tz / "data.json").write_bytes(b'{ "left": "behind" }')
+r = S.install_diagram_plugins(v, fetch, log.append)
+check(r == {tikz["id"]: "installed", excalidraw["id"]: "kept"} and on(v) == ["calendar", tikz["id"]], "turned off: an Excalidraw that is installed and off stays off; the TikZJax installed new is turned on")
+check(not (ex / "data.json").exists() and (tz / "data.json").read_bytes() == b'{ "left": "behind" }', "turned off: no settings are written for a plugin that was there, and settings that were there are kept byte for byte")
+v = vault_with([])
+(v / ".obsidian" / "plugins" / excalidraw["id"]).mkdir(parents=True)
+(v / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").write_bytes(b'{"previousRelease":"1.0.0",  "mine": true}')
+r = S.install_diagram_plugins(v, fetch, log.append)
+check(r[excalidraw["id"]] == "installed" and (v / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").read_bytes() == b'{"previousRelease":"1.0.0",  "mine": true}',
+      "Excalidraw installed new where its settings already are: the settings are kept byte for byte")
 
 # 3. a download that fails: Scriptorium's set-up stands, the plugin is not installed or turned on, and the log says how to add it
 def offline(url):
@@ -147,7 +168,11 @@ for script in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.comman
                                        'case "$url" in */good/*) cp "' + str(work / "served" / "good") + '/${url##*/}" "$out";; *) exit 22;; esac\n', encoding="utf-8")
     os.chmod(work / "bin" / "curl", 0o755)
     h = {n: hashlib.sha256(f"stand-in {n}".encode()).hexdigest() for n in ("main.js", "manifest.json", "styles.css")}
-    calls = (f'diagram_plugin plug-a "Plugin A" 1.0 good/a main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
+    (work / "vault" / ".obsidian" / "plugins" / "plug-a").mkdir(parents=True)
+    (work / "vault" / ".obsidian" / "plugins" / "plug-a" / "data.json").write_bytes(b'{ "kept": 1 }')
+    calls = (f'diagram_plugin obsidian-excalidraw-plugin Excalidraw 9.8.7 good/x main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
+             f'diagram_plugin obsidian-excalidraw-plugin Excalidraw 9.9.9 good/x main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
+             f'diagram_plugin plug-a "Plugin A" 1.0 good/a main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
              f'diagram_plugin plug-b "Plugin B" 1.0 gone/b main.js {h["main.js"]} manifest.json {h["manifest.json"]} styles.css {h["styles.css"]}\n'
              f'diagram_plugin plug-c "Plugin C" 1.0 good/c main.js {h["main.js"]} manifest.json {"0" * 64} styles.css {h["styles.css"]}\n'
              'printf "missing:%s\\n" "$diagram_missing"\n')
@@ -155,7 +180,10 @@ for script in ("Install-Scriptorium-Linux.sh", "Install-Scriptorium-macOS.comman
     plugins = work / "vault" / ".obsidian" / "plugins"
     check(run.returncode == 0 and "missing: Plugin B Plugin C" in run.stdout, f"{script}: a failed download and a wrong checksum do not stop the installer, and are named ({run.stderr.strip()[:120]})")
     check((plugins / "plug-a" / "main.js").is_file() and not (plugins / "plug-b").exists() and not (plugins / "plug-c").exists(), f"{script}: only the plugin that was downloaded whole is put in the vault")
-    check(json.loads((work / "vault" / ".obsidian" / "community-plugins.json").read_text(encoding="utf-8")) == ["scriptorium", "lagrange", "plug-a"], f"{script}: it is turned on, after Scriptorium's own")
+    listed_sh = json.loads((work / "vault" / ".obsidian" / "community-plugins.json").read_text(encoding="utf-8"))
+    check(listed_sh[:2] == ["scriptorium", "lagrange"] and listed_sh[-1] == "plug-a" and "obsidian-excalidraw-plugin" in listed_sh, f"{script}: it is turned on, after Scriptorium's own")
+    check((plugins / "obsidian-excalidraw-plugin" / "data.json").read_bytes() == b'{\n  "previousRelease": "9.8.7"\n}\n', f"{script}: Excalidraw gets one setting, previousRelease at its version; settings that are there are not written again")
+    check((plugins / "plug-a" / "data.json").read_bytes() == b'{ "kept": 1 }' and not (plugins / "plug-a" / "manifest.json").read_bytes() == b"", f"{script}: another plugin gets no settings, and settings that were there are kept byte for byte")
 
 # 5. the Windows script installer pins the same files
 cmd = (ROOT / "installers" / "Install-Scriptorium-Windows.cmd").read_text(encoding="utf-8")
@@ -229,8 +257,11 @@ else:
         (work / "vault" / ".obsidian" / "community-plugins.json").write_bytes((ROOT / "vault" / ".obsidian" / "community-plugins.json").read_bytes())
         (work / "temp").mkdir()
         quote = lambda text: "'" + str(text).replace("'", "''") + "'"
-        table = ",\n".join("@{ Id = %s; Name = %s; Base = %s; Files = @{ %s } }" % (quote(i), quote(n), quote(b), "; ".join(f"{quote(f)} = {quote(h)}" for f, h in files.items()))
+        table = ",\n".join("@{ Id = %s; Name = %s; Version = %s; Base = %s; Files = @{ %s } }" % (quote(i), quote(n), quote(next(p["version"] for p in PINNED if p["id"] == i)), quote(b), "; ".join(f"{quote(f)} = {quote(h)}" for f, h in files.items()))
                            for i, n, b, files in plugins)
+        if label == "settings there":
+            (work / "vault" / ".obsidian" / "plugins" / excalidraw["id"]).mkdir(parents=True)
+            (work / "vault" / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").write_bytes(b'{ "mine": 1 }')
         script = work / "part.ps1"
         script.write_text("$ErrorActionPreference = 'Stop'\n" + download + f"\n$tempPath = {quote(work / 'temp')}\n$staging = {quote(work / 'vault')}\n"
                           "$diagramMissing = @()\n$diagramPlugins = @(\n" + table + "\n)\n" + adding + "\nWrite-Host ('MISSING:' + ($diagramMissing -join ','))\n", encoding="utf-8-sig")
@@ -253,6 +284,11 @@ else:
         listed = None
     check(listed == template + [tikz["id"], excalidraw["id"]], f"{name}: a new vault: both are turned on, after the vault's own plugins ({listed})")
     check(not (v / ".obsidian" / "community-plugins.json").read_bytes().startswith(b"\xef\xbb\xbf"), f"{name}: the plugin list is written without a byte order mark")
+    check((v / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").read_bytes() == SEEN and not (v / ".obsidian" / "plugins" / tikz["id"] / "data.json").exists(),
+          f"{name}: a new vault: Excalidraw gets one setting (previousRelease, its own version), TikZJax none")
+    v, r = run_cmd_part("settings there", [(p["id"], p["name"], f"{base}/{p['id']}/", hashes(p)) for p in (tikz, excalidraw)])
+    check(r.returncode == 0 and plugin_files(v, excalidraw) and (v / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").read_bytes() == b'{ "mine": 1 }',
+          f"{name}: settings that are already there are kept byte for byte")
     wrong = dict(hashes(excalidraw), **{"main.js": "0" * 64})
     v, r = run_cmd_part("failures", [(tikz["id"], tikz["name"], f"{base}/gone/", hashes(tikz)), (excalidraw["id"], excalidraw["name"], f"{base}/{excalidraw['id']}/", wrong)])
     check(r.returncode == 0 and "MISSING:TikZJax,Excalidraw" in r.stdout, f"{name}: a file that is not there and a file that does not match: the installer goes on, and names both plugins")
@@ -326,7 +362,9 @@ else:
         check(all(plugin_files(vault, p) == {n: stand_in[p["id"], n] for n in NAMES} for p in (tikz, excalidraw)), f"{name}: the three files of each are in .obsidian/plugins/<id>, as downloaded")
         on_now = listed(vault)
         check(on_now[-2:] == [tikz["id"], excalidraw["id"]] and "scriptorium" in on_now and len(set(on_now)) == len(on_now), f"{name}: both are turned on, after Scriptorium's own ({on_now})")
-        check(not list(vault.rglob("*.scriptorium-tmp")) and not any((vault / ".obsidian" / "plugins" / p["id"] / "data.json").exists() for p in (tikz, excalidraw)), f"{name}: no temporary file is left, and no settings are written for them")
+        check(not list(vault.rglob("*.scriptorium-tmp")), f"{name}: no temporary file is left")
+        check((vault / ".obsidian" / "plugins" / excalidraw["id"] / "data.json").read_bytes() == SEEN and not (vault / ".obsidian" / "plugins" / tikz["id"] / "data.json").exists(),
+              f"{name}: Excalidraw gets one setting (previousRelease, its own version), TikZJax none")
         check((vault / ".obsidian" / "plugins" / "scriptorium" / "manifest.json").is_file(), f"{name}: Scriptorium itself is in the vault")
         if option != "--install-only":
             before = snapshot(vault)
@@ -335,9 +373,10 @@ else:
             # already there: a newer one and an older one
             vault = make(f"{tag}-already")
             have_already(vault)
+            # (Excalidraw is on; TikZJax is installed but was turned off)
             (vault / ".obsidian").mkdir(exist_ok=True)
-            if not (vault / ".obsidian" / "community-plugins.json").exists():
-                (vault / ".obsidian" / "community-plugins.json").write_text(json.dumps([excalidraw["id"]]), encoding="utf-8")
+            was_on = listed(vault) if (vault / ".obsidian" / "community-plugins.json").exists() else []
+            (vault / ".obsidian" / "community-plugins.json").write_text(json.dumps(was_on + [excalidraw["id"]]), encoding="utf-8")
             r = run_exe(option, str(vault), "--plugin-pins", good)
             ex, tz = vault / ".obsidian" / "plugins" / excalidraw["id"], vault / ".obsidian" / "plugins" / tikz["id"]
             check(r.returncode == 0 and "Updated TikZJax from 0.1.0" in r.stdout and "Excalidraw 99.0.0 is already in this vault" in r.stdout, f"{name}: an older TikZJax is updated and a newer Excalidraw is kept, and it says so")
@@ -345,7 +384,27 @@ else:
             check(plugin_files(vault, tikz) == {n: stand_in[tikz["id"], n] for n in NAMES}, f"{name}: the older version is replaced by the pinned one")
             check((ex / "data.json").read_text(encoding="utf-8") == '{"theirs": true}' and (tz / "data.json").read_text(encoding="utf-8") == '{"invertColorsInDarkMode": false}', f"{name}: neither plugin's settings are touched")
             on_now = listed(vault)
-            check(on_now.count(tikz["id"]) == 1 and on_now.count(excalidraw["id"]) == 1, f"{name}: each is listed once ({on_now})")
+            check(on_now.count(tikz["id"]) == 0 and on_now.count(excalidraw["id"]) == 1, f"{name}: the TikZJax that was turned off is updated but stays off; Excalidraw is listed once ({on_now})")
+            # installed and turned off, at the pinned version: stays off, and gets no settings; settings without a plugin are kept
+            vault = make(f"{tag}-off")
+            ex, tz = vault / ".obsidian" / "plugins" / excalidraw["id"], vault / ".obsidian" / "plugins" / tikz["id"]
+            ex.mkdir(parents=True)
+            (ex / "manifest.json").write_text(json.dumps({"id": excalidraw["id"], "version": excalidraw["version"]}), encoding="utf-8")
+            (ex / "main.js").write_text("// off", encoding="utf-8")
+            tz.mkdir(parents=True)
+            (tz / "data.json").write_bytes(b'{ "left": "behind" }')
+            r = run_exe(option, str(vault), "--plugin-pins", good)
+            on_now = listed(vault)
+            check(r.returncode == 0 and excalidraw["id"] not in on_now and tikz["id"] in on_now, f"{name}: an Excalidraw that is installed and turned off stays off; the TikZJax installed new is turned on ({on_now})")
+            check(not (ex / "data.json").exists() and (ex / "main.js").read_text(encoding="utf-8") == "// off" and (tz / "data.json").read_bytes() == b'{ "left": "behind" }',
+                  f"{name}: no settings are written for a plugin that was there, and settings that were there are kept byte for byte")
+            vault = make(f"{tag}-settings")
+            ex = vault / ".obsidian" / "plugins" / excalidraw["id"]
+            ex.mkdir(parents=True)
+            (ex / "data.json").write_bytes(b'{"previousRelease":"1.0.0",  "mine": true}')
+            r = run_exe(option, str(vault), "--plugin-pins", good)
+            check(r.returncode == 0 and plugin_files(vault, excalidraw) and (ex / "data.json").read_bytes() == b'{"previousRelease":"1.0.0",  "mine": true}',
+                  f"{name}: Excalidraw installed new where its settings already are: the settings are kept byte for byte")
             # an older one whose update cannot be downloaded stays as it is
             vault = make(f"{tag}-already-offline")
             have_already(vault)

@@ -950,6 +950,9 @@ namespace ScriptoriumSetup
     // up all get them, turned on like Scriptorium's own plugins. The rules, the same as in
     // installers/Setup-Scriptorium-Vault.py, the script installers and the Scriptorium plugin:
     //   - a plugin the vault has at the pinned version or a newer one is left exactly as it is; an older one is replaced;
+    //   - only a plugin installed new is turned on: one the vault had and the user turned off stays off;
+    //   - Excalidraw, installed new, gets one setting so that its welcome window does not open (see FirstSettings);
+    //     settings that are there are never touched;
     //   - a plugin's settings (data.json) are never touched, and nothing is deleted;
     //   - a plugin that cannot be downloaded, or whose files do not match, is not installed: nothing of it is written,
     //     what Setup did to the vault stands, and the log names the plugin and says how to add it in Obsidian.
@@ -1097,8 +1100,15 @@ namespace ScriptoriumSetup
                         }
                         log(have != null ? "Updated " + p.Name + " from " + have + " to " + p.Version + " (from its own release on GitHub)"
                                          : "Installed " + p.Name + " " + p.Version + " (from its own release on GitHub)");
+                        // Only a plugin installed new is turned on and given its first settings: one that was there
+                        // and is not in the list was turned off by the user, and stays off.
+                        if (have == null)
+                        {
+                            string settings = FirstSettings(p), data = Path.Combine(folder, "data.json");
+                            if (settings != null && !File.Exists(data)) File.WriteAllBytes(data, new UTF8Encoding(false).GetBytes(settings));
+                            TurnOn(vault, p, log);
+                        }
                     }
-                    TurnOn(vault, p, log);
                 }
                 catch (Exception e)
                 {
@@ -1111,6 +1121,16 @@ namespace ScriptoriumSetup
                 }
             }
             return failed;
+        }
+
+        // The data.json written with a plugin that is installed new, where it has none; null for most. Excalidraw opens a
+        // "Welcome to Excalidraw" window the first time it runs, while its previousRelease is older than the plugin
+        // (src/core/main.ts in its source), and sets previousRelease to its own version when that window is closed
+        // (src/shared/Dialogs/ReleaseNotes.ts): writing that one setting keeps the window shut. Excalidraw fills in the
+        // rest with its defaults, and still shows its release notes after a later update (showReleaseNotes is left alone).
+        static string FirstSettings(Plugin p)
+        {
+            return p.Id == "obsidian-excalidraw-plugin" ? "{\n  \"previousRelease\": \"" + p.Version + "\"\n}\n" : null;
         }
 
         // Adds the plugin to the vault's list of community plugins that are on, if it is not in it. A list that is not a

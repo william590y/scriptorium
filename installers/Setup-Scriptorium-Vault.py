@@ -139,10 +139,24 @@ def fetch_url(url):
         return r.read()
 
 
+def first_settings(plugin):
+    """The data.json written with a plugin that is installed new, where it has none: None, or its bytes. Excalidraw
+    opens a "Welcome to Excalidraw" window the first time it runs, when its previousRelease is older than the
+    plugin (src/core/main.ts in its source); closing that window sets previousRelease to the plugin's version
+    (src/shared/Dialogs/ReleaseNotes.ts). This writes that one setting, so the window does not open in a vault the
+    writer has just been given; Excalidraw fills in every other setting with its defaults when it loads, and still
+    shows its release notes after a later update (showReleaseNotes is left alone)."""
+    if plugin["id"] != "obsidian-excalidraw-plugin":
+        return None
+    return ('{\n  "previousRelease": "%s"\n}\n' % plugin["version"]).encode("utf-8")
+
+
 def install_diagram_plugins(vault, fetch=fetch_url, log=print):
-    """Adds the diagram plugins to the vault and turns them on. A plugin the vault already has at the pinned version
-    or a newer one is left exactly as it is (its files and its settings); one that cannot be downloaded or does not
-    match its checksum is not installed, the rest of the set-up stands, and the log says how to add it by hand.
+    """Adds the diagram plugins to the vault and turns on those it installs new. A plugin the vault already has at
+    the pinned version or a newer one is left exactly as it is (its files and its settings); an older copy's files
+    are replaced. A plugin that was already there is not turned on if it was off: that is the writer's choice. One
+    that cannot be downloaded or does not match its checksum is not installed, the rest of the set-up stands, and
+    the log says how to add it by hand.
     Returns {id: 'installed' | 'updated' | 'kept' | 'failed'}."""
     result = {}
     plugins = vault / OBS / "plugins"
@@ -165,10 +179,13 @@ def install_diagram_plugins(vault, fetch=fetch_url, log=print):
                         raise OSError(f"{name} does not match its pinned SHA-256")
                     files[name] = data
                 folder.mkdir(parents=True, exist_ok=True)
-                for name, data in files.items():       # (its settings, data.json, are never touched)
+                for name, data in files.items():       # (settings that are there, data.json, are never touched)
                     tmp = folder / (name + ".scriptorium-tmp")
                     tmp.write_bytes(data)
                     os.replace(tmp, folder / name)
+                settings = first_settings(p) if had is None else None
+                if settings is not None and not (folder / "data.json").exists():
+                    (folder / "data.json").write_bytes(settings)
                 result[p["id"]] = "updated" if had is not None else "installed"
                 log(f"{p['name']} {p['version']} {'updated' if had is not None else 'installed'} (from its own release on GitHub).")
             except (OSError, ValueError) as e:
@@ -176,7 +193,11 @@ def install_diagram_plugins(vault, fetch=fetch_url, log=print):
                 log(f"{p['name']} was NOT installed ({e}). Scriptorium itself is set up. To add it: in Obsidian, "
                     f"Settings → Community plugins → Browse, search for “{p['name']}”, Install, then Enable.")
                 continue
-        # turned on, next to the plugins the vault already has on (a list that is not a JSON list is left as it is)
+        # Only a plugin installed new is turned on, next to the plugins the vault already has on: one that was
+        # there and is not in the list was turned off by the writer, and stays off. (A list that is not a JSON list is
+        # left as it is.)
+        if result[p["id"]] != "installed":
+            continue
         listing = vault / OBS / "community-plugins.json"
         on = []
         if listing.exists():
