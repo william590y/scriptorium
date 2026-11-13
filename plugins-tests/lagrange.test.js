@@ -2547,3 +2547,24 @@ test('The loader’s plates come in turn: the first by chance, then each next on
   assert.equal(L.sanitizeSettings({ loaderTheme: 'random' }).loaderTheme, 'cycle', 'the old default becomes the new one');
   assert.equal(L.sanitizeSettings({ loaderTheme: 'orbit' }).loaderTheme, 'orbit', 'a plate that was chosen stays chosen');
 });
+
+test('splitStable: a streaming reply is cut at whole blocks, never inside code or a displayed formula', () => {
+  const cut = t => { const r = L.splitStable(t); assert.equal(r.done + r.open, t, 'nothing is lost'); return [r.done, r.open]; };
+  assert.deepEqual(cut('One paragraph, still com'), ['', 'One paragraph, still com']);
+  assert.deepEqual(cut('First.\n\nSecond, still com'), ['First.\n\n', 'Second, still com']);
+  assert.deepEqual(cut('First.\n\n```js\nconst a = 1;\n\nconst b'), ['First.\n\n', '```js\nconst a = 1;\n\nconst b'], 'a blank line inside open code is not a place to cut');
+  assert.deepEqual(cut('```js\na\n\nb\n```\n\nAfter'), ['```js\na\n\nb\n```\n\n', 'After']);
+  assert.deepEqual(cut('~~~tikz\n\\draw;\n```\n\n~~~\n\nx'), ['~~~tikz\n\\draw;\n```\n\n~~~\n\n', 'x'], 'a fence closes with its own kind');
+  assert.deepEqual(cut('Before.\n\n$$\na = b\n\n+ c'), ['Before.\n\n', '$$\na = b\n\n+ c']);
+  assert.deepEqual(cut('$$\na\n\n$$\n\nAfter $$x$$ one line.\n\nz'), ['$$\na\n\n$$\n\nAfter $$x$$ one line.\n\n', 'z']);
+  assert.deepEqual(cut('Done.\n\n'), ['Done.\n\n', '']);
+  assert.deepEqual(cut(''), ['', '']);
+  // the rendered part only ever grows by whole blocks
+  const full = 'Intro.\n\n```py\nprint(1)\n\nprint(2)\n```\n\nThen $$\nx\n$$ and\n\nlast';
+  let prev = '';
+  for (let i = 0; i <= full.length; i++) { const d = L.splitStable(full.slice(0, i)).done; assert.ok(d.startsWith(prev), `at ${i}`); prev = d; }
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /if \(fresh\.trim\(\)\) renderMarkdown\(this\.app, fresh, stream\.box\.createDiv\(\)/, 'only what is new is rendered while a reply streams');
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /pre \{ max-width: 100%; overflow-x: auto;/);
+});

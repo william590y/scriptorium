@@ -3326,6 +3326,25 @@ const LOADER_CAPTIONS = {
   alchemy: 'Lagrange is distilling',
   orbit: 'Lagrange is finding the balance',
 };
+/* A reply as it streams in, cut where it is safe to render: {done, open}. done is the part made of whole blocks (it
+   ends at a blank line that is outside a code fence and outside a $$ … $$ formula); open is what is still being
+   written, which the chat shows as plain text until it closes. While a reply streams, only what is new in `done` is
+   rendered (each new stretch once), so a long reply is not rendered again at every word. Pure. */
+function splitStable(md) {
+  const text = String(md == null ? '' : md);
+  let fence = null, math = false, at = 0, safe = 0;
+  for (const line of text.split('\n')) {
+    const end = at + line.length + 1;
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.slice(f[0].length).trim()) fence = null; }
+    else if (f && !math) fence = f[1];
+    else if (((line.match(/\$\$/g) || []).length) % 2) math = !math;
+    if (!fence && !math && !line.trim() && end <= text.length) safe = end;
+    at = end;
+  }
+  return { done: text.slice(0, safe), open: text.slice(safe) };
+}
+
 /* Which plate the next loader shows when none is chosen in the settings: the first one of a session is taken by
    chance, and each one after it is the next in order, round and round, so that all of them are seen in turn.
    (Before 0.5.2 every loader was a separate throw of the dice, and a run of the same plate was common.)
@@ -6259,7 +6278,10 @@ class LagrangeChatView extends ItemView {
   addUser(text, checkpoint) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--user' });
-    el.createDiv({ cls: 'lagrange-turn-text', text });
+    // (the writer's own message is rendered too: code, mathematics and diagrams in it show as they do in a note)
+    const said = el.createDiv({ cls: 'lagrange-turn-text markdown-rendered' });
+    const target = this.plugin.targetMarkdownView();
+    try { renderMarkdown(this.app, text, said, (target && target.file && target.file.path) || '', this); } catch (e) { said.setText(text); }
     if (checkpoint) {
       checkpoint.el = el;
       const b = el.createEl('button', { cls: 'lagrange-rewind clickable-icon' });
@@ -6338,19 +6360,34 @@ class LagrangeChatView extends ItemView {
     let loader = mountLoader(body.createDiv({ cls: 'lagrange-loader-slot' }), this.plugin.settings.loaderTheme);
     this.scrollDown();
     let md = '', shown = null, timer = null, comp = null, status = null;
-    const render = () => {
+    // While the reply streams: the whole blocks that have come are rendered once each, as Obsidian renders a note
+    // (code with its colours and copy button, mathematics, Mermaid, TikZ and Excalidraw where the vault has them),
+    // and what is still being written is shown as plain text under them (splitStable). At the end the reply is
+    // rendered once more as a whole.
+    let stream = null;                     // {comp, box, tail, done}
+    const render = whole => {
       timer = null;
-      if (md === shown) return;
+      if (md === shown && !whole) return;
       shown = md;
       if (loader) { loader.stop(); loader = null; }
-      const next = new Component();
-      this.addChild(next);
-      const box = createDiv();
-      renderMarkdown(this.app, md, box, sourcePath || '', next);
-      body.empty();
-      body.appendChild(box);
-      if (comp) this.removeChild(comp);
-      comp = next;
+      if (whole || !stream) {
+        const next = new Component();
+        this.addChild(next);
+        const box = createDiv();
+        body.empty();
+        body.appendChild(box);
+        if (comp) this.removeChild(comp);
+        comp = next;
+        stream = { comp: next, box, tail: null, done: '' };
+        if (whole) { renderMarkdown(this.app, md, box, sourcePath || '', next); stream = null; this.scrollDown(); return; }
+        stream.tail = body.createDiv({ cls: 'lagrange-turn-open' });
+      }
+      const part = splitStable(md);
+      if (!part.done.startsWith(stream.done)) { stream = null; render(false); return; }   // (the text before was changed: from the start again)
+      const fresh = part.done.slice(stream.done.length);
+      if (fresh.trim()) renderMarkdown(this.app, fresh, stream.box.createDiv(), sourcePath || '', stream.comp);
+      stream.done = part.done;
+      stream.tail.setText(part.open);
       this.scrollDown();
     };
     return {
@@ -6364,7 +6401,7 @@ class LagrangeChatView extends ItemView {
         if (timer) { window.clearTimeout(timer); timer = null; }
         if (status) { status.remove(); status = null; }
         md = text;
-        if (md) render();
+        if (md) render(true);
         if (loader) { loader.stop(); loader = null; }
         if (!md) { body.empty(); if (!keep) el.addClass('is-empty'); }
       },
@@ -7821,4 +7858,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

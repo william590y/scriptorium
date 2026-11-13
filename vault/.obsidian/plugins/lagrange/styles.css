@@ -188,6 +188,17 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 
 /* Lagrange's replies: Markdown, set as text. */
 .lagrange-turn-body { overflow-wrap: anywhere; }
+/* What a reply (or the writer's message) holds beyond prose is rendered as in a note, and kept inside the panel:
+   code scrolls sideways, a wide formula or table scrolls, a figure is scaled down to the panel's width. */
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) pre { max-width: 100%; overflow-x: auto; white-space: pre; font-size: 0.82em; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(mjx-container[display="true"], .math-block, table) { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(img, svg.excalidraw-svg, .block-language-tikz svg, .mermaid svg) { max-width: 100%; height: auto; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(.block-language-tikz, .mermaid) { text-align: center; overflow-x: auto; }
+.lagrange-turn-text.markdown-rendered > :first-child { margin-top: 0; }
+.lagrange-turn-text.markdown-rendered > :last-child { margin-bottom: 0; }
+/* what is still being written, under the blocks that are rendered */
+.lagrange-turn-open { white-space: pre-wrap; }
+.lagrange-turn-open:empty { display: none; }
 .lagrange-turn-body.markdown-rendered { font-size: 1em; line-height: 1.45; }
 .lagrange-turn-body > div > :first-child { margin-top: 0; }
 .lagrange-turn-body > div > :last-child { margin-bottom: 0; }
