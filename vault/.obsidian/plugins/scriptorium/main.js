@@ -2672,6 +2672,7 @@ function syncExplain(r, what) {
   if (has(/must run --resync|requires? --resync|run --resync to recover|cannot find prior Path|filters file (?:has changed|md5)|safety abort.*filters/i)) return P('resync', 'The sync lost its record of the last run, so it stopped rather than guess.', 'A run was cut off at a bad moment, the record was deleted, or the list of what is synced changed.', 'Choose “Set up the sync again”: it compares the two sides, shows you what it will do, and keeps both versions of anything that differs.');
   if (has(/no space left on device|not enough space|disk full|There is not enough space/i)) return P('disk', 'This computer’s disk is full.', 'There was no room for the files coming from Drive.', 'Free some room, then choose “Sync now”.');
   if (has(/permission denied|access is denied|operation not permitted|being used by another process/i)) return P('disk', 'A file on this computer could not be read or written.', 'It is open in another program, or the vault’s folder does not allow it.', 'Close programs that have the vault’s files open and choose “Sync now”. The details below name the file.');
+  if (has(/\.(?:lck|lst)[\w-]*["']?: (?:file ?name too long|The filename, directory name)/i)) return P('setup', SYNC_RECORD.message, SYNC_RECORD.cause, SYNC_RECORD.next);
   if (has(/file name too long|path too long|filename too long/i)) return P('disk', 'A file’s name or path is too long for this computer.', 'A name that fits in Drive can be too long for a folder deep in this computer.', 'Shorten the name (the details below show which) on the side where it is, and sync again.');
   if (has(/unknown flag|unknown command|unknown shorthand flag|invalid argument/i)) return P('rclone', 'This rclone does not understand what Scriptorium asked of it.', `It is older or newer than the version Scriptorium was written for (${RCLONE.version}).`, 'In Settings → Scriptorium, clear the path to rclone and let Scriptorium download its own.');
   if (what === 'sign-in') return P('connect', 'The sign-in did not finish.', 'Google’s page was closed, or Google refused (see what the page in the browser said).', 'Try again. If Google’s page said “Access blocked” or “deleted_client”, use a client ID of your own.');
@@ -2839,6 +2840,17 @@ function syncPrune(fs, path, dir, days, now) {
   return removed;
 }
 
+/* rclone names its record of a sync after both paths, in one file name ("local__<vault's path>..<remote>_<Drive
+   path>.path1.lst-new"), and a file name has a limit (255 bytes on every system). A problem if the two paths
+   together are too long for it, or null. */
+const SYNC_RECORD = { message: 'This vault’s folder and the Drive folder have paths that are too long, taken together, for rclone to keep its record of the sync.',
+  cause: 'rclone names that record after both paths, and a file’s name can be 255 characters at most.',
+  next: 'Move the vault to a folder with a shorter path, or choose a Drive folder that is less deep, and set up the sync again.' };
+function syncTooLong(dir, link) {
+  if (Buffer.byteLength(String(dir)) + Buffer.byteLength(syncTarget(link).fs) <= 225) return null;
+  return syncProblem('setup', SYNC_RECORD.message, SYNC_RECORD.cause, SYNC_RECORD.next);
+}
+
 /* One sync of a linked vault. o: {api, fs, path, crypto, paths, id, dir (the vault), link, settings, force, now,
    pid, alive, onLine, signal}. Resolves {summary, skipped} ('busy': another run has the lock); throws a problem.
    Before rclone is run: the vault's folder and its check file must be there (a vault whose disk is missing, or a
@@ -2855,6 +2867,8 @@ async function syncOnce(o) {
     throw syncProblem('check', `The file that proves both sides are there (${SYNC_SENTINEL}) is missing in this vault, so nothing was changed.`,
       'It was deleted, or this folder is not the one that was synced.', 'Look at both sides. If they are as you expect, choose “Set up the sync again”: it compares the two sides and shows you what it will do first.');
   }
+  const long = syncTooLong(o.dir, link);
+  if (long) throw long;
   const lock = path.join(paths.locks, `${id}.lock`);
   if (!syncLock(fs, path, lock, o.pid, o.now(), o.alive)) return { skipped: 'busy' };
   try {
@@ -2899,7 +2913,8 @@ async function syncPreview(o) {
     const cmp = await o.api.compare(o.dir, o.link, filters, o.signal);
     const both = cmp.same.length + cmp.differ.length + cmp.unread.length;   // the check file is not counted
     return { local: { count: both + cmp.local.length, bytes: local.bytes }, drive: { count: both + cmp.drive.length, bytes: drive.bytes },
-      same: cmp.same.length, onlyLocal: cmp.local.length, onlyDrive: cmp.drive.length, differ: cmp.differ, unread: cmp.unread };
+      same: cmp.same.length, onlyLocal: cmp.local.length, onlyDrive: cmp.drive.length, differ: cmp.differ, unread: cmp.unread,
+      taken: cmp.drive.filter(n => SYNC_CONFLICT.test(n)) };   // kept copies that are in Drive already: their names are not given again
   } finally {
     try { fs.unlinkSync(filters); } catch (e) { /* written again next time */ }
   }
@@ -2913,6 +2928,8 @@ async function syncPreview(o) {
    Resolves {summary, renamed: [[from, to]]}. */
 async function syncFirst(o) {
   const { fs, path, paths, id } = o;
+  const long = syncTooLong(o.dir, o.link);
+  if (long) throw long;
   const lock = path.join(paths.locks, `${id}.lock`);
   if (!syncLock(fs, path, lock, o.pid, o.now(), o.alive)) throw syncProblem('busy', 'Another sync of this vault is running.', 'A second window, or a run that has not finished.', 'Wait for it to finish and try again.');
   try {
@@ -3573,7 +3590,7 @@ class SyncModal extends Modal {
     const k = this.kit, link = this.link, settings = syncSettings(this.plugin.settings);
     const p = this.progress('Syncing for the first time…');
     await this.plugin.engine.running;   // a timer's run of an earlier link ends first
-    const r = await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, differ: pv.differ, keep,
+    const r = await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, differ: pv.differ, taken: pv.taken, keep,
       now: () => Date.now(), pid: process.pid, alive: k.alive, onLine: p.onLine, signal: this.stop.signal });
     this.plugin.saveSyncLink(Object.assign({}, link, { linked: link.linked || new Date().toISOString(), first: new Date().toISOString() }));
     this.plugin.engine.set({ status: 'idle', last: Date.now(), summary: r.summary, problem: null });
@@ -3633,6 +3650,7 @@ class SyncModal extends Modal {
     if (st.status === 'problem' && p && p.kind === 'deletes') row.createEl('button', { cls: 'mod-cta', text: 'Sync anyway' }).addEventListener('click', () => this.go(() => this.syncNow({ force: true })));
     else if (st.status === 'problem' && p && p.kind === 'connect') row.createEl('button', { cls: 'mod-cta', text: 'Connect to Google Drive' }).addEventListener('click', () => this.go(() => this.askConnect()));
     else if (st.status === 'problem' && p && p.kind === 'client') row.createEl('button', { cls: 'mod-cta', text: 'Use a client ID of my own' }).addEventListener('click', () => this.go(() => this.askConnect('own')));
+    else if (st.status === 'problem' && p && p.kind === 'rclone') row.createEl('button', { cls: 'mod-cta', text: 'Find or download rclone' }).addEventListener('click', () => this.go(() => this.askRclone()));
     else if (st.status === 'problem' && p && ['check', 'empty', 'resync', 'folder', 'setup'].includes(p.kind)) row.createEl('button', { cls: 'mod-cta', text: 'Set up the sync again' }).addEventListener('click', () => this.go(() => this.setupAgain()));
     else row.createEl('button', { cls: 'mod-cta', text: 'Sync now' }).addEventListener('click', () => this.go(() => this.syncNow()));
     row.createEl('button', { text: 'Replaced files…' }).addEventListener('click', () => {
@@ -4391,5 +4409,5 @@ Object.assign(module.exports, {
   syncLink, syncSaveLink, rcloneAsset, rcloneCandidates, findRclone, rcloneVersion, rcloneOldEnough, zipEntry, syncFetch, rcloneInstall, syncProblem, rcloneEnv,
   syncLogLine, rcloneExec, syncConfRead, syncConnection, syncConfPrepare, syncParseClient, syncFilters, syncTarget, syncWhere, syncFolderName, syncParseDirs,
   syncParseCheck, syncConflictName, syncBisyncArgs, syncSummary, syncSummaryText, syncExplain, rcloneApi, syncLock, syncUnlock, syncClearStale, syncPrune, syncOnce, syncStamp,
-  syncPreview, syncFirst, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
+  syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
 });

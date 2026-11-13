@@ -159,6 +159,7 @@ test('the first sync: what it will do is shown first, both sides end up with eve
   const pv = await a.preview();
   assert.deepEqual({ local: pv.local.count, drive: pv.drive.count, same: pv.same, onlyLocal: pv.onlyLocal, onlyDrive: pv.onlyDrive, differ: pv.differ },
     { local: 4, drive: 3, same: 1, onlyLocal: 2, onlyDrive: 1, differ: ['Notes/differs.md'] });
+  assert.deepEqual(pv.taken, []);
   assert.ok(!has(a.dir, S.SYNC_SENTINEL) && !has(d.folder, 'Notes/only here.md'), 'looking changes nothing');
   const r = await a.first({ differ: pv.differ, keep: 'both' });
   assert.deepEqual(r.renamed, [['Notes/differs.md', 'Notes/differs.conflict1.md']]);

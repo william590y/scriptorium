@@ -401,7 +401,9 @@ a key or password in its `data.json`, it goes to your Drive with the rest.
 Names: Drive allows characters in a name that Windows does not (`: * ? " < > |`, a trailing full stop). rclone
 replaces them with look-alike characters on the way down to a Windows computer and puts them back on the way up, so
 such files sync; they look slightly different in Windows' file manager. Drive also allows two files of the same name
-in one folder, which no computer does: rclone warns and syncs one of them, so rename one in Drive.
+in one folder, which no computer does: rclone warns and syncs one of them, so rename one in Drive. And rclone keeps
+its record of a sync in a file named after both paths: if the vault's folder and the Drive folder have paths of more
+than about 225 characters together, Scriptorium says so and asks for a shorter one.
 
 ### Where things are kept
 

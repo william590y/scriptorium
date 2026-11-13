@@ -490,6 +490,19 @@ test('the sync’s command: every guard is on it; the first sync, “Sync anyway
   return api.bisync(a).catch(() => { assert.deepEqual(seen.slice(0, 5), ['--config', path.join(os.tmpdir(), 'rclone.conf'), '--color', 'NEVER', '--use-json-log']); });
 });
 
+test('paths too long for rclone’s record are refused before rclone is run, in plain words', async () => {
+  assert.equal(S.syncTooLong('C:\\Users\\Ada\\Documents\\Vault', { root: 'my', path: 'Vaults/Mine' }), null);
+  const deep = `/home/ada/${'a very long folder name/'.repeat(9)}Vault`;
+  const e = S.syncTooLong(deep, { root: 'my', path: 'Writing/Projects/Novel' });
+  assert.equal(e.kind, 'setup');
+  assert.match(e.message, /paths that are too long/);
+  assert.ok(e.cause2 && /shorter path/.test(e.next));
+  let ran = false;
+  await assert.rejects(S.syncOnce({ api: { bisync: () => { ran = true; } }, fs, path, paths: S.syncPaths(path, os.tmpdir(), process.platform), id: 'x', dir: deep, link: { root: 'my', path: 'Writing/Projects/Novel', first: 'y' },
+    settings: S.syncSettings({}), now: Date.now, pid: 1, alive: () => true }), x => x.kind === 'empty' || x.kind === 'setup');
+  assert.equal(ran, false);
+});
+
 test('how the two sides compare is read from rclone’s check; the check file is not counted', () => {
   const r = S.syncParseCheck('= Notes/same.md\n+ only here.md\n- only in drive.md\n* Notes/differs.md\n! unreadable.md\n= .scriptorium-sync\n+ name with = and + signs.md\n\n');
   assert.deepEqual(r, { same: ['Notes/same.md'], local: ['only here.md', 'name with = and + signs.md'], drive: ['only in drive.md'], differ: ['Notes/differs.md'], unread: ['unreadable.md'] });
@@ -545,6 +558,8 @@ test('every failure is a plain sentence with a likely cause and a next step; rcl
     [['Failed to copy: write /home/ada/Vault/big.wav: no space left on device'], 'sync', 'disk'],
     [['Failed to copy: open C:\\Users\\Ada\\Vault\\a.md: The process cannot access the file because it is being used by another process.'], 'sync', 'disk'],
     [['Failed to copy: open /home/ada/Vault/x: permission denied'], 'sync', 'disk'],
+    [['Failed to copy: open /home/ada/Vault/' + 'x'.repeat(260) + '.md: file name too long'], 'sync', 'disk'],
+    [['Failed to bisync: open /home/ada/.local/share/scriptorium/bisync/ab/local__home_ada_' + 'x'.repeat(200) + '..scriptorium-drive_Vault.lck: file name too long'], 'sync', 'setup'],
     [['Fatal error: unknown flag: --conflict-resolve'], 'sync', 'rclone'],
     [['something nobody has seen before: 0xDEADBEEF {"weird":true}'], 'sync', 'unknown'],
     [['something nobody has seen before'], 'copy', 'unknown'],
