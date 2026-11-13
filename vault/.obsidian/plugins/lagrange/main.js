@@ -489,7 +489,83 @@ function locateEdits(doc, edits) {
     located.push(Object.assign({}, e, { from, to, matched: doc.slice(from, to) }));
   }
   located.sort((a, b) => a.from - b.from);
+  return chainSkipped(doc, located, skipped);
+}
+
+/* Edits that build on one another. An edit of a reply may name words that are only in the note once an earlier
+   edit of the same reply is made (it rewrites a sentence, then adds one after the new sentence). Such an edit is not
+   found in the note as it is; it is looked for in the note as the edits located so far leave it, and joined to the
+   edit whose text it touches, so that the two are one change of the note as it is (the pen writes them as one).
+   workingText(doc, located) -> {text, spans}: the note with the located edits (sorted, not overlapping) made, and
+   where each one's new text stands in it. Pure. */
+function workingText(doc, located) {
+  let text = '', at = 0;
+  const spans = [];
+  for (const e of located) {
+    text += doc.slice(at, e.from);
+    spans.push({ e, start: text.length, end: text.length + e.replace.length });
+    text += e.replace;
+    at = e.to;
+  }
+  return { text: text + doc.slice(at), spans };
+}
+
+/* Makes one more change, of [a, b) of the working text into `replace`, part of the located edits: an edit of its own
+   if it touches none of them, else joined with those it touches. -> the new list of located edits. Pure. */
+function foldEdit(doc, located, a, b, replace, extra) {
+  const { text, spans } = workingText(doc, located);
+  const hit = s => (s.end > a && s.start < b) || (s.start === s.end && a < s.start && s.start < b) || (a === b && s.start <= a && a <= s.end);
+  const first = spans.findIndex(hit);
+  // where an offset of the working text that is in none of the edits' new text stands in the note
+  const inNote = x => { let d = 0; for (const s of spans) if (s.end <= x) d += (s.e.to - s.e.from) - (s.end - s.start); return x + d; };
+  if (first < 0) {
+    const from = inNote(a), to = inNote(b);
+    return located.concat(Object.assign({ find: doc.slice(from, to), matched: doc.slice(from, to), replace, from, to }, extra, from === to ? { insert: true } : {}))
+      .sort((x, y) => x.from - y.from || x.to - y.to);
+  }
+  let last = first;
+  for (let i = first; i < spans.length; i++) if (hit(spans[i])) last = i;
+  const wa = Math.min(a, spans[first].start), wb = Math.max(b, spans[last].end);
+  const from = wa < spans[first].start ? inNote(wa) : spans[first].e.from, to = wb > spans[last].end ? inNote(wb) : spans[last].e.to;
+  const joined = spans.slice(first, last + 1).map(s => s.e);
+  const reasons = joined.map(e => e.reason).concat(extra && extra.reason).filter(Boolean);
+  const merged = {
+    find: doc.slice(from, to), matched: doc.slice(from, to), replace: text.slice(wa, a) + replace + text.slice(b, wb),
+    reason: Array.from(new Set(reasons)).join('; '), from, to, chained: joined.reduce((n, e) => n + (e.chained || 1), 1),
+  };
+  if (from === to) merged.insert = true;
+  return located.filter(e => !joined.includes(e)).concat(merged).sort((x, y) => x.from - y.from || x.to - y.to);
+}
+
+/* Gives the edits that were not found in the note a second look, in the note as the located edits leave it
+   (see above). skipped entries: a replacement {find, replace}, or an insertion {insert: true, find: the anchor,
+   side: 'after' | 'before', replace: the text}. -> {located, skipped}. Pure. */
+function chainSkipped(doc, located, skipped) {
+  // (again for as long as one more is placed: an edit may build on one that comes after it in the list)
+  for (let n = skipped.length + 1; skipped.length < n;) {
+    n = skipped.length;
+    const once = chainOnce(doc, located, skipped);
+    located = once.located;
+    skipped = once.skipped;
+  }
   return { located, skipped };
+}
+function chainOnce(doc, located, skipped) {
+  const left = [];
+  for (const e of skipped) {
+    if (!/not found in the note$/.test(e.why || '') || !e.find || !located.length) { left.push(e); continue; }
+    const text = workingText(doc, located).text;
+    let hits = findAll(text, e.find);
+    if (!hits.length) hits = looseFindAll(text, e.find);
+    if (hits.length !== 1) {
+      left.push(hits.length ? Object.assign({}, e, { why: `${e.why}, and ${hits.length} times in the note as the edits before it leave it` }) : e);
+      continue;
+    }
+    const [a, b] = hits[0];
+    if (e.insert) { const at = e.side === 'before' ? a : b; located = foldEdit(doc, located, at, at, e.replace, { reason: e.reason }); }
+    else located = foldEdit(doc, located, a, b, e.replace, { reason: e.reason });
+  }
+  return { located, skipped: left };
 }
 
 /* At most limit characters of text, cut at line ends where possible, centred on focus (an offset, e.g. the cursor;
@@ -615,7 +691,7 @@ function parseAgentReply(reply) {
    an edit of an empty range, next to its anchor; an append goes at the end of the note, after a blank line. */
 function locateOps(doc, ops) {
   const { located, skipped } = locateEdits(doc, ops.filter(o => o.op === 'replace').map(o => ({ find: o.find, replace: o.replace, reason: o.reason })));
-  const skip = (o, find, why) => skipped.push({ find, matched: '', replace: o.text, reason: o.reason, why, insert: true });
+  const skip = (o, find, why) => skipped.push({ find, matched: '', replace: o.text, reason: o.reason, why, insert: true, side: o.after ? 'after' : 'before' });
   for (const o of ops) {
     if (o.op === 'replace') continue;
     let at, anchor = '';
@@ -635,7 +711,7 @@ function locateOps(doc, ops) {
     located.push({ find: '', matched: '', replace: insert, reason: o.reason, from: at, to: at, insert: true });
   }
   located.sort((a, b) => a.from - b.from || a.to - b.to);
-  return { located, skipped };
+  return chainSkipped(doc, located, skipped);
 }
 
 /* ---- Looking at the page ----
@@ -906,7 +982,7 @@ function describeLook(look, limit) {
     if (b.math && b.math.length > 4) parts.push(`${b.math.length - 4} more formulas`);
     for (const im of (b.images || []).slice(0, 3)) {
       parts.push(`picture${im.alt ? ` “${excerpt(im.alt, 40)}”` : ''} ${Math.round(im.width)}×${Math.round(im.height)} px` +
-        `${im.broken ? ' (did not load)' : ''}${im.remote ? ' (from the web: a grey box in the picture of the page)' : ''}`);
+        `${im.broken ? ' (did not load)' : ''}${im.remote ? ' (from the web)' : ''}`);
     }
     for (const note of (b.notes || []).slice(0, 6)) parts.push(`footnote ${note.label} ${note.where === 'margin' ? 'in the margin' : 'at the foot'}`);
     if (b.overflow > 1) parts.push(`${Math.round(b.overflow)} px too wide for its column${b.scrolls ? ' (it scrolls)' : ''}`);
@@ -948,7 +1024,7 @@ function lookMessage(look, opts) {
   const n = pictures.length, total = n + (look.more || 0);
   const part = `The page of “${look.title}” as Reading view renders it: ${look.label}` +
     `${look.page && look.page.cut ? ' (the note is very long, so only the part around it was rendered)' : ''}. ` +
-    'The note’s properties are left out.';
+    (look.page && look.page.properties ? `The note’s properties stand above its text, as the view shows them (${look.page.properties}).` : 'The note’s properties are not shown on the page.');
   const remarks = (look.remarks || []).map(r => `\n${r}`).join('');
   const rest = look.more ? ` They are the first ${n} of ${total} pages of it: look at a section, a passage or a range of lines to see further on.` : '';
   const text = how => `<rendered_page>\n${part} ${how}${remarks}\n\n${look.description}\n</rendered_page>\n\n${carry}`;
@@ -1297,10 +1373,36 @@ function wordCut(text, max) {
 /* A line that only marks where Scriptorium centres text or sets it to the right ("::: center", "::: right", ":::";
    see ALIGN_STYLE). The note does not show it as text, so the pen never writes it. */
 const ALIGN_MARK = /^[ \t]*:{3,}[ \t]*(?:\{?[ \t]*\.?(?:cent(?:er|re|ered|red)|right)(?![\w-])[^\n]*)?$/;
-function penScript(replacement, limit) {
+/* Prose as the page shows it: without the Markdown marks that the rendered text hides. Emphasis (*…*, _…_, **…**,
+   __…__), ~~struck~~ and ==marked== text and code spans keep their words; a link keeps its text, a wikilink its
+   alias or its target; a comment (%%…%%) and HTML tags go; a heading's # and a quotation's > at the start of a line
+   go; an escaped character (\*) stays as the character. What is not closed stays as it is written. Pure. */
+function plainInline(text) {
+  // (an escaped character is put out of the way as a private-use character, and put back at the end)
+  let t = String(text == null ? '' : text)
+    .replace(/\\([\\`*_{}[\]()#+\-.!~=|>$%])/g, (m, c) => String.fromCharCode(0xE100 + c.charCodeAt(0)))
+    .replace(/(^|\n)[ \t]*(?:#{1,6}[ \t]+|>[ \t]?)+/g, '$1')
+    .replace(/%%[\s\S]*?%%/g, '')
+    .replace(/!?\[\[([^\]|\n]*)\|([^\]\n]*)\]\]/g, '$2')
+    .replace(/!?\[\[([^\]\n]*)\]\]/g, '$1')
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/<\/?[A-Za-z][^<>\n]*>/g, '');
+  for (let i = 0; i < 3; i++) {
+    t = t.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+      .replace(/\*(?=[^\s*])([^*\n]*?[^\s*])\*/g, '$1')
+      .replace(/(^|[^A-Za-z0-9_])_(?=[^\s_])([^_\n]*?[^\s_])_(?![A-Za-z0-9_])/g, '$1$2')
+      .replace(/~~(?=\S)([^\n]*?\S)~~/g, '$1')
+      .replace(/==(?=\S)([^\n]*?\S)==/g, '$1');
+  }
+  return t.replace(/[\uE100-\uE1FF]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE100));
+}
+
+/* (plain: the text is written as Live Preview shows it, without its Markdown marks; see plainInline) */
+function penScript(replacement, limit, plain) {
   const max = limit || 48;
   const segs = mathSegments(String(replacement == null ? '' : replacement).split('\n').filter(l => !ALIGN_MARK.test(l)).join('\n').trim(), { code: true })
-    .map(g => (g.type === 'text' ? { type: 'text', text: g.text.replace(/\s+/g, ' ') } : g))
+    .map(g => (g.type === 'text' ? { type: 'text', text: (plain ? plainInline(g.text) : g.text).replace(/\s+/g, ' ') } : g))
     .filter(g => g.type !== 'text' || g.text);
   if (segs.length && segs[0].type === 'text') segs[0].text = segs[0].text.trimStart();
   if (segs.length && segs[segs.length - 1].type === 'text') segs[segs.length - 1].text = segs[segs.length - 1].text.trimEnd();
@@ -4177,12 +4279,12 @@ function createPen(app, settings) {
             const out = [];
             rows.slice(0, mayWrite).forEach((r, i) => {
               out.push({ type: 'row', row: r, gap: i ? Math.max(1, Math.round((r.top - rows[i - 1].top) / col.lineHeight)) : 0 });
-              for (const g of penScript(r.text, 150)) out.push(g);
+              for (const g of penScript(r.text, 150, live)) out.push(g);
             });
             if (rows.length > mayWrite || rows.more) out.push({ type: 'text', text: ' …' });
             return out;
           };
-          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite))).filter(g => {
+          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite), live)).filter(g => {
             if (g.type !== 'math') return true;
             const i = inNote.indexOf(bare(g.source));
             if (i < 0) return true;
@@ -4991,6 +5093,7 @@ async function renderPage(app, view, text, width, frontmatter) {
     const written = pane.createDiv();
     await renderMarkdown(app, text, written, file.path, component);
     page.sizer = dressLikeReadingView(written, file.basename);
+    page.properties = dressProperties(view, page.sizer, frontmatter);
     page.sizer.createDiv({ cls: 'mod-footer mod-ui' });
     page.margin = dressLikeScriptorium(app, { file, host, content, text, frontmatter });
     return page;
@@ -5042,6 +5145,32 @@ function dressLikeReadingView(written, title) {
   }
   written.replaceWith(sizer);
   return sizer;
+}
+
+/* The note's properties, as the view shows them: Obsidian makes that box for a view, not for rendered Markdown, so
+   the one the note's own view shows now (in Reading view or in the editor; they look the same) is copied to its place
+   under the title, with what is typed in its fields. Where the view shows none (the note has none, or properties are
+   set not to show) the page has none either. -> the properties in words ("tags: a, b; date: 2026-01-01"), or ''. */
+function dressProperties(view, sizer, frontmatter) {
+  try {
+    const shown = Array.from(view.containerEl.querySelectorAll('.metadata-container')).find(el => el.offsetHeight > 0 && el.querySelector('.metadata-property'));
+    const header = sizer.querySelector('.mod-header');
+    if (!shown || !header) return '';
+    const copy = shown.cloneNode(true);
+    const from = Array.from(shown.querySelectorAll('input, textarea')), to = Array.from(copy.querySelectorAll('input, textarea'));
+    from.forEach((el, i) => {
+      if (!to[i]) return;
+      if (el.type === 'checkbox') { if (el.checked) to[i].setAttribute('checked', ''); else to[i].removeAttribute('checked'); }
+      else if (to[i].tagName === 'TEXTAREA') to[i].textContent = el.value;
+      else to[i].setAttribute('value', el.value);
+    });
+    for (const el of Array.from(copy.querySelectorAll('[contenteditable]'))) el.removeAttribute('contenteditable');
+    header.appendChild(copy);
+    const say = v => (Array.isArray(v) ? v.map(say).join(', ') : v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
+    return excerpt(Object.keys(frontmatter || {}).filter(k => k !== 'position').map(k => `${k}: ${say(frontmatter[k])}`).join('; '), 300);
+  } catch (e) {
+    return '';
+  }
 }
 
 /* A note embedded in the page (![[Another note]]) arrives a moment after the page's own blocks, written the same
@@ -5111,7 +5240,11 @@ async function settlePage(page, signal) {
   watch.observe(host, { subtree: true, childList: true, attributes: true, characterData: true });
   const relay = () => { if (page.margin && typeof page.margin.layout === 'function') { try { page.margin.layout(); } catch (e) { /* Scriptorium's own */ } } };
   try {
-    try { if (typeof obsidian.finishRenderMath === 'function') await obsidian.finishRenderMath(); } catch (e) { /* no mathematics */ }
+    // (only where the page has mathematics, and never for long: in a session that has typeset none yet, Obsidian's
+    // promise for a page without any does not settle, and a look would wait on it for ever)
+    try {
+      if (typeof obsidian.finishRenderMath === 'function' && host.querySelector('.math')) await Promise.race([obsidian.finishRenderMath(), sleep(3000, signal)]);
+    } catch (e) { if (isAbort(e)) throw e; /* no mathematics */ }
     for (const img of Array.from(host.querySelectorAll('img'))) if (img.loading === 'lazy') img.loading = 'eager';
     if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(2000, signal)]);
     for (let laid = false; ;) {
@@ -5332,8 +5465,10 @@ function measurePage(page, info) {
 
 /* The page's markup and styles, as one XHTML text the browser can draw by itself, with nothing to fetch: the page
    (a copy of it) inside copies of <html> and <body>, which carry the classes the theme's rules look for; every style
-   rule of the document; the fonts in use, and the note's own pictures, as data. A picture from the web is not read
-   again (Lagrange makes no request of its own for one): a grey box of its size stands in its place. */
+   rule of the document; the fonts in use, and the note's pictures, as data. A picture from the web is asked for
+   from its own address once more, as Obsidian asks for it to show the note (most often it is answered from the cache),
+   and can be used only if its server lets a page read it; one that cannot be read has a box of its size in its
+   place that says so, and page.web counts both kinds. */
 async function pageMarkup(page, signal) {
   const host = page.host, doc = host.ownerDocument, win = doc.defaultView || window;
   const asData = async url => {
@@ -5347,6 +5482,28 @@ async function pageMarkup(page, signal) {
       reader.readAsDataURL(blob);
     });
   };
+  // a picture from the web, drawn again so that it can be read: only one whose server allows that comes out
+  const fromWeb = (url, w, h) => new Promise((resolve, reject) => {
+    const img = new win.Image();
+    const timer = win.setTimeout(() => reject(new Error('too slow')), 4000);
+    img.crossOrigin = 'anonymous';
+    img.onerror = () => { win.clearTimeout(timer); reject(new Error('not readable')); };
+    img.onload = () => {
+      win.clearTimeout(timer);
+      try {
+        const k = Math.min(1, 1600 / Math.max(1, img.naturalWidth, img.naturalHeight)), canvas = doc.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * k));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * k));
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        let data = canvas.toDataURL('image/png');
+        if (data.length > 1500000) data = canvas.toDataURL('image/jpeg', 0.85);
+        resolve(data);
+      } catch (e) { reject(e); }
+    };
+    img.src = url;
+    if (signal) signal.addEventListener('abort', () => { win.clearTimeout(timer); reject(abortError()); }, { once: true });
+  });
+  page.web = { shown: 0, missing: 0 };
   // a file of the vault or of Obsidian itself (the app's own address), never the network
   const local = url => /^(?:app|capacitor|file|blob):/i.test(url) || (/^https?:/i.test(url) && new URL(url).origin === win.location.origin);
   const inline = async (text, base) => {
@@ -5398,7 +5555,7 @@ async function pageMarkup(page, signal) {
 
   const live = Array.from(host.querySelectorAll('*')), copies = Array.from(copy.querySelectorAll('*'));
   const box = (el, c) => { const r = el.getBoundingClientRect(); c.setAttribute('width', String(Math.round(r.width))); c.setAttribute('height', String(Math.round(r.height))); return r; };
-  const blank = (w, h) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.max(1, Math.round(w))}" height="${Math.max(1, Math.round(h))}"><rect width="100%" height="100%" fill="#888" fill-opacity="0.25"/></svg>`)}`;
+  const blank = (w, h, label) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.max(1, Math.round(w))}" height="${Math.max(1, Math.round(h))}"><rect width="100%" height="100%" fill="#888" fill-opacity="0.25"/>${label ? `<text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="${Math.max(9, Math.min(15, Math.round(w / 22)))}" fill="#666">${xmlSafe(label)}</text>` : ''}</svg>`)}`;
   let budget = 12000000;                                    // characters of pictures, as data, in one page
   for (let i = 0; i < live.length && i < copies.length; i++) {
     const el = live[i], c = copies[i], tag = el.tagName.toLowerCase();
@@ -5408,9 +5565,13 @@ async function pageMarkup(page, signal) {
       c.removeAttribute('loading');
       if (/^data:/i.test(src)) continue;
       let data = '';
-      try { if (local(src) && budget > 0) data = await asData(src); } catch (e) { /* a grey box */ }
+      const web = /^https?:/i.test(src) && !local(src);
+      try {
+        if (budget > 0 && !(el.complete && !el.naturalWidth)) data = web ? await fromWeb(src, r.width, r.height) : local(src) ? await asData(src) : '';
+      } catch (e) { if (isAbort(e)) throw e; /* a box in its place */ }
       budget -= data.length;
-      c.setAttribute('src', data || blank(r.width, r.height));
+      if (web) page.web[data ? 'shown' : 'missing']++;
+      c.setAttribute('src', data || (web ? blank(r.width, r.height, 'picture from the web, not shown here') : blank(r.width, r.height)));
     } else if (tag === 'canvas') {
       const img = doc.createElement('img');
       const r = box(el, img);
@@ -5515,7 +5676,10 @@ async function lookAtPage(app, view, spec, opts) {
         if (isAbort(e) || (signal && signal.aborted)) throw abortError();
         problem = String((e && e.message) || e).slice(0, 160);
       }
+      const lost = page.web ? page.web.missing : 0;
+      if (lost && pictures.length) remarks.push(`${lost === 1 ? 'One picture' : `${lost} pictures`} from the web could not be read for the picture of the page (${lost === 1 ? 'its server does' : 'their servers do'} not allow it): a grey box that says so stands in ${lost === 1 ? 'its' : 'their'} place; the size and the description below are right.`);
     }
+    measured.page.properties = page.properties || '';
     const look = {
       spec: want, label: range.remark ? 'the whole note' : lookLabel(want), title: file.basename, path: file.path, page: measured.page,
       blocks: blocks.slice(range.first, range.last + 1), pictures, more: pictures.length ? pages.more : 0, remarks, problem, description: '',
@@ -7388,4 +7552,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

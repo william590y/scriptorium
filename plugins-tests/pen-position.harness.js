@@ -96,6 +96,18 @@
     // together, and are then written by two pens at once: see "several pens: one pen, then two" below)
     { name: 'three edits far apart: the view at the end is the view that was watched', several: false, ops: [
       { find: 'Short line here.', replace: 'Short sentence here.' }, { find: 'mentions energy once', replace: 'speaks of energy only the one time' }, { append: 'An appended closing remark.' }] },
+    // (edits that build on one another are joined into one, and written as one)
+    { name: 'an edit that builds on the one before it (the second is anchored on words the first writes)', ops: [
+      { find: 'Short line here.', replace: 'Short sentence here.' }, { insert_after: 'Short sentence here.', text: ' And a second sentence comes after it.' }] },
+    // (noMarks: the handwriting has none of the Markdown marks that Live Preview hides)
+    { name: 'emphasis, a link and a code span: the hand writes the words, not their marks', noMarks: true, ops: [
+      { find: 'Short line here.', replace: 'A *short* line with **bold** words, a [link](https://example.org) and `code` here.' }] },
+    { name: 'Source mode: emphasis is on the page, and is written with its marks', mode: 'source', marks: true, ops: [
+      { find: 'Short line here.', replace: 'A *short* line here.' }] },
+    // (panel: the width of the right sidebar for the case; 610 leaves a text column of about 450 px)
+    { name: 'a narrow column, Source mode: equation (drawn in the script)', panel: 610, mode: 'source', ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 0 },
+    { name: 'a narrow column: inline equation at the end of a sentence', panel: 610, ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 1 },
+    { name: 'a narrow column: replace mid-paragraph', panel: 610, ops: [{ find: 'The kinetic energy of a moving body grows with the square of its speed.', replace: 'The energy of motion grows as the square of the speed, so twice as fast is four times as hard to stop.' }] },
     { name: 'Reading view: equation', mode: 'reading', ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 1 },
     // (aligned: each line of handwriting starts where the note starts that line; the first of them is set as said)
     { name: 'centred verse appended (three lines, each where the note sets it)', note: VERSE, aligned: 'center', lines: 3,
@@ -117,6 +129,21 @@
   let file = app.vault.getAbstractFileByPath(path);
   if (!file) file = await app.vault.create(path, NOTE);
   const leaf = app.workspace.getLeavesOfType('markdown')[0] || app.workspace.getLeaf(true);
+  // The harness sets its own layout, and puts back what it found: the left sidebar shut, the right one (Lagrange's)
+  // open at PANEL px, in a window of 1180 by 760 where the window can be sized (the desktop app).
+  const PANEL = 390, ws = app.workspace;
+  const layout = { left: ws.leftSplit.collapsed, right: ws.rightSplit.collapsed, width: ws.rightSplit.collapsed ? null : ws.rightSplit.containerEl.getBoundingClientRect().width, bounds: null, zoom: null };
+  const setPanel = async width => { if (ws.rightSplit.collapsed) ws.rightSplit.expand(); ws.rightSplit.setSize(width); await sleep(150); };
+  try {
+    const remote = require('@electron/remote'), win = remote.getCurrentWindow();
+    layout.bounds = win.getBounds();
+    layout.zoom = require('electron').webFrame.getZoomFactor();
+    if (!win.isMaximized() || options.resize !== false) { win.unmaximize(); win.setBounds({ x: layout.bounds.x, y: layout.bounds.y, width: 1180, height: 760 }); }
+    require('electron').webFrame.setZoomFactor(1);
+  } catch (e) { /* not the desktop app: the window is as it is */ }
+  await plugin.activateView(false);
+  ws.leftSplit.collapse();
+  await setPanel(PANEL);
   const saved = { speed: plugin.settings.penSpeed, pen: plugin.settings.showPen, concurrent: plugin.settings.editWhileWriting, provider: plugin.settings.provider, trail: plugin.settings.penTrail, several: plugin.settings.severalPens, max: plugin.settings.maxPens };
   plugin.settings.severalPens = true;
   plugin.settings.maxPens = 3;
@@ -172,21 +199,28 @@
     return out.slice(0, n);
   };
   // The left edge of each line of handwriting, the first included.
+  // (boxes are one line when one's middle lies within the other's height: an equation typeset in the script is a
+  // taller box than the words beside it, with its middle a little off theirs)
   const handLines = hand => {
-    const lefts = new Map();
+    const boxes = [];
     for (const span of hand.children) {
       if (span.classList.contains('lagrange-pen-base') || span.classList.contains('lagrange-pen-lead')) continue;
-      for (const r of span.getClientRects()) {
-        if (r.width < 1) continue;
-        const key = Math.round((r.top + r.bottom) / 2 / 4);
-        lefts.set(key, Math.min(lefts.has(key) ? lefts.get(key) : Infinity, r.left));
-      }
+      for (const r of span.getClientRects()) if (r.width >= 1) boxes.push(r);
     }
-    return Array.from(lefts.entries()).sort((a, b) => a[0] - b[0]).map(e => e[1]);
+    boxes.sort((a, b) => (a.top + a.bottom) - (b.top + b.bottom));
+    const lines = [];
+    for (const r of boxes) {
+      const mid = (r.top + r.bottom) / 2, line = lines[lines.length - 1];
+      if (line && ((mid > line.top && mid < line.bottom) || ((line.top + line.bottom) / 2 > r.top && (line.top + line.bottom) / 2 < r.bottom))) {
+        line.left = Math.min(line.left, r.left); line.top = Math.min(line.top, r.top); line.bottom = Math.max(line.bottom, r.bottom);
+      } else lines.push({ left: r.left, top: r.top, bottom: r.bottom });
+    }
+    return lines.map(l => l.left);
   };
 
   const results = [];
   for (const c of cases) {
+    await setPanel(c.panel || PANEL);
     if (options.only && !c.name.includes(options.only)) continue;
     const text = c.note != null ? c.note : NOTE;
     const mode = c.mode || 'live';
@@ -284,6 +318,7 @@
             if (!seg.classList.contains('is-written')) open = true;
           }
           const said = hand.textContent.replace(/\s+/g, ' ').trim();
+          if (/[*`[\]]|\]\(/.test(said)) seen.marks = said;
           if (/…$/.test(said) && !seen.cutWord) seen.cutWord = said;
           if (c.scroll && cm) {
             // down for 24 frames, up for 24: the text stays on screen
@@ -345,6 +380,7 @@
         }
       }
       const expectText = located.located.some(e => e.replace.replace(/\$\$[\s\S]*?\$\$|\$[^$\n]+\$/g, '').trim().length > 0);
+      if (c.panel) { const line = cm.contentDOM.querySelector('.cm-line'); out.column = line ? Math.round(line.getBoundingClientRect().width) : 0; if (out.column > 480) fail(`the column is ${out.column} px wide, not narrow`); }
       Object.assign(out, { frames: seen.frames, dx: +seen.dx.toFixed(2), dy: +seen.dy.toFixed(2), lines: seen.lines, lineDx: +seen.lineDx.toFixed(2), equations: drawn, mathDx: +mdx.toFixed(2), mathSize: +(mdsize * 100).toFixed(2) });
       if (expectText && !seen.frames && !c.loose) fail('no handwriting was seen');
       if (seen.dx > TOL) fail(`the handwriting begins ${seen.dx.toFixed(1)} px to the side of the text's first letter`);
@@ -365,6 +401,8 @@
       Object.assign(out, { segs: seen.segs, early: seen.early, clipped: seen.clipped, reflowFrames: seen.reflow || 0 });
       if (seen.early) fail(`a later line of handwriting was visible before the pen came to it (in ${seen.early} frames)`);
       if (seen.clipped) fail(`a letter is cut: ${seen.clipWhy}`);
+      if (c.noMarks && seen.marks) fail(`the handwriting shows Markdown marks: “${seen.marks.slice(0, 60)}”`);
+      if (c.marks && !seen.marks) fail('the handwriting left out marks that are on the page in Source mode');
       if (seen.cutWord) {
         // what is written before the ellipsis ends at a whole word of the text
         const flat = t => t.replace(/[#>*_`$\\-]/g, '').replace(/\s+/g, ' ').trim();
@@ -1026,12 +1064,19 @@
     chat.clear();
   });
 
+  await setPanel(PANEL);
   plugin.settings.penSpeed = saved.speed;
   plugin.settings.severalPens = saved.several;
   plugin.settings.maxPens = saved.max;
   plugin.settings.editWhileWriting = saved.concurrent;
   plugin.settings.provider = saved.provider;
   plugin.settings.showPen = saved.pen;
+  try {
+    if (layout.bounds) { require('@electron/remote').getCurrentWindow().setBounds(layout.bounds); require('electron').webFrame.setZoomFactor(layout.zoom || 1); }
+    if (layout.width) ws.rightSplit.setSize(layout.width);
+    if (layout.right) ws.rightSplit.collapse();
+    if (!layout.left) ws.leftSplit.expand();
+  } catch (e) { /* left as the harness set it */ }
   if (!options.keepNote) { try { await leaf.openFile(file, { state: { mode: 'source', source: false } }); leaf.view.editor.setValue(NOTE); await sleep(300); await app.vault.delete(file); } catch (e) { /* left in the vault */ } }
   try { console.table(results); } catch (e) { /* no console table */ }
   const failed = results.filter(r => !r.ok).length;
