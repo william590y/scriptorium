@@ -170,12 +170,31 @@ jobs:
           node --version
           node --check vault/.obsidian/plugins/scriptorium/main.js
           node --check vault/.obsidian/plugins/lagrange/main.js
-          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js plugins-tests/drive-sync.test.js plugins-tests/drive-direct.test.js
+          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js plugins-tests/rclone-sync.test.js
+
+  sync-tests:
+    name: Test the Google Drive sync with the real rclone (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the pinned rclone with the plugin's own code, check its SHA-256, and sync against a second folder
+        env:
+          SCRIPTORIUM_TEST_RCLONE: download
+        run: |
+          node --version
+          node --test plugins-tests/rclone-sync.test.js plugins-tests/rclone-real.test.js
 
   release:
     name: Publish the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, zip-reproducible, script-tests, plugin-tests]
+    needs: [build, zip-reproducible, script-tests, plugin-tests, sync-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write

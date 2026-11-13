@@ -323,7 +323,7 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
 }
 
 /* ==========================================================
-   Backing up to Google Drive (the commands "Back up this vault to Google Drive", "Sync now" and "Retrieve a vault")
+   Syncing with Google Drive (the commands "Sync this vault with Google Drive", "Sync now" and "Retrieve a vault")
    ========================================================== */
 .scriptorium-drive-tag {
   margin-left: 0.6em;
@@ -390,7 +390,43 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
 .scriptorium-dropcap-download { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
 .scriptorium-dropcap-download strong { flex: 0 0 6.5em; }
 
-/* The direct Google sign-in (preview): the client ID's guide and boxes. */
+/* The folder browser over the writer's Drive, the list of conflicts, and the status bar's word on the sync. */
+.scriptorium-sync-crumbs { margin: 0 0 0.5em; overflow-wrap: anywhere; }
+.scriptorium-sync-folders {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 3em;
+  max-height: 36vh;
+  margin: 0 0 0.8em;
+  padding: 4px;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+.scriptorium-sync-folders button.scriptorium-sync-folder {
+  justify-content: flex-start;
+  flex: none;
+  width: 100%;
+  height: auto;
+  padding: 5px 10px;
+  border: none;
+  background: none;
+  box-shadow: none;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.scriptorium-sync-folders button.scriptorium-sync-folder:is(:hover, :focus-visible) { background: var(--background-modifier-hover); outline: none; }
+.scriptorium-sync-folders button.scriptorium-sync-up { color: var(--text-muted); }
+.scriptorium-sync-folders > .scriptorium-setup-note, .scriptorium-sync-folders > .scriptorium-drive-wait { padding: 5px 10px; }
+.scriptorium-sync-new { margin: 0 0 0.8em; }
+.scriptorium-drive .scriptorium-drive-vaults { margin-top: 0.4em; }
+.scriptorium-drive progress.scriptorium-drive-bar:not([value]) { opacity: 0.6; }
+.status-bar-item.scriptorium-sync-status { cursor: pointer; }
+.status-bar-item.scriptorium-sync-status.scriptorium-sync-problem { color: var(--text-error); }
+
+/* The sign-in: the guide to a client ID of one's own, and its boxes. */
 .scriptorium-drive-guide { font-size: var(--font-ui-small); }
 .scriptorium-drive-guide a { overflow-wrap: anywhere; }
 .scriptorium-drive-client, .scriptorium-drive-secret { display: block; width: 100%; margin: 0 0 8px; font-family: var(--font-monospace); font-size: var(--font-ui-small); }

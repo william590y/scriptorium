@@ -57,8 +57,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Scriptorium")]
 [assembly: AssemblyCompany("williamliaw.com")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 William Liaw. GPL-3.0-or-later.")]
-[assembly: AssemblyVersion("1.2.2.0")]
-[assembly: AssemblyFileVersion("1.2.2.0")]
+[assembly: AssemblyVersion("1.2.3.0")]
+[assembly: AssemblyFileVersion("1.2.3.0")]
 
 namespace ScriptoriumSetup
 {
