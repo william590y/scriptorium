@@ -194,6 +194,9 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 .lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(mjx-container[display="true"], .math-block, table) { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 .lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(img, svg.excalidraw-svg, .block-language-tikz svg, .mermaid svg) { max-width: 100%; height: auto; }
 .lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(.block-language-tikz, .mermaid) { text-align: center; overflow-x: auto; }
+/* A TikZ figure that TikZJax did not draw: a line that says so, and the figure's source. */
+.lagrange-view .block-language-tikz.lagrange-figure-source { text-align: start; }
+.lagrange-view .block-language-tikz.lagrange-figure-source > small { display: block; margin-bottom: 0.4em; }
 .lagrange-turn-text.markdown-rendered > :first-child { margin-top: 0; }
 .lagrange-turn-text.markdown-rendered > :last-child { margin-bottom: 0; }
 /* a table is set a little smaller and scrolls sideways when it is wide; its words are not broken to make it fit */

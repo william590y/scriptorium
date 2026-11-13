@@ -680,12 +680,19 @@ function sketchSpec(raw) {
 /* What the model is told about diagrams, by which of the two plugins the vault has (have: {tikz, sketch}). Pure. */
 function diagramStyle(have) {
   const h = have || {};
+  // (what TikZJax 0.5.2 takes was tried, construct by construct, in real Obsidian: see the README, "Diagrams")
   const tikz = 'A technical or mathematical figure (a graph, a geometric construction, a circuit, a commutative diagram, a plot) ' +
     'is written in TikZ, in a code block fenced with ```tikz, which the TikZJax plugin sets as a figure. The block must hold a ' +
-    'whole document body: any \\usepackage lines first (tikz-cd, circuitikz, pgfplots, chemfig, tikz-3dplot and amsmath, amssymb, ' +
-    'amsfonts, amstext, array are there; with pgfplots also write \\pgfplotsset{compat=1.16}), then \\begin{document}, the ' +
-    'picture (\\begin{tikzpicture} … \\end{tikzpicture}, or the package’s own environment), and \\end{document}. No ' +
-    '\\documentclass, and no blank line inside the block. Put the block in a paragraph of its own.';
+    'whole document body, in this order: any \\usepackage lines (only these packages exist: tikz-cd, circuitikz, pgfplots, chemfig, ' +
+    'tikz-3dplot, amsmath, amssymb, amsfonts, amstext, array; with pgfplots also write \\pgfplotsset{compat=1.16}); one ' +
+    '\\usetikzlibrary{…} line naming every TikZ library the picture uses (arrows.meta, calc, positioning, shapes.geometric, matrix, ' +
+    'decorations.pathreplacing, intersections and so on: no library is loaded unless it is named there, and using one that is not ' +
+    'named is an error); then \\begin{document}, the picture (\\begin{tikzpicture} … \\end{tikzpicture}, or the package’s own ' +
+    'environment), and \\end{document}. No \\documentclass, and no blank line inside the block. Plain TikZ needs no library: ' +
+    '\\draw, \\node, \\foreach, plot, scopes, styles, arrows such as -> and >=stealth, colours such as blue!30. In labels, \\text ' +
+    'needs amsmath and \\mathbb needs amssymb, and every character is plain ASCII LaTeX ($\\alpha$, $\\to$, \\\'e), never the ' +
+    'Unicode character itself. A single error leaves the whole figure undrawn, with no message, so write only what is sure to ' +
+    'compile, and keep a figure to a few hundred shapes (a large one takes many seconds). Put the block in a paragraph of its own.';
   const sketch = 'A free-form sketch (boxes and arrows, a rough picture of an idea) is an Excalidraw drawing. You do not write its file: ' +
     'in the edits list give an item {"insert_after": "words of the note", "sketch": {"name": "a short title", "elements": [...]}} ' +
     '(or with "insert_before"; with neither, the drawing goes at the end of the note). Elements, in the order they are to be drawn, ' +
@@ -1480,6 +1487,33 @@ function figureKinds(text) {
 }
 function withoutFigures(text) {
   return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(SKETCH_EMBED, '');
+}
+
+/* How a ```tikz block stands on the page. TikZJax (0.5.2) puts a <script type="text/tikz"> in the block, replaces it
+   by a spinner (an <svg> with a <circle> that holds <animate>) while TeX runs, and that by the figure's <svg>; a
+   figure whose TikZ has an error becomes a broken <img> instead, and nothing else says so.
+   block: the .block-language-tikz element (anything with querySelector). -> 'waiting' | 'drawn' | 'failed'. Pure. */
+function tikzState(block) {
+  if (!block || block.querySelector('script[type="text/tikz"]') || block.querySelector('svg > circle > animate')) return 'waiting';
+  if (block.querySelector('svg')) return 'drawn';
+  return block.querySelector('img') ? 'failed' : 'waiting';
+}
+/* How long a figure is waited for before its source is shown in its place. TikZJax sets its figures one after
+   another: a plain one takes well under a second, pgfplots or circuitikz a second or two, a thousand shapes half a
+   minute. */
+const TIKZ_WAIT = 30000;
+/* What is said of a figure that did not come: kind 'failed' (TikZJax gave up on its TikZ) or 'late' (it is still
+   not drawn after `wait` ms); where: 'chat' (the source is shown under these words) or 'note'. Pure. */
+function tikzTrouble(kind, where, wait) {
+  const secs = Math.round((wait == null ? TIKZ_WAIT : wait) / 1000);
+  if (where === 'note') {
+    return kind === 'failed'
+      ? 'TikZJax could not draw a figure Lagrange wrote in the note: there is an error in its TikZ, and the note shows a broken-picture mark where the figure should be. Ask Lagrange to correct the figure, or undo the edit. (What TeX said is in the developer console.)'
+      : `TikZJax has not drawn a figure Lagrange wrote in the note after ${secs} seconds. It may be a very large figure, still being set; otherwise ask Lagrange for a simpler one, or undo the edit.`;
+  }
+  return kind === 'failed'
+    ? 'TikZJax could not draw this figure: there is an error in its TikZ (what TeX said is in the developer console). Its source:'
+    : `TikZJax has not drawn this figure after ${secs} seconds, so its source is shown:`;
 }
 
 /* The order in which the pen draws a figure's parts: shapes first, in the order the figure has them (which is the
@@ -4523,12 +4557,19 @@ function createPen(app, settings) {
      so a figure never pops in ahead of the pen. TikZJax compiles a figure before it shows it, which takes a moment,
      and longer the first time in a session: the pen waits for as many figures as the edit holds, for at most `wait` ms. */
   const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg';
-  const figureList = view => Array.from(view.contentDOM.querySelectorAll(FIGURES)).filter(svg => !svg.parentElement.closest('svg'));
+  // (TikZJax's spinner is an <svg> in the block too: it is not a figure, and is never drawn by the pen)
+  const figureList = view => Array.from(view.contentDOM.querySelectorAll(FIGURES)).filter(svg => !svg.parentElement.closest('svg') && !svg.querySelector(':scope > circle > animate'));
+  // the ```tikz blocks TikZJax has given up on (a broken picture), that the pen has not yet counted
+  const figureFailures = view => Array.from(view.contentDOM.querySelectorAll('.block-language-tikz:not([data-lagrange-seen])')).filter(b => tikzState(b) === 'failed');
   const awaitFigures = async (L, view, want, wait) => {
     const until = L.win.performance.now() + wait;
     for (;;) {
       const found = figureList(view).filter(svg => !svg.hasAttribute('data-lagrange-seen'));
-      if (found.length >= want || L.win.performance.now() > until) return found;
+      const failed = figureFailures(view);     // (a figure with an error in it will never come: it is not waited for)
+      if (found.length + failed.length >= want || L.win.performance.now() > until) {
+        for (const b of failed) b.setAttribute('data-lagrange-seen', '');
+        return found;
+      }
       await pause(L, 80);
     }
   };
@@ -4934,6 +4975,7 @@ function createPen(app, settings) {
           const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch;
           if (wantFigures) {
             for (const svg of figureList(view)) svg.setAttribute('data-lagrange-seen', '');
+            for (const b of figureFailures(view)) b.setAttribute('data-lagrange-seen', '');
             L.figures = (L.figures || 0) + 1;
             view.dom.classList.add('lagrange-pen-figures');
             figuring = true;
@@ -5794,7 +5836,8 @@ async function renderPage(app, view, text, width, frontmatter) {
     reading.style.width = '100%';
     const pane = page.pane = reading.createDiv({ cls: classes.join(' ') });
     const written = pane.createDiv();
-    await renderMarkdown(app, text, written, file.path, component);
+    if (figureKinds(text).tikz) await renderApart(app, text, written, file.path, component);   // (see renderApart)
+    else await renderMarkdown(app, text, written, file.path, component);
     page.sizer = dressLikeReadingView(written, file.basename);
     page.properties = dressProperties(view, page.sizer, frontmatter);
     page.sizer.createDiv({ cls: 'mod-footer mod-ui' });
@@ -5953,7 +5996,7 @@ async function settlePage(page, signal) {
     for (let laid = false; ;) {
       await sleep(50, signal);
       const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)')
-        || host.querySelector('.block-language-tikz:not(:has(svg))');        // a TikZ figure that TikZJax is still compiling
+        || Array.from(host.querySelectorAll('.block-language-tikz')).some(b => tikzState(b) === 'waiting');   // a TikZ figure that TikZJax is still compiling
       const late = Date.now() > deadline;
       if (!late && (waiting || Date.now() - changed < 160)) continue;
       if (!late && dressEmbeds(page)) continue;     // embedded notes have come in: framed, and waited for in turn
@@ -6401,6 +6444,24 @@ async function lookAtPage(app, view, spec, opts) {
 /* ---------------------------------------------------------------------------------------------------------------
  * 8. The chat view, the revise modal, the settings tab and the plugin
  * ------------------------------------------------------------------------------------------------------------- */
+
+/* Renders Markdown apart from the page and puts the result into `el` in one step; -> the ```tikz blocks it holds,
+   [{block, source}]. For text with a TikZ figure in it, because of how TikZJax 0.5.2 finds its figures: it watches
+   the page for nodes that come in, and where an element and something inside it both come in during one task
+   (which is how Obsidian's renderer fills an element that is already on the page) it meets the figure's <script>
+   twice, puts its spinner in at the first and forgets that spinner at the second, so that the figure is compiled
+   (and kept in TikZJax's store, which is why the same figure shows at once the next time) but the spinner on the
+   page turns for ever. Coming in once, already whole, the figure is met once. */
+async function renderApart(app, markdown, el, sourcePath, component) {
+  const apart = el.ownerDocument.createElement('div');
+  await renderMarkdown(app, markdown, apart, sourcePath, component);
+  const figures = Array.from(apart.querySelectorAll('.block-language-tikz')).map(block => {
+    const script = block.querySelector('script[type="text/tikz"]');
+    return { block, source: script ? script.textContent : '' };
+  });
+  el.append(...Array.from(apart.childNodes));
+  return figures;
+}
 
 function renderMarkdown(app, markdown, el, sourcePath, component) {
   if (MarkdownRenderer.render) return MarkdownRenderer.render(app, markdown, el, sourcePath, component);
@@ -6874,11 +6935,38 @@ class LagrangeChatView extends ItemView {
      chatMarkdown has made it safe to show. */
   renderChat(md, el, sourcePath, component) {
     try {
-      const done = renderMarkdown(this.app, chatMarkdown(md, this.plugin.chatRenderOptions()), el, sourcePath || '', component);
-      Promise.resolve(done).then(() => this.scrollDown(), () => {});
+      // (a message with a TikZ figure comes into the log whole, and the figure is watched until it is drawn: see
+      // renderApart and watchFigures)
+      const opts = this.plugin.chatRenderOptions(), apart = Boolean(opts.tikz && figureKinds(md).tikz);
+      const rendered = (apart ? renderApart : renderMarkdown)(this.app, chatMarkdown(md, opts), el, sourcePath || '', component);
+      const done = apart ? rendered.then(figures => { this.watchFigures(figures); }) : rendered;
+      Promise.resolve(done).then(() => this.scrollDown(), e => { console.error('Lagrange: rendering a message', e); });
     } catch (e) {
       console.error('Lagrange: rendering a message', e);
       el.setText(md);
+    }
+  }
+
+  /* The TikZ figures of a message, until each is drawn: one that TikZJax gives up on (it leaves a broken picture and
+     says nothing), or that is still not drawn after TIKZ_WAIT, gives way to its source under a line that says why. */
+  async watchFigures(figures, wait) {
+    const until = Date.now() + (wait == null ? TIKZ_WAIT : wait);
+    let left = (figures || []).slice();
+    while (left.length) {
+      await sleep(200).catch(() => {});
+      left = left.filter(f => {
+        if (!f.block.isConnected) return false;
+        const state = tikzState(f.block);
+        if (state === 'waiting' && Date.now() <= until) return true;
+        if (state !== 'drawn') {
+          f.block.empty();
+          f.block.addClass('lagrange-figure-source');
+          f.block.createEl('small', { cls: 'lagrange-chat-degraded', text: tikzTrouble(state === 'failed' ? 'failed' : 'late', 'chat', wait) });
+          f.block.createEl('pre').createEl('code', { text: f.source });
+        }
+        this.scrollDown();
+        return false;
+      });
     }
   }
 
@@ -8384,13 +8472,40 @@ class LagrangePlugin extends Plugin {
       const { located, skipped } = locateOps(docText, ops);
       if (parsed.error) reply.note(`Some of the edits could not be read. ${parsed.error}`, 'is-warn');
       if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
-      return await this.applyEdits(view, located, skipped, task, signal);
+      const tikz = located.some(e => figureKinds(e.replace).tikz) && this.diagramPlugins().tikz;
+      const failedBefore = tikz ? this.noteFigures(view).failed : 0;
+      const result = await this.applyEdits(view, located, skipped, task, signal);
+      if (tikz) this.watchNoteFigures(view, reply, failedBefore);
+      return result;
     } catch (err) {
       this.reportFailure(err, task);
     } finally {
       this.editing = false;
     }
     return null;
+  }
+
+  /* How the TikZ figures of an open note stand: {waiting, drawn, failed} (see tikzState). */
+  noteFigures(view) {
+    const count = { waiting: 0, drawn: 0, failed: 0 };
+    if (view && view.contentEl) for (const b of view.contentEl.querySelectorAll('.block-language-tikz')) count[tikzState(b)]++;
+    return count;
+  }
+
+  /* After an edit that wrote a TikZ figure into the note: when TikZJax gives up on it, or has not drawn it after
+     TIKZ_WAIT, the chat says so (the note itself only shows a broken picture, or a spinner). Not waited for. */
+  async watchNoteFigures(view, reply, failedBefore, wait) {
+    const until = Date.now() + (wait == null ? TIKZ_WAIT : wait);
+    try {
+      for (;;) {
+        await sleep(250);
+        if (!view.containerEl.isConnected) return;
+        const now = this.noteFigures(view);
+        if (now.failed > failedBefore) { reply.note(tikzTrouble('failed', 'note', wait), 'is-warn'); return; }
+        if (!now.waiting) return;
+        if (Date.now() > until) { reply.note(tikzTrouble('late', 'note', wait), 'is-warn'); return; }
+      }
+    } catch (e) { /* the view has gone */ }
   }
 
   chatView() {
@@ -8645,4 +8760,4 @@ LagrangePlugin.internals = {
 Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
-Object.assign(LagrangePlugin.internals, { splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

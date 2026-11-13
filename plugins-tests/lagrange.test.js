@@ -2636,8 +2636,8 @@ test('chatMarkdown: a diagram whose plugin is off shows as its source with a lin
   // a block left open at the end (a reply cut off) still gets its line
   assert.match(L.chatMarkdown('```tikz\n\\draw;', { tikz: false }), /\\draw;\n```\n\n<small[^>]*>TikZJax is not enabled/);
   const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
-  assert.match(js, /renderMarkdown\(this\.app, chatMarkdown\(md, this\.plugin\.chatRenderOptions\(\)\)/, 'every message goes through it');
-  assert.ok(!/renderMarkdown\(this\.app, (?!chatMarkdown)/.test(js.slice(js.indexOf('class LagrangeChatView'), js.indexOf('class RewindModal'))), 'and none goes round it');
+  assert.match(js, /\(apart \? renderApart : renderMarkdown\)\(this\.app, chatMarkdown\(md, opts\), el,/, 'every message goes through it (one with a TikZ figure comes into the log whole, so that TikZJax meets the figure once)');
+  assert.ok(!/render(Markdown|Apart)\(this\.app, (?!chatMarkdown)/.test(js.slice(js.indexOf('class LagrangeChatView'), js.indexOf('class RewindModal'))), 'and none goes round it');
 });
 
 const bytesOf = (...parts) => Uint8Array.from(parts.flatMap(p => (typeof p === 'string' ? Array.from(Buffer.from(p, 'latin1')) : p)));
@@ -2977,4 +2977,32 @@ test('Attachments stay in the conversation, but only the last few messages keep 
   assert.equal(L.hasBinaryParts(L.recentBinaries(history, 0)), false);
   assert.equal(L.hasBinaryParts([{ role: 'user', content: [{ type: 'text', text: 'x' }] }]), false);
   assert.ok(L.ATTACH_KEPT >= 3, 'a message with attachments and its two looks all keep their pictures');
+});
+
+test('TikZJax: how a figure stands on the page, and what is said of one that does not come', () => {
+  const block = has => ({ querySelector: sel => (has.includes(sel) ? {} : null) });
+  assert.equal(L.tikzState(block(['script[type="text/tikz"]'])), 'waiting');
+  assert.equal(L.tikzState(block(['svg', 'svg > circle > animate'])), 'waiting', 'the spinner is an svg too');
+  assert.equal(L.tikzState(block(['svg'])), 'drawn');
+  assert.equal(L.tikzState(block(['img'])), 'failed');
+  assert.equal(L.tikzState(block([])), 'waiting');
+  assert.equal(L.tikzState(null), 'waiting');
+  assert.match(L.tikzTrouble('failed', 'chat'), /error in its TikZ.*Its source:$/);
+  assert.match(L.tikzTrouble('late', 'chat'), /after 30 seconds, so its source is shown:$/);
+  assert.match(L.tikzTrouble('late', 'chat', 5000), /after 5 seconds/);
+  assert.match(L.tikzTrouble('failed', 'note'), /broken-picture mark/);
+  assert.match(L.tikzTrouble('late', 'note'), /after 30 seconds/);
+  assert.equal(L.TIKZ_WAIT, 30000);
+});
+
+test('TikZJax: the model is told what the plugin takes (each point was tried in Obsidian with TikZJax 0.5.2)', () => {
+  const told = L.diagramStyle({ tikz: true, sketch: true });
+  assert.match(told, /\\usetikzlibrary\{…\} line naming every TikZ library/);
+  assert.match(told, /arrows\.meta, calc, positioning, shapes\.geometric, matrix/);
+  assert.match(told, /No \\documentclass/);
+  assert.match(told, /\\foreach/);
+  assert.match(told, /\\text needs amsmath and \\mathbb needs amssymb/);
+  assert.match(told, /never the Unicode character/);
+  assert.match(told, /only these packages exist/);
+  assert.doesNotMatch(L.diagramStyle({ sketch: true }), /usetikzlibrary/);
 });
