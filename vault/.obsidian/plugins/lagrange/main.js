@@ -648,14 +648,71 @@ function splitAgentReply(reply) {
 
 /* One item of an edits block, as an operation: {op: 'replace', find, replace, reason}, {op: 'insert', after | before,
    text, reason} or {op: 'append', text, reason}. Null if it is none of these. */
+/* A drawing as a reply asks for it, made safe: {name, elements}. An element is {type: 'rect' | 'ellipse' | 'diamond',
+   x, y, w, h, text?}, {type: 'line' | 'arrow', points: [[x, y], …]} or {type: 'text', x, y, text}; numbers are
+   pixels on a canvas whose y grows downwards. Anything else is left out; null if nothing is left. At most
+   SKETCH_ELEMENTS elements. Pure. */
+const SKETCH_ELEMENTS = 80, SKETCH_PLACE = '![[drawing]]';
+function sketchSpec(raw) {
+  const num = v => (typeof v === 'number' && isFinite(v) ? Math.max(-20000, Math.min(20000, v)) : null);
+  const words = v => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b-\u001f]/g, '').slice(0, 400) : '');
+  const out = [];
+  for (const e of Array.isArray(raw && raw.elements) ? raw.elements : []) {
+    if (!e || typeof e !== 'object' || out.length >= SKETCH_ELEMENTS) continue;
+    const type = String(e.type || '').toLowerCase().replace('rectangle', 'rect').replace('circle', 'ellipse');
+    if (['rect', 'ellipse', 'diamond'].includes(type)) {
+      const [x, y, w, h] = [num(e.x), num(e.y), num(e.w != null ? e.w : e.width), num(e.h != null ? e.h : e.height)];
+      if (x === null || y === null || !(w > 0) || !(h > 0)) continue;
+      out.push(Object.assign({ type, x, y, w, h }, words(e.text) ? { text: words(e.text) } : {}));
+    } else if (type === 'line' || type === 'arrow') {
+      const points = (Array.isArray(e.points) ? e.points : []).map(p => (Array.isArray(p) ? [num(p[0]), num(p[1])] : null)).filter(p => p && p[0] !== null && p[1] !== null).slice(0, 40);
+      if (points.length >= 2) out.push({ type, points });
+    } else if (type === 'text') {
+      const [x, y] = [num(e.x), num(e.y)];
+      if (x !== null && y !== null && words(e.text)) out.push({ type, x, y, text: words(e.text) });
+    }
+  }
+  if (!out.length) return null;
+  const name = words(raw.name).replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Drawing';
+  return { name, elements: out };
+}
+
+/* What the model is told about diagrams, by which of the two plugins the vault has (have: {tikz, sketch}). Pure. */
+function diagramStyle(have) {
+  const h = have || {};
+  const tikz = 'A technical or mathematical figure (a graph, a geometric construction, a circuit, a commutative diagram, a plot) ' +
+    'is written in TikZ, in a code block fenced with ```tikz, which the TikZJax plugin sets as a figure. The block must hold a ' +
+    'whole document body: any \\usepackage lines first (tikz-cd, circuitikz, pgfplots, chemfig, tikz-3dplot and amsmath, amssymb, ' +
+    'amsfonts, amstext, array are there; with pgfplots also write \\pgfplotsset{compat=1.16}), then \\begin{document}, the ' +
+    'picture (\\begin{tikzpicture} … \\end{tikzpicture}, or the package’s own environment), and \\end{document}. No ' +
+    '\\documentclass, and no blank line inside the block. Put the block in a paragraph of its own.';
+  const sketch = 'A free-form sketch (boxes and arrows, a rough picture of an idea) is an Excalidraw drawing. You do not write its file: ' +
+    'in the edits list give an item {"insert_after": "words of the note", "sketch": {"name": "a short title", "elements": [...]}} ' +
+    '(or with "insert_before"; with neither, the drawing goes at the end of the note). Elements, in the order they are to be drawn, ' +
+    'with coordinates in pixels (x to the right, y downwards; about 600 wide at most): {"type": "rect" | "ellipse" | "diamond", ' +
+    '"x", "y", "w", "h", "text": "an optional label inside"}, {"type": "line" | "arrow", "points": [[x, y], [x, y], …]}, ' +
+    '{"type": "text", "x", "y", "text"}. The plugin makes the drawing and puts it in the note.';
+  if (h.tikz && h.sketch) return `Diagrams: ${tikz} ${sketch} Use TikZ where exactness matters and a sketch where it does not.`;
+  if (h.tikz) return `Diagrams: ${tikz} Free-form sketches need the Excalidraw plugin, which this vault does not have turned on: if the writer asks for one, say so, and offer a TikZ figure where it would serve.`;
+  if (h.sketch) return `Diagrams: ${sketch} Technical figures in TikZ need the TikZJax plugin, which this vault does not have turned on: do not write a tikz block; if the writer asks for such a figure, say so, and offer a sketch where it would serve.`;
+  return 'Diagrams: this vault has neither the TikZJax plugin (technical figures) nor the Excalidraw plugin (free-form sketches) turned on, so do not write a tikz block or a drawing; if the writer asks for a diagram, tell them to turn one of the two on in Settings → Community plugins.';
+}
+
 function normalizeOp(item) {
   if (!item || typeof item !== 'object') return null;
   const str = keys => { for (const k of keys) if (typeof item[k] === 'string') return item[k]; return null; };
   const reason = (str(['reason', 'why', 'explanation']) || '').trim();
   const text = str(['text', 'insert', 'content']);
   const append = str(['append']);
-  if (append !== null) return append ? { op: 'append', text: append, reason } : null;
   const after = str(['insert_after', 'after']), before = str(['insert_before', 'before']);
+  // a free-form drawing (see "Diagrams"): placed like an insertion or an append; its text is made when the drawing is
+  if (item.sketch && typeof item.sketch === 'object') {
+    const sketch = sketchSpec(item.sketch);
+    if (!sketch) return null;
+    if (after || before) return after ? { op: 'insert', after, text: SKETCH_PLACE, reason, sketch } : { op: 'insert', before, text: SKETCH_PLACE, reason, sketch };
+    return { op: 'append', text: SKETCH_PLACE, reason, sketch };
+  }
+  if (append !== null) return append ? { op: 'append', text: append, reason } : null;
   if (after !== null || before !== null) {
     if (!text || !(after || before)) return null;
     return after ? { op: 'insert', after, text, reason } : { op: 'insert', before, text, reason };
@@ -2904,8 +2961,8 @@ const CHAT_LOOK_AFTER_EDITS =
   ' A reply may hold an edits block and, after it, a look block: your pen writes the edits first, and the look then ' +
   'shows the page as it stands after them, which is how to check a change you have made.';
 
-function chatSystemPrompt(note, clip, agentic, look) {
-  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) +
+function chatSystemPrompt(note, clip, agentic, look, diagrams) {
+  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) + (agentic && diagrams ? '\n\n' + diagramStyle(diagrams) : '') +
     (look && note ? '\n\n' + CHAT_LOOK + (agentic ? CHAT_LOOK_AFTER_EDITS : '') : '') + '\n\n' +
     (note ? noteBlock(note, clip) : 'No note is open at the moment; talk with the writer about their writing in general.');
 }
@@ -6445,7 +6502,7 @@ class LagrangeChatView extends ItemView {
         streaming = true;
         const res = await complete(settings, {
           purpose: 'chat',
-          system: chatSystemPrompt(note, clip, agentic, canLook),
+          system: chatSystemPrompt(note, clip, agentic, canLook, this.plugin.diagramPlugins()),
           messages: this.history.concat(sent),
           cache: true,
           demo: () => (round || lastLook ? demoLookReply(lastLook) : demoChatReply(text, note, agentic, canLook)),
@@ -7412,6 +7469,51 @@ class LagrangePlugin extends Plugin {
   /* Makes the edits a chat reply asked for (parsed: parseAgentReply's result) in the note the message was about, by
      the same road as the commands: located in the editor's current text, written by the pen, one undo step, listed
      under the reply. */
+  /* Which of the two diagram plugins are on in this vault: {tikz, sketch}. */
+  diagramPlugins() {
+    const on = id => Boolean(this.app.plugins && this.app.plugins.enabledPlugins && this.app.plugins.enabledPlugins.has(id) && this.app.plugins.plugins[id]);
+    return { tikz: on('obsidian-tikzjax'), sketch: on('obsidian-excalidraw-plugin') && typeof window.ExcalidrawAutomate === 'object' && window.ExcalidrawAutomate !== null };
+  }
+
+  /* The diagrams among a reply's edits, before the edits are located. A drawing is made as an Excalidraw file next
+     to the note, and its edit becomes the embed of that file; without Excalidraw the edit is left out, and the chat
+     says so. An edit that writes a tikz block is left out likewise when TikZJax is off (it would show as code). */
+  async makeDiagrams(view, ops, reply) {
+    const have = this.diagramPlugins(), out = [];
+    let noTikz = 0, noSketch = 0;
+    for (const o of ops) {
+      const text = o.op === 'replace' ? o.replace : o.text;
+      if (!o.sketch && figureKinds(text).tikz && !have.tikz) { noTikz++; continue; }
+      if (!o.sketch) { out.push(o); continue; }
+      if (!have.sketch) { noSketch++; continue; }
+      try {
+        const ea = window.ExcalidrawAutomate, folder = view.file.parent && view.file.parent.path !== '/' ? view.file.parent.path : '';
+        let name = o.sketch.name;
+        for (let n = 2; this.app.vault.getAbstractFileByPath(`${folder ? folder + '/' : ''}${name}.excalidraw.md`); n++) name = `${o.sketch.name} ${n}`;
+        ea.reset();
+        for (const e of o.sketch.elements) {
+          if (e.type === 'rect') ea.addRect(e.x, e.y, e.w, e.h);
+          else if (e.type === 'ellipse') ea.addEllipse(e.x, e.y, e.w, e.h);
+          else if (e.type === 'diamond') ea.addDiamond(e.x, e.y, e.w, e.h);
+          else if (e.type === 'line') ea.addLine(e.points);
+          else if (e.type === 'arrow') ea.addArrow(e.points);
+          else if (e.type === 'text') ea.addText(e.x, e.y, e.text);
+          if (e.text && e.type !== 'text') ea.addText(e.x + e.w / 2 - Math.min(e.w / 2 - 4, e.text.length * 5), e.y + e.h / 2 - 12, e.text);
+        }
+        await ea.create({ filename: name, foldername: folder, onNewPane: false, silent: true });
+        const embed = `![[${name}.excalidraw]]`;
+        out.push(Object.assign({}, o, { text: o.op === 'append' ? embed : o.after ? `\n\n${embed}` : `${embed}\n\n`, sketch: undefined, reason: o.reason || `a drawing, “${name}”` }));
+        reply.note(`Lagrange made the drawing “${name}” (an Excalidraw file next to the note). Undo takes it out of the note; the file stays in the vault.`, 'is-quiet');
+      } catch (e) {
+        console.error('Lagrange: the drawing could not be made', e);
+        reply.note(`A drawing could not be made: ${String((e && e.message) || e).slice(0, 160)}`, 'is-warn');
+      }
+    }
+    if (noTikz) reply.note(`${noTikz === 1 ? 'A figure' : `${noTikz} figures`} in TikZ ${noTikz === 1 ? 'was' : 'were'} left out: the TikZJax plugin is not installed or not turned on in this vault, so ${noTikz === 1 ? 'it' : 'they'} would show as code. Turn it on in Settings → Community plugins (search for “TikZJax”), then ask again.`, 'is-warn');
+    if (noSketch) reply.note(`${noSketch === 1 ? 'A drawing was' : `${noSketch} drawings were`} left out: the Excalidraw plugin is not installed or not turned on in this vault. Turn it on in Settings → Community plugins (search for “Excalidraw”), then ask again.`, 'is-warn');
+    return out;
+  }
+
   async applyChatEdits(view, note, parsed, reply, signal) {
     const task = {
       el: reply.el,
@@ -7431,7 +7533,8 @@ class LagrangePlugin extends Plugin {
       await this.ensureEditing(view);
       const cm = view.editor && view.editor.cm;
       const docText = cm ? cm.state.doc.toString() : view.editor.getValue();
-      const { located, skipped } = locateOps(docText, parsed.ops);
+      const ops = await this.makeDiagrams(view, parsed.ops, reply);
+      const { located, skipped } = locateOps(docText, ops);
       if (parsed.error) reply.note(`Some of the edits could not be read. ${parsed.error}`, 'is-warn');
       if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
       return await this.applyEdits(view, located, skipped, task, signal);
@@ -7692,4 +7795,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

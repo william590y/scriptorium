@@ -2496,3 +2496,32 @@ test('Diagrams: TikZ figures and Excalidraw drawings in an edit are told from th
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   assert.match(css, /\.lagrange-pen-figures :is\(\.block-language-tikz svg, \.excalidraw-embedded-img svg, svg\.excalidraw-svg\):not\(\[data-lagrange-seen\]\) \{ opacity: 0 !important; \}/);
 });
+
+test('Diagrams: a drawing in a reply is read and made safe; the prompt says what the vault can draw', () => {
+  const ops = list => L.parseAgentReply('```lagrange-edits\n' + JSON.stringify(list) + '\n```').ops;
+  const [a, b] = ops([
+    { insert_after: 'hardly moving.', sketch: { name: 'Two/bodies: a?', elements: [
+      { type: 'ellipse', x: 0, y: 20, w: 90, h: 90, text: 'M' }, { type: 'arrow', points: [[95, 65], [295, 65]] }, { type: 'text', x: 170, y: 30, text: 'r' },
+      { type: 'rect', x: 0, y: 0, w: -5, h: 10 }, { type: 'image', src: 'file:///etc/passwd' }, { type: 'line', points: [[0, 0]] }, 'junk'] } },
+    { sketch: { elements: [{ type: 'rectangle', x: 1, y: 2, width: 30, height: 40 }] } },
+  ]);
+  assert.equal(a.op, 'insert');
+  assert.equal(a.after, 'hardly moving.');
+  assert.equal(a.sketch.name, 'Two bodies a');
+  assert.deepEqual(a.sketch.elements.map(e => e.type), ['ellipse', 'arrow', 'text'], 'what cannot be drawn is left out');
+  assert.equal(b.op, 'append');
+  assert.deepEqual(b.sketch, { name: 'Drawing', elements: [{ type: 'rect', x: 1, y: 2, w: 30, h: 40 }] });
+  assert.equal(ops([{ insert_after: 'x', sketch: { elements: [] } }]).length, 0, 'an empty drawing is no edit');
+  assert.equal(L.sketchSpec({ elements: Array.from({ length: 200 }, (_, i) => ({ type: 'text', x: i, y: 0, text: 't' })) }).elements.length, 80);
+  // the prompt: both, one, neither
+  const both = L.diagramStyle({ tikz: true, sketch: true });
+  assert.match(both, /```tikz/);
+  assert.match(both, /\\begin\{document\}/);
+  assert.match(both, /"sketch": \{"name"/);
+  assert.match(L.diagramStyle({ tikz: true }), /Excalidraw plugin, which this vault does not have turned on/);
+  assert.match(L.diagramStyle({ sketch: true }), /do not write a tikz block/);
+  assert.match(L.diagramStyle({}), /neither the TikZJax plugin .* nor the Excalidraw plugin/);
+  const note = { title: 'N', path: 'N.md', text: 'x' };
+  assert.ok(L.chatSystemPrompt(note, { text: 'x' }, true, false, { tikz: true, sketch: false }).includes('Diagrams: '));
+  assert.ok(!L.chatSystemPrompt(note, { text: 'x' }, false, false, { tikz: true }).includes('Diagrams: '), 'a chat that only talks draws nothing');
+});
