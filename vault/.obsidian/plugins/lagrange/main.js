@@ -4286,17 +4286,22 @@ function createPen(app, settings) {
               first = charBox(L, view, at.start) || first;
               lay();
             }
-            // No more lines than it may write, and on one line no further than the text itself goes (what follows it
-            // on the line is the note's): first a smaller hand, then fewer words, ending in an ellipsis.
+            // No more lines than it may write, and on the line where the new text ends no further than the text itself
+            // goes when the note's own words follow it there (the hand is larger than the type, and would be written
+            // over them): first a smaller hand, then fewer words, ending in an ellipsis. A hand of fewer lines than
+            // the text ends on a line that the new text fills, and text that ends its paragraph has the rest of the
+            // line to itself.
             const last = lines[lines.length - 1];
-            const fits = () => {
-              const hb = hand.getBoundingClientRect();
-              if (Math.round(hb.height / col.lineHeight) > mayWrite) return false;
-              if (lines.length !== 1 || !last) return true;
+            const followed = at.end < view.state.doc.length && view.state.doc.sliceString(at.end, at.end + 1) !== '\n';
+            const tall = () => Math.round(hand.getBoundingClientRect().height / col.lineHeight);
+            const overruns = () => {
+              if (!last) return false;
+              if (lines.length !== 1 && (!followed || tall() < lines.length)) return false;
               const tail = pieces.length ? pieces[pieces.length - 1].el.getClientRects() : [];
               const o = org(L);
-              return !tail.length || tail[tail.length - 1].right - o.x <= Math.max(last.right - o.x, first.x + 24) + 6;
+              return Boolean(tail.length) && tail[tail.length - 1].right - o.x > Math.max(last.right - o.x, lines.length === 1 ? first.x + 24 : 0) + 6;
             };
+            const fits = () => tall() <= mayWrite && !overruns();
             // In a narrow column the first word may not fit in what is left of the first line, and would drop to the
             // next: the hand is made smaller (down to about the note's own size) until it starts where the text does.
             const dropped = () => {
@@ -4334,7 +4339,7 @@ function createPen(app, settings) {
               if (size !== fs) { fs = size; lay(); }
             }
             for (let i = 0; i < 6 && !rows.length && dropped(); i++) { fs *= 0.94; lay(); }
-            for (let i = 0; i < 4 && !rows.length && lines.length === 1 && !fits(); i++) { fs *= 0.94; lay(); }
+            for (let i = 0; i < 4 && !rows.length && (lines.length === 1 ? !fits() : tall() <= mayWrite && overruns()); i++) { fs *= 0.94; lay(); }
             for (let i = 0; i < 80 && !rows.length && pieces.length && !fits(); i++) {
               const q = pieces[pieces.length - 1];
               if (!q.prose) {
