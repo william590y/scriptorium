@@ -20,5 +20,6 @@
   "showPen": true,
   "penSpeed": 1,
   "penTrail": true,
-  "penLines": 3
+  "penLines": 3,
+  "editWhileWriting": false
 }

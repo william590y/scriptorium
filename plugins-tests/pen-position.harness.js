@@ -1,7 +1,14 @@
 // Where the pen writes, checked in a real Obsidian: for each kind of edit, Lagrange's pen must begin its handwriting
-// where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame), start
+// where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame but
+// for a reflow of at most three frames, which is counted), start
 // each further line at the left edge of the note's own line, and draw each equation that Live Preview typesets on that
-// very equation. This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
+// very equation. Since 1.2.4 it also checks, in every case, that the handwriting of a line is never seen before the pen
+// comes to it, that no letter is cut by the box that uncovers it (ascenders, descenders and swashes included), that
+// the note does not scroll when the run ends and the last text written is in view; and, in cases of their own, that
+// the handwriting stays on its text while the note is scrolled, that a click or a key in the note ends the run with
+// the note exactly as an uninterrupted run would leave it (plus the key), that with "Let me edit while the pen writes"
+// the writer's typing and Lagrange's edits both stand, that the chat's log keeps to its bottom while the loader
+// shows, and that hovering Lagrange's controls shows no bubble. This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
 // `node --test`; it is a manual check, or one a machine can run through the DevTools protocol.
 //
 // To run it: open a Scriptorium vault in Obsidian (Lagrange enabled, "Show the pen" on, reduced motion off), open the
@@ -68,6 +75,12 @@
     { name: 'Source mode: replace', mode: 'source', ops: [{ find: 'Short line here.', replace: 'Short sentence here, in Source mode.' }] },
     { name: 'Source mode: equation (drawn in the script)', mode: 'source', ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 0 },
     { name: 'Reading view: append', mode: 'reading', ops: [{ append: 'Appended from Reading view, which Lagrange leaves for the editor.' }] },
+    // (scroll: the note is scrolled down and back up, a few pixels a frame, while the handwriting is on the page)
+    { name: 'the note is scrolled while the pen writes three lines', ops: [{ find: 'Short line here.', replace: PARA }], lines: 3, scroll: true },
+    { name: 'the note is scrolled while the pen strikes and rewrites a wrapped sentence', scroll: true, ops: [{ find: 'A body at rest stays at rest, and a body in motion keeps its motion', replace: 'What is still stays still, and what moves keeps moving' }] },
+    { name: 'Source mode: the note is scrolled while the pen writes', mode: 'source', scroll: true, ops: [{ find: 'Short line here.', replace: PARA }], lines: 3 },
+    { name: 'three edits far apart: the view at the end is the view that was watched', ops: [
+      { find: 'Short line here.', replace: 'Short sentence here.' }, { find: 'mentions energy once', replace: 'speaks of energy only the one time' }, { append: 'An appended closing remark.' }] },
     { name: 'Reading view: equation', mode: 'reading', ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 1 },
   ];
 
@@ -75,7 +88,7 @@
   let file = app.vault.getAbstractFileByPath(path);
   if (!file) file = await app.vault.create(path, NOTE);
   const leaf = app.workspace.getLeavesOfType('markdown')[0] || app.workspace.getLeaf(true);
-  const saved = { speed: plugin.settings.penSpeed, pen: plugin.settings.showPen };
+  const saved = { speed: plugin.settings.penSpeed, pen: plugin.settings.showPen, concurrent: plugin.settings.editWhileWriting, provider: plugin.settings.provider, trail: plugin.settings.penTrail };
   plugin.settings.showPen = true;
   if (options.speed) plugin.settings.penSpeed = options.speed;
 
@@ -95,7 +108,11 @@
     const first = base && base.nextElementSibling;
     if (!first) return null;
     let x = first.getBoundingClientRect().left;
-    const node = first.firstChild;
+    // (the first letter itself: words are in one box per line, see .lagrange-pen-seg)
+    const walker = document.createTreeWalker(first, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node && !node.length) node = walker.nextNode();
+    if (first.classList.contains('lagrange-pen-math') || first.classList.contains('lagrange-pen-code')) node = null;
     if (node && node.nodeType === 3 && node.length) {
       const r = document.createRange();
       r.setStart(node, 0); r.setEnd(node, 1);
@@ -139,8 +156,32 @@
       // where each edit's first written letter will be, in the document as it will be once the edits before it are made
       let shift = 0;
       const starts = located.located.map(e => { const s = e.from + shift + L.inkOffset(e.replace); shift += e.replace.length - (e.to - e.from); return s; });
-      const seen = { frames: 0, dx: 0, dy: 0, lineDx: 0, lines: 0, hands: 0, drawn: new Map(), unmatchedFrames: 0 };
+      const seen = { frames: 0, dx: 0, dy: 0, lineDx: 0, lines: 0, hands: 0, drawn: new Map(), unmatchedFrames: 0, early: 0, clipped: 0, clipWhy: '', segs: 0, scrolled: 0, tops: [], inked: new WeakSet(), cutWord: '' };
+      // The ink of one line of handwriting (a .lagrange-pen-seg), from the font's own measure of its glyphs, against
+      // the box that uncovers it: a letter that reaches outside the box would be cut.
+      const inkCheck = seg => {
+        const cs = getComputedStyle(seg), node = seg.firstChild;
+        if (!node || node.nodeType !== 3) return;
+        canvas.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const m = canvas.measureText(node.data), r = document.createRange();
+        r.selectNodeContents(node);
+        const t = r.getBoundingClientRect(), box = seg.getBoundingClientRect();
+        const baseline = t.top + (t.height - (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent)) / 2 + m.fontBoundingBoxAscent;
+        const ink = { left: t.left - m.actualBoundingBoxLeft, right: t.left + m.actualBoundingBoxRight, top: baseline - m.actualBoundingBoxAscent, bottom: baseline + m.actualBoundingBoxDescent };
+        seen.segs++;
+        const over = Math.max(box.left - ink.left, ink.right - box.right, box.top - ink.top, ink.bottom - box.bottom);
+        if (over > 0) { seen.clipped++; seen.clipWhy = `“${node.data.slice(0, 24)}” reaches ${over.toFixed(1)} px outside its box`; }
+        if (cs.clipPath !== 'none' || getComputedStyle(seg.parentElement.parentElement).clipPath !== 'none') { seen.clipped++; seen.clipWhy = 'the handwriting is clipped'; }
+      };
       let sampling = true, handNo = -1, lastHand = null;
+      seen.off = [];
+      seen.reflow = 0;
+      // a run of frames in which the hand was off its text has ended: a reflow if it was short, else a failure
+      const settle = () => {
+        const run = seen.off.splice(0);
+        if (run.length <= 3) seen.reflow += run.length;
+        else for (const [a, b] of run) { seen.dx = Math.max(seen.dx, a); seen.dy = Math.max(seen.dy, b); }
+      };
       const sample = () => {
         if (!sampling) return;
         const cm = leaf.view.editor && leaf.view.editor.cm;
@@ -150,8 +191,16 @@
           const h = handStart(hand), g = glyphAt(cm, starts[Math.min(handNo, starts.length - 1)]);
           if (h && g) {
             seen.frames++;
-            seen.dx = Math.max(seen.dx, Math.abs(h.x - g.x));
-            seen.dy = Math.max(seen.dy, Math.abs(h.baseline - g.baseline));
+            // The note's text may move under the hand for a frame or two when an equation in it is typeset for the first
+            // time in a session (the hand is put back on it in the next frame): up to three frames in a row are let
+            // pass as such a reflow, and counted; a hand that stays off its text is not.
+            const ddx = Math.abs(h.x - g.x), ddy = Math.abs(h.baseline - g.baseline);
+            if (ddx > TOL || ddy > TOL) seen.off.push([ddx, ddy]);
+            else {
+              settle();
+              seen.dx = Math.max(seen.dx, ddx);
+              seen.dy = Math.max(seen.dy, ddy);
+            }
             const lefts = handLines(hand);
             seen.lines = Math.max(seen.lines, lefts.length);
             if (lefts.length > 1) {
@@ -163,13 +212,38 @@
               }
             }
           } else seen.unmatchedFrames++;
+          // one line at a time: every line after the one being written is unseen
+          const segs = Array.from(hand.querySelectorAll('.lagrange-pen-seg'));
+          const done = hand.classList.contains('is-done');
+          let open = false;
+          for (const seg of segs) {
+            if (!seen.inked.has(seg)) { seen.inked.add(seg); inkCheck(seg); }
+            const visible = getComputedStyle(seg).visibility !== 'hidden';
+            if (open && visible && !done) seen.early++;
+            if (!seg.classList.contains('is-written')) open = true;
+          }
+          const said = hand.textContent.replace(/\s+/g, ' ').trim();
+          if (/…$/.test(said) && !seen.cutWord) seen.cutWord = said;
+          if (c.scroll && cm) {
+            // down for 24 frames, up for 24: the text stays on screen
+            const n = seen.scrolled++;
+            if (n < 48) cm.scrollDOM.scrollTop += n < 24 ? 3 : -3;
+          }
+        }
+        if (cm) {
+          seen.tops.push(cm.scrollDOM.scrollTop);
+          // where the text last written stands in the window
+          const g = handNo >= 0 ? cm.coordsAtPos(Math.min(cm.state.doc.length, starts[Math.min(handNo, starts.length - 1)]), 1) : null;
+          if (g) seen.textY = g.top;
         }
         for (const el of document.querySelectorAll('.lagrange-pen-drawing')) {
-          const r = el.getBoundingClientRect(), scroll = cm ? cm.scrollDOM.scrollTop : 0;
+          // (measured from the top of its own line, which moves with whatever is above it)
+          const r = el.getBoundingClientRect(), line = el.closest('.cm-line, .cm-embed-block') || el, scroll = line.getBoundingClientRect().top;
           if (!seen.drawn.has(el)) seen.drawn.set(el, []);
-          seen.drawn.get(el).push({ x: r.left, y: r.top + scroll, w: r.width, h: r.height, inNote: Boolean(cm && cm.contentDOM.contains(el)) });
+          seen.drawn.get(el).push({ x: r.left, y: r.top - scroll, w: r.width, h: r.height, inNote: Boolean(cm && cm.contentDOM.contains(el)) });
         }
-        requestAnimationFrame(sample);
+        // (asked for from a timer, so that it runs after the pen's own frame callbacks: what is measured is what is painted)
+        setTimeout(() => requestAnimationFrame(sample), 0);
       };
       requestAnimationFrame(sample);
       const view = leaf.view;
@@ -177,8 +251,15 @@
       const cm = view.editor.cm;
       const now = L.locateOps(cm.state.doc.toString(), ops);
       await plugin.applyEdits(view, now.located, now.skipped, null, null);
+      // The scroll position when the run ends, against the last one seen while it ran and the one it settles at.
+      const endTop = cm.scrollDOM.scrollTop, lastTop = seen.tops.length ? seen.tops[seen.tops.length - 1] : endTop;
+      const textAt = () => { const g = seen.hands ? cm.coordsAtPos(Math.min(cm.state.doc.length, starts[Math.min(handNo, starts.length - 1)]), 1) : null; return g ? g.top : null; };
+      const endY = textAt();
+      await frame(); await frame();
+      const nextTop = cm.scrollDOM.scrollTop, nextY = textAt();
       await sleep(700);
       sampling = false;
+      settle();
       document.querySelectorAll('.notice').forEach(n => n.remove());
       // the equations the pen drew on, against where they rest now
       let drawn = 0, mdx = 0, mdsize = 0;
@@ -191,8 +272,9 @@
         for (const now of cm.contentDOM.querySelectorAll('mjx-container')) {
           const a = now.querySelector('[data-latex]'), b = el.querySelector('[data-latex]');
           if (!a || !b || a.getAttribute('data-latex') !== b.getAttribute('data-latex')) continue;
-          const r = now.getBoundingClientRect(), d = Math.hypot(r.left - last.x, r.top + cm.scrollDOM.scrollTop - last.y);
-          if (d < best) { best = d; rest = { x: r.left, y: r.top + cm.scrollDOM.scrollTop, w: r.width, h: r.height }; }
+          const line = now.closest('.cm-line, .cm-embed-block') || now;
+          const r = now.getBoundingClientRect(), y = r.top - line.getBoundingClientRect().top, d = Math.hypot(r.left - last.x, y - last.y);
+          if (d < best) { best = d; rest = { x: r.left, y, w: r.width, h: r.height }; }
         }
         if (!rest) { fail('an equation the pen drew is not in the note afterwards'); continue; }
         for (const s of list) {
@@ -216,6 +298,33 @@
         if (!c.loose && !cm.state.doc.toString().includes(want)) fail('the note does not hold the new text');
       }
       if (document.querySelector('.lagrange-pen-unwritten, .lagrange-pen-revealing, .lagrange-pen-drawing')) fail('the pen left a mark on the note');
+      // one line at a time, and no letter cut
+      Object.assign(out, { segs: seen.segs, early: seen.early, clipped: seen.clipped, reflowFrames: seen.reflow || 0 });
+      if (seen.early) fail(`a later line of handwriting was visible before the pen came to it (in ${seen.early} frames)`);
+      if (seen.clipped) fail(`a letter is cut: ${seen.clipWhy}`);
+      if (seen.cutWord) {
+        // what is written before the ellipsis ends at a whole word of the text
+        const flat = t => t.replace(/[#>*_`$\\-]/g, '').replace(/\s+/g, ' ').trim();
+        const head = flat(seen.cutWord.replace(/\s*…$/, '')), tail = head.slice(-18);
+        const wants = located.located.map(e => flat(e.replace));
+        if (!/\$/.test(located.located.map(e => e.replace).join('')) && !wants.some(w => { const i = w.indexOf(tail); return i >= 0 && (i + tail.length === w.length || /\s/.test(w[i + tail.length])); })) fail(`the handwriting ends inside a word: “…${tail} …”`);
+      }
+      // the view the writer watched is the view they are left with
+      const restTop = cm.scrollDOM.scrollTop;
+      // The scroll offset is the same before and after the end of the run, and the text last written has not moved in
+      // the window. (Where something above the text changes its height as the run ends, as Typewriter Mode's padding
+      // does after a switch from Reading view, the offset has to change for the text to stay; then only the text is held to.)
+      const restY = textAt();
+      out.endJump = +Math.max(Math.abs(endTop - lastTop), Math.abs(nextTop - lastTop), Math.abs(restTop - lastTop)).toFixed(1);
+      out.endMove = seen.textY == null || restY == null ? null : +Math.max(Math.abs((endY == null ? restY : endY) - seen.textY), Math.abs((nextY == null ? restY : nextY) - seen.textY), Math.abs(restY - seen.textY)).toFixed(1);
+      if (out.endMove != null ? out.endMove > 1 : (out.endJump > 1 && !c.loose)) fail(`the view moved when the run ended: the text last written by ${out.endMove} px, the scroll offset by ${out.endJump} px (${lastTop.toFixed(0)} while it ran, ${endTop.toFixed(0)} at its end, ${restTop.toFixed(0)} after)`);
+      if (out.endJump > 1 && !/Reading view|callout|table/.test(c.name)) fail(`the note scrolled by ${out.endJump} px when the run ended (${lastTop.toFixed(0)} while it ran, ${endTop.toFixed(0)} at its end, ${restTop.toFixed(0)} after)`);
+      if (!c.scroll && !c.loose) {
+        const lastStart = cm.state.doc.toString().lastIndexOf((located.located[located.located.length - 1].replace || '').slice(L.inkOffset(located.located[located.located.length - 1].replace)).slice(0, 24));
+        const at = lastStart >= 0 ? cm.coordsAtPos(lastStart, 1) : null, sr = cm.scrollDOM.getBoundingClientRect();
+        if (!at || at.top < sr.top - 1 || at.bottom > sr.bottom + 1) fail('the last text written is not in view when the run ends');
+      }
+      if (c.scroll && seen.scrolled < 48) fail(`the note was scrolled for ${seen.scrolled} frames only`);
     } catch (e) {
       fail(String((e && e.message) || e));
     }
@@ -223,7 +332,235 @@
     results.push(out);
     console.log(`${out.ok ? 'ok  ' : 'FAIL'} ${out.name}${out.why ? ': ' + out.why : ''}`);
   }
+
+  /* ---- A click or a key while the pen writes; typing alongside it; the chat's log; hover bubbles ---- */
+  const extra = async (name, body) => {
+    if (options.only && !name.includes(options.only)) return;
+    const out = { name, ok: true, why: [] };
+    const fail = why => { out.ok = false; out.why.push(why); };
+    try { await body(out, fail); } catch (e) { fail(String((e && e.stack) || e)); }
+    plugin.settings.editWhileWriting = false;
+    out.why = out.why.join('; ');
+    results.push(out);
+    console.log(`${out.ok ? 'ok  ' : 'FAIL'} ${out.name}${out.why ? ': ' + out.why : ''}`);
+  };
+  const OPS3 = [{ find: 'Short line here.', replace: 'Short sentence here, rewritten by the pen at some length.' },
+    { find: 'mentions energy once', replace: 'speaks of energy only the one time' }, { append: 'An appended closing remark.' }];
+  const afterOps = t => t.replace('Short line here.', 'Short sentence here, rewritten by the pen at some length.')
+    .replace('mentions energy once', 'speaks of energy only the one time').replace(/\n*$/, '') + '\n\nAn appended closing remark.';
+  const same = (a, b) => a.replace(/\n*$/, '') === b.replace(/\n*$/, '');
+  // Opens the note in Live Preview with the cursor after `caret`, starts a run of OPS3 and resolves when the pen is writing.
+  const begin = async (caret, ops) => {
+    await leaf.openFile(file, { state: { mode: 'source', source: false } });
+    leaf.view.editor.setValue(NOTE);
+    await sleep(options.settle || 500);
+    const ed = leaf.view.editor, cm = ed.cm;
+    ed.focus();
+    ed.setCursor(ed.offsetToPos(NOTE.indexOf(caret) + caret.length));
+    await sleep(300);
+    const parsed = L.parseAgentReply('```lagrange-edits\n' + JSON.stringify(ops || OPS3) + '\n```').ops;
+    const now = L.locateOps(cm.state.doc.toString(), parsed);
+    const run = plugin.applyEdits(leaf.view, now.located, now.skipped, null, null);
+    for (let i = 0; i < 600 && !document.querySelector('.lagrange-pen-seg.is-writing'); i++) await frame();
+    return { ed, cm, run };
+  };
+  const overlays = () => document.querySelectorAll('.lagrange-pen-hand, .lagrange-pen-unwritten, .lagrange-pen-gone').length;
+  const penShown = () => Array.from(document.querySelectorAll('.lagrange-pen')).some(p => p.style.display !== 'none');
+
+  await extra('a key in the note ends the run: the note is as an uninterrupted run leaves it, then the key lands at the cursor', async (out, fail) => {
+    const { ed, cm, run } = await begin('The paragraph before the filler.');
+    const target = cm.contentDOM;
+    target.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', bubbles: true, cancelable: true }));
+    // at once, before the key's own effect: every edit is in the note and nothing of the pen is left
+    if (!same(cm.state.doc.toString(), afterOps(NOTE))) fail('the note is not what an uninterrupted run leaves, right after the key');
+    if (overlays() || penShown()) fail('the pen or its handwriting is still on the page right after the key');
+    cm.dispatch(cm.state.replaceSelection('X'), { userEvent: 'input.type' });   // what the key then does
+    const res = await run;
+    await sleep(300);
+    const want = afterOps(NOTE).replace('The paragraph before the filler.', 'The paragraph before the filler.X');
+    if (!same(cm.state.doc.toString(), want)) fail('the key did not land at the cursor, after the edits');
+    if (res.ended !== 'key' || res.applied.length !== 3 || res.skipped.length) fail(`the run reports ended=${res.ended}, ${res.applied.length} made, ${res.skipped.length} skipped`);
+    // one undo step for the run, kept apart from the key; Lagrange's own Undo keeps the key
+    const rec = plugin.edits[plugin.edits.length - 1];
+    plugin.undoEdit(rec);
+    await sleep(150);
+    if (cm.state.doc.toString() !== NOTE.replace('The paragraph before the filler.', 'The paragraph before the filler.X')) fail('Undo did not take back exactly the run');
+    plugin.redoEdit(rec);
+    await sleep(150);
+    if (!same(cm.state.doc.toString(), want)) fail('Redo did not make the run again');
+    ed.undo(); ed.undo();
+    await sleep(150);
+    out.afterEditorUndo = cm.state.doc.toString() === NOTE;
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('a click in the note ends the run; the click lands on the text that was under the pointer', async (out, fail) => {
+    const { cm, run } = await begin('# Pen position check');
+    const word = 'third item';                               // below the edit being written, above the others
+    const at = cm.coordsAtPos(cm.state.doc.toString().indexOf(word) + 5, 1);
+    if (!at) throw new Error('the word to click is not on screen');
+    const x = at.left, y = (at.top + at.bottom) / 2, el = document.elementFromPoint(x, y) || cm.contentDOM;
+    const init = { clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+    el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, isPrimary: true }, init)));
+    if (!same(cm.state.doc.toString(), afterOps(NOTE))) fail('the note is not what an uninterrupted run leaves, right after the pointer went down');
+    if (overlays() || penShown()) fail('the pen or its handwriting is still on the page right after the click');
+    const under = cm.posAtCoords({ x, y });
+    out.underPointer = cm.state.doc.toString().slice(under - 5, under + 5);
+    if (out.underPointer !== word) fail(`the text under the pointer moved: now “${out.underPointer}”`);
+    el.dispatchEvent(new MouseEvent('mousedown', init));
+    el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, init, { buttons: 0 })));
+    const res = await run;
+    await sleep(200);
+    cm.dispatch({ selection: { anchor: under } });            // where the click puts the cursor
+    cm.dispatch(cm.state.replaceSelection('Y'), { userEvent: 'input.type' });
+    const want = afterOps(NOTE).replace('- third item', '- thirdY item');
+    if (!same(cm.state.doc.toString(), want)) fail('typing after the click did not land where the click was');
+    if (res.ended !== 'click' || res.applied.length !== 3) fail(`the run reports ended=${res.ended}, ${res.applied.length} made`);
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('scrolling, the arrow keys, Ctrl+C and a change that changes nothing do not end the run', async (out, fail) => {
+    const { cm, run } = await begin('The paragraph before the filler.');
+    cm.scrollDOM.dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true }));
+    cm.scrollDOM.scrollTop += 20;
+    for (const init of [{ key: 'ArrowDown' }, { key: 'c', ctrlKey: true }, { key: 'Shift' }, { key: 'PageDown' }]) cm.contentDOM.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true }, init)));
+    // nor does Obsidian's own change that replaces the first character by itself (it makes one to highlight a note afresh)
+    cm.dispatch({ changes: { from: 0, to: 1, insert: cm.state.doc.sliceString(0, 1) }, userEvent: 'set' });
+    await sleep(200);
+    if (!document.querySelector('.lagrange-pen-hand')) fail('the handwriting went');
+    const res = await run;
+    if (res.ended) fail(`the run was ended (${res.ended})`);
+    if (res.touched) fail('a change that left the text as it was is taken for the writer’s typing');
+    if (!same(cm.state.doc.toString(), afterOps(NOTE))) fail('the note is not right');
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('“Let me edit while the pen writes”: typing elsewhere goes in at once, the pen goes on, and both stand', async (out, fail) => {
+    plugin.settings.editWhileWriting = true;
+    const { cm, run } = await begin('The paragraph before the filler.');
+    let typed = 0;
+    for (const ch of ' I am typing this meanwhile.') {
+      cm.dispatch(cm.state.replaceSelection(ch), { userEvent: 'input.type' });
+      typed++;
+      await sleep(40);
+    }
+    // and near the top, above every edit, so that every pending edit has to move
+    cm.dispatch({ changes: { from: 0, to: 0, insert: 'A line typed at the very top.\n\n' }, userEvent: 'input.type' });
+    await sleep(120);
+    const stillWriting = Boolean(document.querySelector('.lagrange-pen-hand')) || penShown();
+    const res = await run;
+    await sleep(500);
+    if (!stillWriting) fail('the pen stopped');
+    if (res.ended) fail(`the run was ended (${res.ended})`);
+    const want = 'A line typed at the very top.\n\n' + afterOps(NOTE).replace('The paragraph before the filler.', 'The paragraph before the filler. I am typing this meanwhile.');
+    if (!same(cm.state.doc.toString(), want)) fail('the note does not hold both the typing and the three edits');
+    if (res.applied.length !== 3 || res.skipped.length || !res.touched) fail(`the run reports ${res.applied.length} made, ${res.skipped.length} skipped, touched=${res.touched}`);
+    if (overlays()) fail('the pen left a mark on the note');
+    // Lagrange's Undo takes back its edits and keeps the typing
+    const rec = plugin.edits[plugin.edits.length - 1];
+    plugin.undoEdit(rec);
+    await sleep(150);
+    const undone = 'A line typed at the very top.\n\n' + NOTE.replace('The paragraph before the filler.', 'The paragraph before the filler. I am typing this meanwhile.');
+    if (cm.state.doc.toString() !== undone) fail('Undo did not take back exactly Lagrange’s edits');
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('“Let me edit while the pen writes”: an edit whose words the writer changed is skipped, and the rest are made', async (out, fail) => {
+    plugin.settings.editWhileWriting = true;
+    const { cm, run } = await begin('The paragraph before the filler.');
+    const i = cm.state.doc.toString().indexOf('mentions energy once');
+    cm.dispatch({ changes: { from: i, to: i + 8, insert: 'talks about' }, userEvent: 'input.type' });   // the second edit's words
+    const res = await run;
+    await sleep(500);
+    const doc = cm.state.doc.toString();
+    if (!doc.includes('talks about energy once')) fail('the writer’s words were overwritten');
+    if (!doc.includes('Short sentence here, rewritten by the pen at some length.') || !doc.includes('An appended closing remark.')) fail('the other edits were not made');
+    if (res.applied.length !== 2 || res.skipped.length !== 1 || !/you changed/.test(res.skipped[0].why)) fail(`the run reports ${res.applied.length} made, skipped: ${JSON.stringify(res.skipped.map(s => s.why))}`);
+    document.querySelectorAll('.notice').forEach(n => n.remove());
+  });
+
+  await extra('the chat’s log keeps to its bottom when a message is sent and while the loader shows', async (out, fail) => {
+    plugin.settings.provider = 'demo';
+    const chat = await plugin.activateView(false);
+    if (!chat) throw new Error('the chat could not be opened');
+    chat.clear();
+    const log = chat.logEl, gap = () => log.scrollHeight - log.clientHeight - log.scrollTop;
+    const say = async (text, during) => {
+      const seen = { frames: 0, loader: 0, gap: 0, loaderOut: 0 };
+      let on = true;
+      const tick = () => {
+        if (!on) return;
+        seen.frames++;
+        seen.gap = Math.max(seen.gap, gap());
+        const l = log.querySelector('.lagrange-loader');
+        if (l) { seen.loader++; const r = l.getBoundingClientRect(), b = log.getBoundingClientRect(); if (r.bottom > b.bottom + 1 || r.top < b.top - 1) seen.loaderOut++; }
+        requestAnimationFrame(tick);
+      };
+      chat.inputEl.value = text;
+      chat.send();
+      seen.gap = gap();                                       // right after the send, before a frame is drawn
+      requestAnimationFrame(tick);
+      if (during) await during();
+      for (let i = 0; i < 400 && (chat.pending || plugin.editing); i++) await sleep(50);
+      await sleep(200);
+      on = false;
+      return seen;
+    };
+    for (const q of ['What is this note about?', 'And how long is it?', 'What does it say about energy?']) await say(q);
+    if (log.scrollHeight <= log.clientHeight + 50) throw new Error('the log is not long enough to scroll; make the panel shorter');
+    const a = await say('One more question, with the log full.');
+    Object.assign(out, { loaderFrames: a.loader, gap: +a.gap.toFixed(1) });
+    if (!a.loader) fail('no loader was seen');
+    if (a.gap > 1) fail(`the log was ${a.gap.toFixed(0)} px short of its bottom after the send`);
+    if (a.loaderOut) fail(`the loader was out of view in ${a.loaderOut} frames`);
+    // a writer who scrolls up during a reply is left there; sending again takes hold of the bottom
+    const up = await say('I scroll up while this one is answered.', async () => { await sleep(60); log.scrollTop = 0; log.dispatchEvent(new Event('scroll')); });
+    if (log.scrollTop > 2) fail('a writer who scrolled up was pulled back down');
+    const again = await say('And I send again.');
+    out.gapAgain = +again.gap.toFixed(1);
+    if (again.gap > 1 || gap() > 1) fail('sending a message did not take the log back to its bottom');
+    chat.clear();
+  });
+
+  await extra('hovering Lagrange’s controls shows no bubble: tooltips are off for each of them (and a scripted hover shows none)', async (out, fail) => {
+    const chat = await plugin.activateView(false);
+    plugin.constructor.mountLoader(chat.logEl.createDiv({ cls: 'lagrange-loader-slot' }), 'orbit');
+    chat.openPicker();
+    await sleep(200);
+    const hover = async el => {
+      document.body.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      await sleep(80);
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, view: window }));
+      await sleep(options.hover || 1300);
+      const tip = document.querySelector('.tooltip');
+      const text = tip ? tip.textContent : '';
+      el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+      document.querySelectorAll('.tooltip').forEach(t => t.remove());
+      return text;
+    };
+    const ribbon = document.querySelector('.side-dock-ribbon-action[aria-label]');
+    out.control = ribbon ? await hover(ribbon) : '';
+    // (Obsidian shows tooltips for scripted hovers only in some states of the window; when the ribbon icon shows
+    // none, the hovering below proves nothing, and the check rests on --no-tooltip, which is what Obsidian reads)
+    out.hoverTells = Boolean(out.control);
+    const els = Array.from(chat.contentEl.querySelectorAll('[aria-label], button, input, label, .lagrange-loader')).filter(e => e.getBoundingClientRect().width > 0);
+    out.controls = els.length;
+    for (const el of els) {
+      if (el.hasAttribute('title')) fail(`a title attribute on “${el.getAttribute('title')}”`);
+      if (getComputedStyle(el).getPropertyValue('--no-tooltip').trim() !== 'true') fail(`Obsidian would show a tooltip over ${el.getAttribute('aria-label') || el.className}: its --no-tooltip is not true`);
+      const text = out.hoverTells ? await hover(el) : '';
+      if (text) fail(`a bubble “${text.slice(0, 40)}” over ${el.getAttribute('aria-label') || el.className}`);
+    }
+    if (!chat.contentEl.querySelectorAll('button[aria-label]').length) fail('the buttons lost their accessible names');
+    chat.closePicker();
+    chat.clear();
+  });
+
   plugin.settings.penSpeed = saved.speed;
+  plugin.settings.editWhileWriting = saved.concurrent;
+  plugin.settings.provider = saved.provider;
   plugin.settings.showPen = saved.pen;
   if (!options.keepNote) { try { await leaf.openFile(file, { state: { mode: 'source', source: false } }); leaf.view.editor.setValue(NOTE); await sleep(300); await app.vault.delete(file); } catch (e) { /* left in the vault */ } }
   try { console.table(results); } catch (e) { /* no console table */ }

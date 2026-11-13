@@ -1092,7 +1092,7 @@ test('penScript: an equation is drawn wherever it comes in a long replacement, w
   assert.deepEqual(maths('$$E = mc^2$$'), ['E = mc^2']);
   assert.deepEqual(maths(' $p = mv$'), ['p = mv']);
   assert.deepEqual(maths('word '.repeat(40) + 'and at last $z$'), ['z']);
-  assert.match(show(L.penScript('word '.repeat(40) + 'and at last $z$', 48)), /^(word )+w … word and at last <z>$/);
+  assert.match(show(L.penScript('word '.repeat(40) + 'and at last $z$', 48)), /^(word )+… word and at last <z>$/);
   assert.deepEqual(maths('Momentum is \\(p = mv\\), and\n\n\\[ F = \\frac{dp}{dt} \\]'), ['p = mv', 'F = \\frac{dp}{dt}']);
   // prose after the last equation, once the room is used up, is an ellipsis and no more
   assert.match(show(L.penScript('word '.repeat(12) + '$a$ ' + 'tail '.repeat(20), 48)), /<a> …$/);
@@ -1489,3 +1489,169 @@ test('Draw a drop cap, the other providers: the model writes an SVG; the Demo ha
     e => e instanceof L.LagrangeError && /no SVG drawing/.test(e.message) && e.reply === 'I would rather not draw.');
 });
 
+
+
+/* ---------- 1.2.4: the pen under scrolling, clicks and typing; the chat's log; no hover bubbles ---------- */
+
+test('penScript and wordCut: what is cut ends at a whole word, never inside one', () => {
+  assert.equal(L.wordCut('alpha beta gamma', 100), 'alpha beta gamma');
+  assert.equal(L.wordCut('alpha beta gamma', 12), 'alpha beta', 'the cut fell inside "gamma"');
+  assert.equal(L.wordCut('alpha beta gamma', 10), 'alpha beta', 'the cut fell at the end of a word');
+  assert.equal(L.wordCut('alpha beta gamma', 11), 'alpha beta', 'the cut fell on a space');
+  assert.equal(L.wordCut('incomprehensibilities', 8), 'incompre', 'a single word longer than the room is cut: there is nothing else to write');
+  assert.equal(L.wordCut('', 5), '');
+  const show = s => s.map(g => (g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  const para = 'Energy is never lost, only moved about: what a falling stone loses in height it gains in speed, and what it gains in speed it gives up, when it lands, as heat and sound.';
+  for (const limit of [20, 48, 97, 150, 151, 152, 153, 154]) {
+    const out = show(L.penScript(para, limit));
+    assert.match(out, / …$/, `limit ${limit}`);
+    const head = out.replace(/ …$/, '');
+    assert.ok(para.startsWith(head), `limit ${limit}: a prefix of the text`);
+    assert.ok(/[\s]/.test(para[head.length]), `limit ${limit}: “${head.slice(-12)}” ends at a whole word`);
+  }
+});
+
+test('lineStarts: where each line of laid-out handwriting begins', () => {
+  // three lines at heights 10, 30, 50; white space at a line's end takes no room (null) and belongs to the line before
+  const tops = [10, 10, 10, null, 30, 30, null, null, 50];
+  assert.deepEqual(L.lineStarts(tops, 8), [0, 4, 8]);
+  assert.deepEqual(L.lineStarts([10, 11, 9.5, 10.4], 8), [0], 'the wobble of a baseline is not a new line');
+  assert.deepEqual(L.lineStarts([], 8), [0]);
+  assert.deepEqual(L.lineStarts([null, null], 8), [0]);
+  assert.deepEqual(L.lineStarts([10, 30], 8), [0, 1]);
+});
+
+test('The pen’s lines: each is a box of its own with room for its letters’ tails, shown through a soft edge, inside the note’s scroller', () => {
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  const rule = sel => { const m = new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}').exec(css); assert.ok(m, `a rule for ${sel}`); return m[1]; };
+  const seg = rule('.lagrange-pen-seg');
+  assert.match(seg, /display:\s*inline-block/);
+  assert.match(seg, /visibility:\s*hidden/, 'unseen until the pen comes to it');
+  const pad = /padding:\s*([\d.]+)em\s+([\d.]+)em/.exec(seg), margin = /margin:\s*-([\d.]+)em\s+-([\d.]+)em/.exec(seg);
+  assert.ok(pad && margin, 'padding for the ascenders, descenders and swashes, taken back by the margin');
+  assert.deepEqual([pad[1], pad[2]], [margin[1], margin[2]], 'so the line does not move');
+  assert.ok(Number(pad[1]) >= 0.5 && Number(pad[2]) >= 0.35);
+  assert.match(rule('.lagrange-pen-seg.is-writing'), /mask-image:\s*linear-gradient\(to right, #000 calc\(var\(--lagrange-pen-x, 0px\) - \d+px\), transparent var\(--lagrange-pen-x, 0px\)\)/);
+  const sheet = rule('.lagrange-pen-sheet');
+  assert.match(sheet, /position:\s*absolute/);
+  assert.match(sheet, /overflow:\s*hidden/);
+  assert.match(sheet, /pointer-events:\s*none/);
+  assert.match(rule('.lagrange-pen-hand'), /position:\s*absolute/);
+  assert.ok(!/\.lagrange-pen-(layer|hand)\s*\{[^}]*position:\s*fixed/.test(css), 'nothing of the pen is fixed to the window: it scrolls with the note');
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /view\.scrollDOM\.appendChild\(sheet\)/);
+  assert.ok(!/doc\.body\.appendChild\((svg|hand)\)/.test(js));
+});
+
+test('isEditKey: which key presses in the note end the pen’s animation', () => {
+  const k = (key, mods) => Object.assign({ key }, mods);
+  for (const key of ['a', 'Z', '1', ' ', 'é', '😀', 'Enter', 'Backspace', 'Delete', 'Tab', 'Process', 'Dead']) assert.equal(L.isEditKey(k(key)), true, key);
+  for (const key of ['ArrowLeft', 'ArrowDown', 'PageDown', 'Home', 'End', 'Shift', 'Control', 'Alt', 'Meta', 'Escape', 'F5', 'CapsLock']) assert.equal(L.isEditKey(k(key)), false, key);
+  for (const key of ['v', 'x', 'z', 'y', 'V', 'Z']) {
+    assert.equal(L.isEditKey(k(key, { ctrlKey: true })), true, `Ctrl+${key}`);
+    assert.equal(L.isEditKey(k(key, { metaKey: true })), true, `Cmd+${key}`);
+  }
+  for (const key of ['c', 'a', 'f', 'p', 's', 'ArrowLeft']) assert.equal(L.isEditKey(k(key, { ctrlKey: true })), false, `Ctrl+${key} changes nothing`);
+  assert.equal(L.isEditKey(k('a', { isComposing: true })), true);
+  assert.equal(L.isEditKey(k('@', { altKey: true })), true, 'AltGr characters');
+  assert.equal(L.isEditKey(null), false);
+});
+
+test('mapOffset: a position carried through changes, as CodeMirror carries it', () => {
+  const changes = [{ from: 5, to: 5, insert: 'XYZ' }, { from: 10, to: 14, insert: 'q' }, { from: 20, to: 22, insert: '' }];
+  assert.equal(L.mapOffset(changes, 0), 0);
+  assert.equal(L.mapOffset(changes, 4), 4);
+  assert.equal(L.mapOffset(changes, 5), 5, 'at an insertion: before it by default');
+  assert.equal(L.mapOffset(changes, 5, -1), 5);
+  assert.equal(L.mapOffset(changes, 5, 1), 8, 'or after it');
+  assert.equal(L.mapOffset(changes, 6), 9);
+  assert.equal(L.mapOffset(changes, 10), 13, 'the start of replaced text');
+  assert.equal(L.mapOffset(changes, 10, 1), 13);
+  assert.equal(L.mapOffset(changes, 12), 13, 'inside replaced text: the start of what replaced it');
+  assert.equal(L.mapOffset(changes, 12, 1), 14, 'or its end');
+  assert.equal(L.mapOffset(changes, 14), 14, 'the end of replaced text');
+  assert.equal(L.mapOffset(changes, 15), 15);
+  assert.equal(L.mapOffset(changes, 21), 20, 'inside deleted text');
+  assert.equal(L.mapOffset(changes, 30), 28);
+  assert.equal(L.mapOffset([{ from: 3, to: 3, insert: 4 }], 9), 13, 'an insert may be given as a length');
+  assert.equal(L.mapOffset([], 7), 7);
+});
+
+test('remapEdit: an edit still to be written follows its words through what the writer types; changed words are skipped', () => {
+  const doc = 'One two three. Four five six. Seven eight nine.';
+  const edit = { from: 15, to: 29, matched: 'Four five six.', replace: '4 5 6.' };
+  const apply = (text, changes) => { let out = '', at = 0; for (const c of changes) { out += text.slice(at, c.from) + c.insert; at = c.to; } return out + text.slice(at); };
+  const through = changes => { const now = apply(doc, changes); return L.remapEdit(edit, (p, a) => L.mapOffset(changes, p, a), (a, b) => now.slice(a, b)); };
+  assert.deepEqual(through([]), { from: 15, to: 29 });
+  assert.deepEqual(through([{ from: 0, to: 0, insert: 'Zero. ' }]), { from: 21, to: 35 }, 'typing before it moves it');
+  assert.deepEqual(through([{ from: 40, to: 40, insert: 'and ' }]), { from: 15, to: 29 }, 'typing after it does not');
+  assert.deepEqual(through([{ from: 15, to: 15, insert: 'Also: ' }]), { from: 21, to: 35 }, 'typing right before its first word');
+  assert.deepEqual(through([{ from: 29, to: 29, insert: ' Yes.' }]), { from: 15, to: 29 }, 'typing right after its last');
+  assert.deepEqual(through([{ from: 20, to: 24, insert: 'FIVE' }]), { skip: 'the text changed' }, 'the writer changed its words');
+  assert.deepEqual(through([{ from: 22, to: 22, insert: '!' }]), { skip: 'the text changed' }, 'the writer typed inside them');
+  assert.deepEqual(through([{ from: 10, to: 35, insert: '' }]), { skip: 'the text changed' }, 'the writer deleted them');
+  // an insertion is never spoiled: it goes where its place went
+  const ins = { from: 14, to: 14, matched: '', replace: ' More.' };
+  assert.deepEqual(L.remapEdit(ins, (p, a) => L.mapOffset([{ from: 0, to: 4, insert: '' }], p, a), () => ''), { from: 10, to: 10 });
+  assert.deepEqual(L.remapEdit(ins, (p, a) => L.mapOffset([{ from: 14, to: 14, insert: 'abc' }], p, a), () => ''), { from: 17, to: 17 }, 'after what the writer typed at the same place');
+});
+
+test('stickAfterScroll: the chat keeps to its bottom until the writer scrolls up, and takes hold again at the bottom', () => {
+  const H = 1000, C = 400;                       // the bottom is at scrollTop 600
+  assert.equal(L.stickAfterScroll(true, 600, 600, H, C), true);
+  assert.equal(L.stickAfterScroll(true, 600, 590, H, C), true, 'a nudge within the slack');
+  assert.equal(L.stickAfterScroll(true, 600, 300, H, C), false, 'the writer scrolled up');
+  assert.equal(L.stickAfterScroll(false, 300, 320, H, C), false, 'and part of the way down again');
+  assert.equal(L.stickAfterScroll(false, 320, 560, H, C), true, 'back at the bottom');
+  // The bug this replaced: the log scrolled itself to the bottom, the loader then made it 200 px taller, and the
+  // scroll event (which arrives late) found the log "not at the bottom" and let go.
+  assert.equal(L.stickAfterScroll(true, 0, 600, H + 200, C), true, 'the log’s own scroll down never lets go, whatever was added since');
+  assert.equal(L.stickAfterScroll(true, 600, 600, H + 200, C), true, 'nor does growing');
+  assert.equal(L.stickAfterScroll(false, 600, 600, H + 200, C), false, 'a writer who had let go is left alone');
+  assert.equal(L.stickAfterScroll(true, 600, 590, H, C, 5), false, 'the slack can be set');
+});
+
+test('No hover bubbles: the panel, the modals and the settings turn Obsidian’s tooltips off, keep their labels, and have no title attributes', () => {
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  const m = /([^{}]*)\{\s*--no-tooltip:\s*true;\s*\}/.exec(css);
+  assert.ok(m, 'Obsidian shows no tooltip for an element whose --no-tooltip is true');
+  for (const sel of ['.lagrange-view', '.lagrange-modal', '.lagrange-settings', '.lagrange-notice-undo']) assert.ok(m[1].split('*/').pop().split(',').map(x => x.trim()).includes(sel), sel);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.ok(!/setAttribute\('title'|\btitle:\s*'|setTooltip\(|setDynamicTooltip\(/.test(js), 'no title attribute and no tooltip call');
+  for (const label of ['Proofread the note', 'Undo Lagrange’s last edits', 'Redo Lagrange’s edits', 'Clear the conversation', 'Message to Lagrange', 'Rewind to here']) {
+    assert.ok(js.includes(label), `the accessible name “${label}” stays`);
+  }
+  assert.match(js, /setAttribute\('aria-label', `Model: /);
+});
+
+test('Editing while the pen writes: off by default, a setting, and a run never locks or reconfigures the editor', () => {
+  assert.equal(L.DEFAULT_SETTINGS.editWhileWriting, false);
+  assert.equal(L.sanitizeSettings({ editWhileWriting: true }).editWhileWriting, true);
+  assert.equal(L.sanitizeSettings({ editWhileWriting: 'yes' }).editWhileWriting, false);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /setName\('Let me edit while the pen writes'\)/);
+  assert.ok(!/readOnly\.of\(true\)|editable\.of\(false\)|\.reconfigure\(/.test(js), 'the editor stays editable, and is not reconfigured (which makes Typewriter Mode scroll back to the cursor)');
+  for (const type of ['pointerdown', 'mousedown', 'beforeinput', 'paste', 'drop', 'compositionstart', 'keydown']) assert.ok(js.includes(`'${type}'`), `${type} is listened for`);
+  // Obsidian replaces a note's first character by itself to have it highlighted afresh: that is not the writer typing
+  assert.equal(js.split('tr.startState.doc.eq(tr.state.doc)').length - 1, 2, 'a change that leaves the text as it was neither ends a run nor moves the pen');
+  // text the pen has yet to write is unseen, and so are the boxes around it (a code block's tint, a code span's)
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /\.cm-line\.lagrange-pen-unwritten-line \{[^}]*background-color: transparent !important/);
+  assert.match(css, /span:has\(> \.lagrange-pen-unwritten\):not\(\.lagrange-pen-unwritten\) \{[^}]*background-color: transparent !important/);
+});
+
+test('Rewind: a turn during which the writer typed is not taken for Lagrange’s alone', () => {
+  const turns = [{ path: 'N.md', before: 'A', after: 'B', userTyped: true }];
+  assert.equal(L.userChangedSince(turns, 0, 'B'), true, 'the writer is asked before their typing is taken back');
+  assert.equal(L.userChangedSince([{ path: 'N.md', before: 'A', after: 'B', userTyped: false }], 0, 'B'), false);
+});
+
+test('Undo records: one that no longer fits the editor’s text is forgotten, not composed with', () => {
+  // (another note opened in the same tab: Obsidian sets a new text without a change; composing a record of the old
+  // text with later changes threw, and every later record of that editor stopped following the writer's typing)
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /kept\.newLength !== update\.startState\.doc\.length\) \{ \(lost \|\| \(lost = \[\]\)\)\.push\(r\); continue; \}/);
+  assert.match(js, /this\.edits = this\.edits\.filter\(r => !lost\.includes\(r\)\)/);
+  // the handwriting's font is waited for before the hand is measured
+  assert.match(js, /doc\.fonts\.load\(font\)/);
+});
