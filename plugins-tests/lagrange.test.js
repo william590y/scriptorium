@@ -3006,3 +3006,24 @@ test('TikZJax: the model is told what the plugin takes (each point was tried in 
   assert.match(told, /only these packages exist/);
   assert.doesNotMatch(L.diagramStyle({ sketch: true }), /usetikzlibrary/);
 });
+
+test('Demo mode: a diagram for the pen where TikZJax is on, and a reply with mathematics, code and a figure', () => {
+  const note = { title: 'On Balance', text: 'A note.\n' };
+  const draw = L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, { tikz: true }));
+  assert.equal(draw.ops.length, 1);
+  assert.deepEqual(L.figureKinds(draw.ops[0].text || draw.ops[0].append || JSON.stringify(draw.ops[0]).replace(/\\n/g, '\n').replace(/\\\\/g, '\\')), { tikz: 1, sketch: 0 });
+  assert.deepEqual(L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, { tikz: false })).ops, [], 'no figure is written where TikZJax is off');
+  assert.deepEqual(L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false)).ops, []);
+  // the figure keeps to what TikZJax takes: a whole document body, no \documentclass, no library, no blank line, ASCII
+  const fig = L.DEMO_FIGURE;
+  assert.match(fig, /^```tikz\n\\begin\{document\}\n\\begin\{tikzpicture\}/);
+  assert.match(fig, /\\end\{tikzpicture\}\n\\end\{document\}\n```$/);
+  assert.doesNotMatch(fig, /\\documentclass|\\usetikzlibrary|\n\n|[^\x00-\x7f]/);
+  const told = L.demoChatReply('Explain the first point', note, true, true, { tikz: true });
+  assert.deepEqual(L.parseAgentReply(told).ops, [], 'an explanation edits nothing');
+  assert.match(told, /\$\$\\frac\{M_1\}/);
+  assert.match(told, /```python\ndef hill_radius/);
+  assert.equal(L.figureKinds(told).tikz, 1);
+  assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true, { tikz: false })).tikz, 0);
+  assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true)).tikz, 0);
+});

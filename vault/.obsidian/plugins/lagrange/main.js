@@ -2037,12 +2037,25 @@ function demoRevise(passage, instruction) {
 }
 
 /* The demo's edits block for a chat message that asks for a change, or '' when it asks for none: "fix", "proofread"
-   or "correct" proofreads; "equation" or "formula" adds one; "code" or "function" adds a code block; "add" or
-   "append" adds a line. */
-function demoChatEdits(question, note) {
+   or "correct" proofreads; "diagram", "figure" or "draw" adds a TikZ figure where the vault has TikZJax on (have:
+   {tikz}); "equation" or "formula" adds one; "code" or "function" adds a code block; "add" or "append" adds a
+   line. */
+const DEMO_FIGURE = ['```tikz', '\\begin{document}', '\\begin{tikzpicture}[scale=1.5]',
+  '\\draw[dashed] (0,0) circle (2);',
+  '\\draw[dashed] (-2.5,0) -- (3,0);',
+  '\\draw[dashed] (0,0) -- (1,1.732) -- (2,0) -- (1,-1.732) -- cycle;',
+  '\\fill (0,0) circle (0.14) node[below=5pt] {$M_1$};',
+  '\\fill (2,0) circle (0.07) node[below=3pt] {$M_2$};',
+  '\\foreach \\x/\\n in {1.45/1, 2.6/2, -2/3} \\fill (\\x,0) circle (0.04) node[above] {$L_\\n$};',
+  '\\fill (1,1.732) circle (0.04) node[above] {$L_4$};',
+  '\\fill (1,-1.732) circle (0.04) node[below] {$L_5$};',
+  '\\end{tikzpicture}', '\\end{document}', '```'].join('\n');
+function demoChatEdits(question, note, have) {
   const q = String(question || '').toLowerCase();
   let ops = null;
-  if (/\b(equation|formula|math)/.test(q)) {
+  if (/\b(diagram|figure|draw|tikz)/.test(q) && have && have.tikz) {
+    ops = [{ append: `The five points, with the two masses:\n\n${DEMO_FIGURE}` }];
+  } else if (/\b(equation|formula|math)/.test(q)) {
     ops = [{ append: 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$' }];
   } else if (/\b(code|function|script|snippet|program)/.test(q)) {
     ops = [{ append: 'The distance to the first Lagrange point, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```' }];
@@ -2057,14 +2070,26 @@ function demoChatEdits(question, note) {
 /* The demo looks at the page when the message is about how it looks. */
 const DEMO_LOOK_RE = /\b(?:looks?|rendered|renders?|the page|drop ?caps?|cent(?:re|er)(?:ed|d)?|align(?:ed|ment)?|margins?|layout|typeset)\b/i;
 
-function demoChatReply(question, note, agentic, look) {
+/* The demo explains when asked to ("explain", "show me", "an example"): a reply with mathematics, code and, where the
+   vault has TikZJax on, a figure, so that the chat's rendering can be seen without a model. */
+const DEMO_EXPLAIN_RE = /\b(?:explain|show me|example)\b/i;
+
+function demoChatReply(question, note, agentic, look, have) {
   const parts = ['*Demo mode: a canned reply, written without a model. Choose a Claude or ChatGPT subscription, an ' +
     'API key or an OpenAI-compatible server in Settings → Lagrange for real answers.*'];
   if (look && note && DEMO_LOOK_RE.test(String(question || ''))) {
     return parts.concat(`Let me look at the page of **${note.title}** as it is rendered.`, '```lagrange-look\n{"target": "note"}\n```').join('\n\n');
   }
+  if (DEMO_EXPLAIN_RE.test(String(question || ''))) {
+    return parts.concat('A small body between two great ones can rest where their pulls and the turning of the frame balance. ' +
+      'At the first point, a distance $r$ from the smaller mass,',
+    '$$\\frac{M_1}{(R - r)^2} = \\frac{M_2}{r^2} + \\frac{M_1}{R^2} - \\frac{r\\,(M_1 + M_2)}{R^3}$$',
+    'and for a small $M_2$ this is close to the Hill radius:',
+    '```python\ndef hill_radius(m1, m2, r):\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n\nhill_radius(1.989e30, 5.972e24, 1.496e8)   # about 1.5 million km\n```',
+    have && have.tikz ? DEMO_FIGURE : '*(With the TikZJax plugin turned on, a figure of the five points is drawn here.)*').join('\n\n');
+  }
   if (agentic && note) {
-    const block = demoChatEdits(question, note);
+    const block = demoChatEdits(question, note, have);
     if (block) return parts.concat(`Here is what the pen will set down in **${note.title}**.`, block).join('\n\n');
   }
   if (note) {
@@ -2079,7 +2104,8 @@ function demoChatReply(question, note, agentic, look) {
   parts.push(`You asked: “${excerpt(String(question || '').replace(/\s+/g, ' '), 160)}” A model would answer here, ` +
     'with the note in mind.');
   parts.push('The edits work offline in demo mode:\n\n' +
-    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation* or to *add some code*, and the pen does it.\n' : '') +
+    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation*, to *add some code* or (with TikZJax on) to *draw a diagram*, and the pen does it.\n' : '') +
+    '- Ask me to *explain* something, and the reply shows how the chat sets mathematics, code and a figure.\n' +
     '- **Proofread note** finds typographic slips (straight quotes, spaced hyphens, doubled spaces) and sets the ' +
     'corrections down with the pen.\n' +
     '- **Revise selection** rewrites the selected passage: ask for it *shorter*, *in title case* or *in capitals*.\n\n' +
@@ -7419,7 +7445,7 @@ class LagrangeChatView extends ItemView {
           messages: recentBinaries(this.history.concat(sent), ATTACH_KEPT),
           cache: true,
           demo: () => {
-            const said = round || lastLook ? demoLookReply(lastLook) : demoChatReply(text || '(what is attached, with no message)', note, agentic, canLook);
+            const said = round || lastLook ? demoLookReply(lastLook) : demoChatReply(text || '(what is attached, with no message)', note, agentic, canLook, this.plugin.diagramPlugins());
             return items.length && !round ? `${demoAttachmentLine(items)}\n\n${said}` : said;
           },
         }, {
@@ -8760,4 +8786,4 @@ LagrangePlugin.internals = {
 Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
-Object.assign(LagrangePlugin.internals, { tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
