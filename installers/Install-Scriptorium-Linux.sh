@@ -32,29 +32,73 @@ verify_hash() {
 verify_hash "$work_dir/Writing.zip" '855ceb85e9c3760fbaa956d9845f0b370bab5010dc3fb548a6687b26ada66dd3'
 unzip -q "$work_dir/Writing.zip" -d "$work_dir/vault"
 [ -f "$work_dir/vault/.obsidian/appearance.json" ] || { printf 'Invalid configuration archive.\n'; exit 1; }
+# ---- Finding Obsidian ----
+# Obsidian counts as installed only if something here can start it. What a removed Obsidian leaves behind does not
+# count: an empty or unreadable AppImage, or a handler for obsidian:// links (a .desktop entry, or only its name in
+# mimeapps.list) whose program is gone. Then Obsidian is installed again.
 app_image="$HOME/Applications/Obsidian.AppImage"
 obsidian_cmd="$(command -v obsidian || true)"
 # Obsidian's own command line client, which Obsidian can install as "obsidian", talks to a running Obsidian but cannot
 # start one, so it is not a launcher.
 is_cli_client() { [ -f "$1" ] && [ "$(wc -c < "$1")" -lt 1000000 ] && grep -q 'unable to find Obsidian' "$1"; }
-if [ -n "$obsidian_cmd" ] && ! is_cli_client "$(readlink -f "$obsidian_cmd")"; then
-  launcher=(obsidian)
-elif [ -x "$app_image" ]; then
-  launcher=("$app_image")
-elif command -v flatpak >/dev/null && flatpak info md.obsidian.Obsidian >/dev/null 2>&1; then
-  launcher=(flatpak run md.obsidian.Obsidian)
-elif command -v xdg-open >/dev/null && command -v xdg-mime >/dev/null && [ -n "$(xdg-mime query default x-scheme-handler/obsidian)" ]; then
-  launcher=(xdg-open)
-else
+# Whether the .desktop entry named $1 exists and the program on its Exec line can be run.
+desktop_entry_works() {
+  local name="$1" dirs dir file line program
+  [ -n "$name" ] || return 1
+  IFS=: read -r -a dirs <<< "${XDG_DATA_HOME:-$HOME/.local/share}:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for dir in "${dirs[@]}"; do
+    file="$dir/applications/$name"
+    [ -f "$file" ] || continue
+    line="$(sed -n 's/^Exec=//p' "$file" | head -n 1)"
+    while :; do   # past "env" and VAR=value, to the program
+      case "$line" in
+        'env '*) line="${line#env }" ;;
+        [A-Za-z_]*=*' '*) case "${line%% *}" in *=*) line="${line#* }" ;; *) break ;; esac ;;
+        *) break ;;
+      esac
+    done
+    case "$line" in
+      '"'*) program="${line#\"}"; program="${program%%\"*}" ;;
+      *) program="${line%% *}" ;;
+    esac
+    [ -n "$program" ] || return 1
+    case "$program" in
+      /*) [ -x "$program" ] && [ -s "$program" ] ;;
+      *) command -v "$program" >/dev/null 2>&1 ;;
+    esac
+    return
+  done
+  return 1
+}
+find_obsidian() {
+  if [ -n "$obsidian_cmd" ] && ! is_cli_client "$(readlink -f "$obsidian_cmd")"; then
+    launcher=(obsidian)
+  elif [ -x "$app_image" ] && [ -s "$app_image" ]; then
+    launcher=("$app_image")
+  elif command -v flatpak >/dev/null && flatpak info md.obsidian.Obsidian >/dev/null 2>&1; then
+    launcher=(flatpak run md.obsidian.Obsidian)
+  elif command -v xdg-open >/dev/null && command -v xdg-mime >/dev/null && desktop_entry_works "$(xdg-mime query default x-scheme-handler/obsidian 2>/dev/null || true)"; then
+    launcher=(xdg-open)
+  else
+    return 1
+  fi
+}
+# ---- End of finding Obsidian ----
+if ! find_obsidian; then
   case "$(uname -m)" in
     x86_64) asset=Obsidian-1.15.0.AppImage; checksum=1dd8cfb593deaa644101bdb4df65b159ed7985993b6572dd25fd1363459e91cc ;;
     aarch64|arm64) asset=Obsidian-1.15.0-arm64.AppImage; checksum=fb350986a6083f1a26330c297ba2bef8191d60f00f982d4b420c821aceaf04f5 ;;
     *) echo "Obsidian supports x86-64 and ARM64 Linux desktops."; exit 1 ;;
   esac
   echo "Installing Obsidian in $HOME/Applications ..."
-  curl --progress-bar --fail --location --proto '=https' --tlsv1.2 "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.0/$asset" -o "$work_dir/Obsidian.AppImage"
+  if ! curl --progress-bar --fail --location --proto '=https' --tlsv1.2 "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.0/$asset" -o "$work_dir/Obsidian.AppImage"; then
+    printf 'Obsidian could not be downloaded, so it was not installed and nothing else was changed.\nCheck the connection and run this again, or install Obsidian from https://obsidian.md first.\n'
+    exit 1
+  fi
   verify_hash "$work_dir/Obsidian.AppImage" "$checksum"
   mkdir -p "$HOME/Applications"
+  # (what is left of an Obsidian that was here before, an empty or unusable file, makes way)
+  if [ -e "$app_image" ] || [ -L "$app_image" ]; then mv -f "$app_image" "$app_image.old-$(date +%Y%m%d-%H%M%S)"; fi
   staged_app="$(mktemp "$HOME/Applications/.obsidian-XXXXXXXX")"
   if ! install -m 755 "$work_dir/Obsidian.AppImage" "$staged_app" || ! ln "$staged_app" "$app_image"; then
     rm -f "$staged_app"
@@ -62,6 +106,11 @@ else
     exit 1
   fi
   rm "$staged_app"
+  if ! [ -x "$app_image" ] || ! [ -s "$app_image" ]; then
+    printf 'Obsidian was downloaded, but %s is still not there, so nothing else was changed.\nInstall Obsidian from https://obsidian.md, then run this again.\n' "$app_image"
+    exit 1
+  fi
+  printf 'Installed Obsidian (%s)\n' "$app_image"
   launcher=("$app_image")
 fi
 # Install missing font families for the current user.

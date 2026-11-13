@@ -205,6 +205,92 @@ def test_rollback(exe, work):
         readme.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
+# Whether Obsidian counts as installed (Scriptorium-Setup.exe --find-obsidian <what the registry says obsidian:// links
+# run> <folders programs are installed in>...). Obsidian's uninstaller leaves the link in the registry; 1.2.0 took the
+# link alone to mean "Obsidian is already installed", so after an uninstall Setup installed no Obsidian.
+def test_find_obsidian(exe, work):
+    print("\nIs Obsidian installed? Only if its program is on the disk")
+    base, other, gone = work / "find" / "LocalAppData", work / "find" / "Program Files", work / "find" / "Elsewhere" / "Obsidian.exe"
+    base.mkdir(parents=True)
+    other.mkdir()
+
+    def find(command, *dirs):
+        r = run(exe, "--find-obsidian", command, *[str(d) for d in dirs])
+        return r.returncode, r.stdout.strip()
+
+    code, out = find("", base, other)
+    check(code == 1 and out == "not installed", "nothing there: not installed")
+    for command, what in ((f'"{gone}" "%1"', "in quotation marks"), (f"{gone} %1", "without quotation marks"), (f'"{gone}"', "with no argument")):
+        code, out = find(command, base, other)
+        check(code == 1 and out.startswith("not installed: the obsidian:// link is left over") and str(gone) in out,
+              f"the obsidian:// link is registered ({what}) but its program is gone: not installed")
+    code, out = find('"C:\\Windows\\notepad" "%1"', base, other)
+    check(code == 1 and out.startswith("not installed"), "a link that names no .exe: not installed")
+    code, out = find("", work / "find" / "no such folder", "")
+    check(code == 1, "folders that do not exist, and an empty one: not installed")
+
+    gone.parent.mkdir()
+    gone.write_bytes(b"MZ program")
+    for command in (f'"{gone}" "%1"', f"{gone} %1"):
+        code, out = find(command, base, other)
+        check(code == 0 and out == f"installed: {gone}", f"the link's program is there ({'quoted' if command[0] == chr(34) else 'unquoted'}): installed, elsewhere")
+    gone.write_bytes(b"")
+    code, out = find(f'"{gone}" "%1"', base, other)
+    check(code == 1, "the link's program is an empty file: not installed")
+
+    for rel in (("Programs", "Obsidian"), ("Obsidian",)):
+        home = (other if len(rel) == 1 else base).joinpath(*rel)
+        home.mkdir(parents=True)
+        (home / "Obsidian.exe").write_bytes(b"")
+        code, out = find("", base, other)
+        check(code == 1, f"an empty Obsidian.exe in {'/'.join(rel)}: not installed")
+        (home / "Obsidian.exe").write_bytes(b"MZ program")
+        code, out = find(f'"{gone}" "%1"', base, other)
+        check(code == 0 and out == f"installed: {home / 'Obsidian.exe'}", f"Obsidian.exe in {'/'.join(rel)}: installed (whatever the link says)")
+        shutil.rmtree(home)
+    code, out = find("", base, other)
+    check(code == 1, "and once that folder is removed again: not installed")
+
+    if os.name == "nt":
+        test_find_obsidian_registry(exe, work)
+
+
+# Windows only: the real registry. With no Obsidian on the machine (as on a CI runner), the link is registered for
+# this user as an uninstalled Obsidian leaves it, and then with a program behind it.
+def test_find_obsidian_registry(exe, work):
+    import winreg
+    r = run(exe, "--find-obsidian")
+    if r.returncode == 0:
+        print("      (Obsidian is installed on this machine: the registry cases are not run)")
+        return
+    key = r"Software\Classes\obsidian\shell\open\command"
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+        print("      (this user already has an obsidian:// link: the registry cases are not run)")
+        return
+    except OSError:
+        pass
+    program = work / "find" / "Registered" / "Obsidian.exe"
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{program}" "%1"')
+        r = run(exe, "--find-obsidian")
+        check(r.returncode == 1 and "left over" in r.stdout and str(program) in r.stdout,
+              "registry: the obsidian:// link is there, Obsidian.exe is not: Setup offers to install Obsidian")
+        program.parent.mkdir(parents=True)
+        program.write_bytes(b"MZ program")
+        r = run(exe, "--find-obsidian")
+        check(r.returncode == 0 and r.stdout.strip() == f"installed: {program}", "registry: the link's program exists: installed")
+    finally:
+        for sub in (key, r"Software\Classes\obsidian\shell\open", r"Software\Classes\obsidian\shell", r"Software\Classes\obsidian"):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
+            except OSError:
+                pass
+    r = run(exe, "--find-obsidian")
+    check(r.returncode == 1 and r.stdout.strip() == "not installed", "registry: no link, no program: not installed")
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__ or "usage: test_update.py <Scriptorium-Setup.exe>")
@@ -216,6 +302,7 @@ def main():
         test_not_a_vault(exe, work)
         test_install_targets(exe, work)
         test_rollback(exe, work)
+        test_find_obsidian(exe, work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print()
