@@ -489,7 +489,83 @@ function locateEdits(doc, edits) {
     located.push(Object.assign({}, e, { from, to, matched: doc.slice(from, to) }));
   }
   located.sort((a, b) => a.from - b.from);
+  return chainSkipped(doc, located, skipped);
+}
+
+/* Edits that build on one another. An edit of a reply may name words that are only in the note once an earlier
+   edit of the same reply is made (it rewrites a sentence, then adds one after the new sentence). Such an edit is not
+   found in the note as it is; it is looked for in the note as the edits located so far leave it, and joined to the
+   edit whose text it touches, so that the two are one change of the note as it is (the pen writes them as one).
+   workingText(doc, located) -> {text, spans}: the note with the located edits (sorted, not overlapping) made, and
+   where each one's new text stands in it. Pure. */
+function workingText(doc, located) {
+  let text = '', at = 0;
+  const spans = [];
+  for (const e of located) {
+    text += doc.slice(at, e.from);
+    spans.push({ e, start: text.length, end: text.length + e.replace.length });
+    text += e.replace;
+    at = e.to;
+  }
+  return { text: text + doc.slice(at), spans };
+}
+
+/* Makes one more change, of [a, b) of the working text into `replace`, part of the located edits: an edit of its own
+   if it touches none of them, else joined with those it touches. -> the new list of located edits. Pure. */
+function foldEdit(doc, located, a, b, replace, extra) {
+  const { text, spans } = workingText(doc, located);
+  const hit = s => (s.end > a && s.start < b) || (s.start === s.end && a < s.start && s.start < b) || (a === b && s.start <= a && a <= s.end);
+  const first = spans.findIndex(hit);
+  // where an offset of the working text that is in none of the edits' new text stands in the note
+  const inNote = x => { let d = 0; for (const s of spans) if (s.end <= x) d += (s.e.to - s.e.from) - (s.end - s.start); return x + d; };
+  if (first < 0) {
+    const from = inNote(a), to = inNote(b);
+    return located.concat(Object.assign({ find: doc.slice(from, to), matched: doc.slice(from, to), replace, from, to }, extra, from === to ? { insert: true } : {}))
+      .sort((x, y) => x.from - y.from || x.to - y.to);
+  }
+  let last = first;
+  for (let i = first; i < spans.length; i++) if (hit(spans[i])) last = i;
+  const wa = Math.min(a, spans[first].start), wb = Math.max(b, spans[last].end);
+  const from = wa < spans[first].start ? inNote(wa) : spans[first].e.from, to = wb > spans[last].end ? inNote(wb) : spans[last].e.to;
+  const joined = spans.slice(first, last + 1).map(s => s.e);
+  const reasons = joined.map(e => e.reason).concat(extra && extra.reason).filter(Boolean);
+  const merged = {
+    find: doc.slice(from, to), matched: doc.slice(from, to), replace: text.slice(wa, a) + replace + text.slice(b, wb),
+    reason: Array.from(new Set(reasons)).join('; '), from, to, chained: joined.reduce((n, e) => n + (e.chained || 1), 1),
+  };
+  if (from === to) merged.insert = true;
+  return located.filter(e => !joined.includes(e)).concat(merged).sort((x, y) => x.from - y.from || x.to - y.to);
+}
+
+/* Gives the edits that were not found in the note a second look, in the note as the located edits leave it
+   (see above). skipped entries: a replacement {find, replace}, or an insertion {insert: true, find: the anchor,
+   side: 'after' | 'before', replace: the text}. -> {located, skipped}. Pure. */
+function chainSkipped(doc, located, skipped) {
+  // (again for as long as one more is placed: an edit may build on one that comes after it in the list)
+  for (let n = skipped.length + 1; skipped.length < n;) {
+    n = skipped.length;
+    const once = chainOnce(doc, located, skipped);
+    located = once.located;
+    skipped = once.skipped;
+  }
   return { located, skipped };
+}
+function chainOnce(doc, located, skipped) {
+  const left = [];
+  for (const e of skipped) {
+    if (!/not found in the note$/.test(e.why || '') || !e.find || !located.length) { left.push(e); continue; }
+    const text = workingText(doc, located).text;
+    let hits = findAll(text, e.find);
+    if (!hits.length) hits = looseFindAll(text, e.find);
+    if (hits.length !== 1) {
+      left.push(hits.length ? Object.assign({}, e, { why: `${e.why}, and ${hits.length} times in the note as the edits before it leave it` }) : e);
+      continue;
+    }
+    const [a, b] = hits[0];
+    if (e.insert) { const at = e.side === 'before' ? a : b; located = foldEdit(doc, located, at, at, e.replace, { reason: e.reason }); }
+    else located = foldEdit(doc, located, a, b, e.replace, { reason: e.reason });
+  }
+  return { located, skipped: left };
 }
 
 /* At most limit characters of text, cut at line ends where possible, centred on focus (an offset, e.g. the cursor;
@@ -615,7 +691,7 @@ function parseAgentReply(reply) {
    an edit of an empty range, next to its anchor; an append goes at the end of the note, after a blank line. */
 function locateOps(doc, ops) {
   const { located, skipped } = locateEdits(doc, ops.filter(o => o.op === 'replace').map(o => ({ find: o.find, replace: o.replace, reason: o.reason })));
-  const skip = (o, find, why) => skipped.push({ find, matched: '', replace: o.text, reason: o.reason, why, insert: true });
+  const skip = (o, find, why) => skipped.push({ find, matched: '', replace: o.text, reason: o.reason, why, insert: true, side: o.after ? 'after' : 'before' });
   for (const o of ops) {
     if (o.op === 'replace') continue;
     let at, anchor = '';
@@ -635,7 +711,7 @@ function locateOps(doc, ops) {
     located.push({ find: '', matched: '', replace: insert, reason: o.reason, from: at, to: at, insert: true });
   }
   located.sort((a, b) => a.from - b.from || a.to - b.to);
-  return { located, skipped };
+  return chainSkipped(doc, located, skipped);
 }
 
 /* ---- Looking at the page ----
@@ -7388,4 +7464,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

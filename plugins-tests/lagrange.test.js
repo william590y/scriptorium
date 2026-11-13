@@ -2417,3 +2417,38 @@ test('A look at the page: Scriptorium’s marks for aligned text go where Readin
   assert.match(js, /text: tidy\(shown\(el\)\)\.slice\(0, 200\)/);
   assert.match(js, /exec\(shown\(p\)\)/);
 });
+
+test('Edits that build on one another: an edit is looked for in the note as the edits before it leave it, and joined to the one it touches', () => {
+  const doc = 'One two three. Four five six. Seven.\n';
+  const apply = (d, l) => { let out = '', at = 0; for (const e of l) { out += d.slice(at, e.from) + e.replace; at = e.to; } return out + d.slice(at); };
+  const ops = list => L.parseAgentReply('```lagrange-edits\n' + JSON.stringify(list) + '\n```').ops;
+  const run = list => { const r = L.locateOps(doc, ops(list)); return { text: apply(doc, r.located), n: r.located.length, skipped: r.skipped.map(x => x.why), located: r.located }; };
+  // an insertion after words an earlier edit wrote
+  let r = run([{ find: 'Four five six.', replace: '4 5 6.' }, { insert_after: '4 5 6.', text: ' And more.' }]);
+  assert.deepEqual([r.text, r.n, r.skipped], ['One two three. 4 5 6. And more. Seven.\n', 1, []]);
+  assert.equal(r.located[0].matched, 'Four five six.', 'one change of the note as it is');
+  assert.equal(doc.slice(r.located[0].from, r.located[0].to), r.located[0].matched);
+  // a replacement that straddles an earlier edit's text and the note's own
+  r = run([{ find: 'Four five six.', replace: '4 5 6.' }, { find: '5 6. Seven', replace: '5, 6; seven' }]);
+  assert.deepEqual([r.text, r.n, r.skipped], ['One two three. 4 5, 6; seven.\n', 1, []]);
+  // a replacement of what an append wrote (a poem appended, then centred)
+  r = run([{ append: 'A poem line.' }, { find: 'A poem line.', replace: '::: center\nA poem line.\n:::' }]);
+  assert.deepEqual([r.text, r.skipped], ['One two three. Four five six. Seven.\n\n::: center\nA poem line.\n:::', []]);
+  // three in a chain
+  r = run([{ find: 'two', replace: '2' }, { insert_after: 'One 2', text: ' (two)' }, { find: '(two) three', replace: '(two), 3' }]);
+  assert.deepEqual([r.text, r.n, r.skipped], ['One 2 (two), 3. Four five six. Seven.\n', 1, []]);
+  // an edit that touches no earlier edit's text but is found only loosely there stays its own edit; what is nowhere is still skipped, and says so
+  r = run([{ find: 'two', replace: '2' }, { find: 'nowhere', replace: 'x' }, { insert_after: '2 three.', text: ' (sic)' }]);
+  assert.deepEqual([r.text, r.skipped], ['One 2 three. (sic) Four five six. Seven.\n', ['not found in the note']]);
+  // words that an earlier edit makes ambiguous are not guessed at
+  r = run([{ find: 'Seven.', replace: 'Eight. Eight.' }, { insert_after: 'Eight.', text: '!' }]);
+  assert.equal(r.n, 1);
+  assert.match(r.skipped[0], /^the place was not found in the note, and 2 times in the note as the edits before it leave it$/);
+  // edits that are all found in the note are located exactly as before
+  r = run([{ find: 'two', replace: '2' }, { find: 'five', replace: '5' }]);
+  assert.deepEqual([r.text, r.n], ['One 2 three. Four 5 six. Seven.\n', 2]);
+  // the pure pieces
+  const w = L.workingText(doc, [{ from: 4, to: 7, replace: '2' }]);
+  assert.deepEqual([w.text, w.spans.map(x => [x.start, x.end])], ['One 2 three. Four five six. Seven.\n', [[4, 5]]]);
+  assert.deepEqual(L.foldEdit(doc, [{ from: 4, to: 7, replace: '2', matched: 'two' }], 6, 11, 'THREE', {}).map(e => [e.from, e.to, e.replace]), [[4, 7, '2'], [8, 13, 'THREE']], 'an untouched change keeps to the note’s own offsets');
+});
