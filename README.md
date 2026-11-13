@@ -290,10 +290,34 @@ folder of their own in your temporary folder, which only you can read, and delet
 Lagrange from ever rendering or capturing the page, turn off **Settings → Lagrange → Let Lagrange look at the
 rendered page**.
 
+**Diagrams.** Ask for a figure and Lagrange writes one into the note, and the pen draws it: a technical or
+mathematical figure (a graph, a construction, a circuit, a commutative diagram, a plot) as a `tikz` block, which the
+[TikZJax](https://github.com/artisticat1/obsidian-tikzjax) plugin sets, and a free-form sketch as an
+[Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawing, a file next to the note that the note
+embeds. In Live Preview the figure is not typed out: it is kept unseen until the pen comes to it, then drawn line by
+line in its own order, its labels last; a key or a click shows it whole at once. In Source mode the pen writes the
+source. Both plugins are separate from Scriptorium and are installed with it (see
+[The diagram plugins](#the-diagram-plugins)); where one is off, Lagrange is told so, does not write that kind of
+figure, and says why in the chat. In demo mode, with TikZJax on, *draw a diagram* shows the pen at it without a model.
+
+What TikZJax takes was tried construct by construct in Obsidian 1.15 with TikZJax 0.5.2, and Lagrange is told the
+same: a block is a whole document body (`\usepackage` lines, one `\usetikzlibrary{…}` line, `\begin{document}`, the
+picture, `\end{document}`), with no `\documentclass`; plain TikZ, `\foreach` included, needs no library, but
+`positioning`, `calc`, `arrows.meta`, `shapes.geometric`, `matrix` and the other libraries must each be named;
+`\text` needs `amsmath` and `\mathbb` needs `amssymb`; the packages there are tikz-cd, circuitikz, pgfplots, chemfig,
+tikz-3dplot and the AMS ones; a character outside ASCII in a label is an error. TikZJax says nothing when a figure
+has an error (it leaves a broken-picture mark), so Lagrange watches for it: the pen does not wait for a figure that
+has failed, and the chat says that the figure in the note could not be drawn, or is still not drawn after 30 seconds
+(TikZJax sets one figure at a time, and a figure of a thousand shapes takes half a minute).
+
 **What the chat shows.** Replies, and your own messages, are set as Obsidian sets a note: code with its colours and a
 copy button, inline and displayed mathematics, Mermaid diagrams, a `tikz` figure where TikZJax is on and an Excalidraw
 embed where Excalidraw is on (without the plugin, the source in a code block and a line that says why), pictures and
-video of the vault. While a reply arrives, each finished block is set once and what is still being written stays plain
+video of the vault. A `tikz` figure that TikZJax cannot draw (an error in its TikZ), or has not drawn after 30
+seconds, gives way to its source under a line that says which. (A figure in a message is put into the chat in one
+step, already whole: TikZJax 0.5.2 leaves a figure on its spinner for ever when it is rendered into a panel that is
+already on the page, although it has compiled it.) In demo mode, ask Lagrange to *explain* something to see a reply
+with mathematics, code and a figure. While a reply arrives, each finished block is set once and what is still being written stays plain
 text until it closes. The chat only shows: it runs no code a reply holds (a block that another plugin would act on,
 such as a Dataview query, is shown as its source), and it fetches nothing from the web because a reply says so (a
 picture at a web address becomes a link).
