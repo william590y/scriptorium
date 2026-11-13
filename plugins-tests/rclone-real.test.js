@@ -217,7 +217,7 @@ test('steady syncing: edits, new files, renames and deletions travel both ways',
   const kept = path.join(a.paths.kept, a.id, S.syncStamp(new Date()));
   assert.equal(read(kept, 'd/e.md'), 'four');
   assert.equal(read(kept, 'b.md'), 'two');
-  assert.ok(r.summary.copied >= 2 && r.summary.deleted >= 1 && r.summary.replaced >= 1, JSON.stringify(r.summary));
+  assert.ok(r.summary.copied + r.summary.replaced >= 4 && r.summary.deleted >= 1, JSON.stringify(r.summary));   // macOS logs its own kind of copy
 });
 
 test('a file changed on both sides keeps both: the newer under its name, the older as name.conflict1.md', { skip }, async t => {

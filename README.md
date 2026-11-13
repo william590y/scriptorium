@@ -381,7 +381,8 @@ computer (and withdraws it at Google where rclone can).
 - **No token in the vault.** See **Where things are kept**.
 
 When does it sync? When Obsidian starts, every five minutes (a setting), about 45 seconds after the last change to a
-note, when you ask, and, if something is waiting, once more as Obsidian quits (for a quarter of a minute at most). A
+note, when you ask, and, if something is waiting, it tries once more as Obsidian quits (for a quarter of a minute at
+most; whatever is left is synced when Obsidian next starts). A
 problem that needs you (signing in again, a safety stop) pauses the timer until you have looked; anything else, such
 as being offline, is tried again by itself, more slowly each time.
 

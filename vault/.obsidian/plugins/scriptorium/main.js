@@ -2593,8 +2593,8 @@ function syncBisyncArgs(o) {
 function syncSummary(lines) {
   const s = { copied: 0, replaced: 0, deleted: 0, conflicts: [], ok: false, nothing: false };
   for (const l of lines || []) {
-    if (/^Copied \(new\)/.test(l.msg)) s.copied++;
-    else if (/^Copied \(replaced existing\)/.test(l.msg) || /^Copied \(server-side copy\)/.test(l.msg)) s.replaced++;
+    if (/^Copied \(replaced existing\)/.test(l.msg)) s.replaced++;
+    else if (/^Copied \(/.test(l.msg)) s.copied++;   // "new", or a copy the storage made by itself
     else if (l.msg === 'Deleted') s.deleted++;
     else if (/Bisync successful/.test(l.msg)) s.ok = true;
     else if (/No changes found/.test(l.msg)) s.nothing = true;
