@@ -1093,7 +1093,7 @@ function docPlan(doc) {
    font changed); preview one that shows a drop cap without saving it ({which}: as previewDropcap takes it;
    undefined for what the note says) and inks it in ({ink: true}); ink switches the inking off again. */
 function dropcapExtension(plugin) {
-  const { StateField, StateEffect, RangeSetBuilder } = require('@codemirror/state');
+  const { StateField, StateEffect, RangeSetBuilder, Prec } = require('@codemirror/state');
   const { Decoration, EditorView, ViewPlugin } = require('@codemirror/view');
   const obsidian = require('obsidian');
   const refresh = StateEffect.define(), preview = StateEffect.define(), ink = StateEffect.define(), keep = StateEffect.define();
@@ -1197,7 +1197,48 @@ function dropcapExtension(plugin) {
       Promise.resolve().then(() => { if (view.state === state) try { view.dispatch({ effects: keep.of(found) }); } catch (e) { /* the view is gone */ } });
     }
   });
-  return { extension: [field, keepField, keeper], refresh, preview, ink, field, keepField };
+  /* A click on the initial puts the cursor at the letter: before it or after it, whichever is nearer (a double
+     click takes the word, a triple click the line of the note). Left to itself, the browser has no place for a
+     click on a letter that is floated out of its line, and puts the cursor at the end of the first line. */
+  const clicks = Prec.highest(EditorView.domEventHandlers({
+    mousedown(event, view) {
+      try {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || !live(view.state)) return false;
+        const el = event.target && event.target.closest ? event.target.closest('.cm-line.scriptorium-opening') : null;
+        if (!el) return false;
+        const line = view.state.doc.lineAt(view.posAtDOM(el, 0)), cs = getComputedStyle(el), tall = (parseFloat(cs.lineHeight) || 24) * 1.8;
+        const inside = b => event.clientX >= b.left && event.clientX <= b.right && event.clientY >= b.top && event.clientY <= b.bottom;
+        let first = -1, last = -1, box = null;
+        for (let p = line.from; p < Math.min(line.to, line.from + 8); p++) {
+          const c = view.coordsAtPos(p, 1), d = view.coordsAtPos(p + 1, -1);   // the letter's left edge, and its right one
+          if (!c || c.bottom - c.top <= tall) { if (first >= 0) break; continue; }
+          if (first < 0) first = p;
+          last = p;
+          const right = d && d.bottom - d.top > tall ? Math.max(c.right, d.right) : c.right;
+          box = box ? { left: Math.min(box.left, c.left), right: Math.max(box.right, right), top: Math.min(box.top, c.top), bottom: Math.max(box.bottom, c.bottom) } : { left: c.left, right, top: c.top, bottom: c.bottom };
+        }
+        let at = -1;
+        if (box && inside(box)) at = event.clientX < (box.left + box.right) / 2 ? first : last + 1;
+        else if (!box) {
+          // a picture stands for the letter: a click on it is a click before the paragraph's first letter
+          const picture = getComputedStyle(el, '::before'), px = v => parseFloat(v) || 0, r = el.getBoundingClientRect();
+          if (picture.content === 'none' || picture.content === 'normal' || picture.float !== 'left') return false;
+          const left = r.left + px(cs.paddingLeft) + px(picture.marginLeft), top = r.top + px(cs.paddingTop) + px(picture.marginTop);
+          if (inside({ left, right: left + px(picture.width), top, bottom: top + px(picture.height) })) at = line.from + Math.max(0, line.text.search(/\S/));
+        }
+        if (at < 0) return false;
+        const word = /^[\p{L}\p{N}\p{M}'’-]*/u.exec(view.state.doc.sliceString(at, line.to))[0].length;
+        const selection = event.shiftKey ? { anchor: view.state.selection.main.anchor, head: at }
+          : event.detail >= 3 ? { anchor: line.from, head: line.to }
+            : event.detail === 2 ? { anchor: Math.min(at, first < 0 ? at : first), head: Math.max(at, at + word) } : { anchor: at };
+        event.preventDefault();
+        view.dispatch({ selection, userEvent: 'select.pointer' });
+        view.focus();
+        return true;
+      } catch (e) { return false; }
+    },
+  }));
+  return { extension: [field, keepField, keeper, clicks], refresh, preview, ink, field, keepField };
 }
 
 /* ==========================================================

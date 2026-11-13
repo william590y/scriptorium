@@ -388,6 +388,27 @@
       await open(TEXT, 'live');
       if (leaf.view.editor.getValue() !== TEXT) out.why.push('opening the note in Live Preview changed its text');
     });
+    await run('a click on the initial puts the cursor at the letter; a double click takes the first word', async out => {
+      await open(TEXT, 'live');
+      const cm = cmOf(), at = from(), line = liveLine('Energy is never'), cap = measure(line).cap, box = line.getBoundingClientRect();
+      const click = (x, y, detail) => line.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, detail: detail || 1, clientX: box.left + cap.left + x, clientY: box.top + cap.top + y, view: window }));
+      const mouseup = () => document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, view: window }));
+      const head = () => cm.state.selection.main.head - at, anchor = () => cm.state.selection.main.anchor - at;
+      cm.dispatch({ selection: { anchor: cm.state.doc.length } });
+      click(cap.width * 0.25, cap.height / 2); mouseup(); await frame();
+      if (head() !== 0 || anchor() !== 0) out.why.push(`a click on the left of the initial puts the cursor at ${head()}`);
+      click(cap.width * 0.8, cap.height * 0.8); mouseup(); await frame();
+      if (head() !== 1 || anchor() !== 1) out.why.push(`a click on the right of the initial puts the cursor at ${head()}`);
+      click(cap.width / 2 + 1, cap.height / 2, 2); mouseup(); await frame();
+      if (cm.state.sliceDoc(cm.state.selection.main.from, cm.state.selection.main.to) !== 'Energy') out.why.push(`a double click on the initial selects “${cm.state.sliceDoc(cm.state.selection.main.from, cm.state.selection.main.to).slice(0, 20)}”`);
+      if (!cm.hasFocus) out.why.push('the editor does not have the keyboard after the click');
+      // a click in the text beside the initial is the editor's own affair
+      cm.dispatch({ selection: { anchor: cm.state.doc.length } });
+      const c = cm.coordsAtPos(at + 12, 1);
+      line.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, detail: 1, clientX: c.left + 1, clientY: (c.top + c.bottom) / 2, view: window }));
+      mouseup(); await frame();
+      if (Math.abs(head() - 12) > 1) out.why.push(`a click in the text beside the initial puts the cursor at ${head()}, not 12`);
+    });
     await run('a selection, the clipboard, the editor’s text and a search all have the first letter', async out => {
       await open(TEXT, 'live');
       const cm = cmOf(), at = from();
