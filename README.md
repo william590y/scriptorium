@@ -2,7 +2,7 @@
 
 A fancy and sophisticated Obsidian configuration for the typographically inclined.
 
-![Lagrange at work in Obsidian: a typed request, the loading plate, the pen striking out and writing in handwriting with a trail of ink, an equation drawn symbol by symbol, code typed by a typewriter, then Undo, Redo and a rewind to an earlier message](docs/lagrange.gif)
+![Lagrange at work in Obsidian: the page in Reading view with its subtitle and drop cap, then the editor with the drop cap shown; a typed request, the loading plate, the pen striking out and writing in handwriting; a reply set with mathematics, code and a figure; and the pen drawing a diagram into the note](docs/lagrange.gif)
 
 *Lagrange, Scriptorium's writing companion, recorded in Obsidian (Demo provider, so no account is needed to try it).*
 
