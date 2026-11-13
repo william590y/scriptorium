@@ -566,11 +566,9 @@ one computer, carry on at another. It needs no server of ours. The work is done 
 sign in to Google in your browser, pick the folder in your Drive by hand, and from then on the two are kept in step
 with [`rclone bisync`](https://rclone.org/bisync/).
 
-**This is new, and one step of it is not yet verified.** Everything except Google's own sign-in is tested with the
-real rclone on Linux, Windows and macOS, with a second folder standing in for Drive (see **How it was tested**). The
-sign-in with the real Google has not been run by its author yet: it follows rclone's documentation for the version
-Scriptorium pins (1.76.0) and is tested up to the moment the browser opens. If it fails for you, **Scriptorium: Copy
-the Google Drive diagnostic report** says why, without your sign-in in it.
+The sign-in has been tested with Google, and works. If something goes wrong, the window says what happened, the
+likely cause and what to do, and **Scriptorium: Copy the Google Drive diagnostic report** gives a summary to paste,
+without your sign-in in it.
 
 It runs in Obsidian on a computer (Windows, macOS, Linux). On a phone or tablet the commands say so: rclone cannot run
 there.
@@ -742,8 +740,9 @@ underneath. The commands keep their places in the palette (and any hotkey you ga
 - In a real Obsidian 1.15 on Linux the whole flow was driven by hand against the stand-in: download, sign-in page (with
   the real rclone listening, then cancelled), browsing and making a folder, the first-sync page, syncing after an edit
   and on the timer, a conflict, the safety stops, retrieving into a new folder and opening it.
-- **Not verified:** the sign-in and the transfer with the real Google Drive (nobody has signed in yet), and the
-  windows themselves on Windows and macOS (the engine is tested there, the Obsidian windows only on Linux).
+- The sign-in with the real Google has been run by the author, and works.
+- **Not verified:** the windows themselves on Windows and macOS (the engine is tested there, the Obsidian windows
+  only on Linux).
 
 To check the sign-in yourself, in three steps: (1) run **Scriptorium: Connect to Google Drive (sign in to Google)**
 and finish Google's page; the window should go on to "This computer is signed in to Google Drive". (2) Run **Sync
