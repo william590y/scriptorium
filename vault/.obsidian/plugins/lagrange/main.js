@@ -2659,8 +2659,8 @@ const CHAT_LOOK =
 
 // With the pen as well: the two blocks in one reply.
 const CHAT_LOOK_AFTER_EDITS =
-  ' A reply may hold an edits block and a look block: your pen writes the edits first, and the look then shows the ' +
-  'page as it stands after them, which is how to check a change you have made.';
+  ' A reply may hold an edits block and, after it, a look block: your pen writes the edits first, and the look then ' +
+  'shows the page as it stands after them, which is how to check a change you have made.';
 
 function chatSystemPrompt(note, clip, agentic, look) {
   return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) +
@@ -5575,7 +5575,10 @@ class LagrangeChatView extends ItemView {
     const shown = this.takeShown(note);
     // What this turn adds to the conversation (kept), and the same as the model is sent it now (sent): the pictures
     // of a look are sent once and are not kept. The conversation takes the turn in when it is over.
-    const first = shown ? lookMessage(shown, { by: 'writer', text }) : null;
+    // (shown when another model was chosen, perhaps: one that takes no pictures is given the words alone)
+    const desktop = !(obsidian.Platform && obsidian.Platform.isDesktopApp === false);
+    const first = !shown ? null
+      : lookMessage(lookSendsPictures(settings, desktop, this.plugin.session) ? shown : Object.assign({}, shown, { pictures: [], more: 0 }), { by: 'writer', text });
     const kept = [{ role: 'user', content: first ? first.kept : text }];
     const sent = [first ? { role: 'user', content: first.content, alt: first.alt } : kept[0]];
     const controller = new AbortController();
@@ -5649,7 +5652,7 @@ class LagrangeChatView extends ItemView {
         const entry = this.addLook();
         let look = null, problem = '';
         try {
-          look = await this.plugin.lookAtPage(target, asked.look, { signal: controller.signal });
+          look = await this.plugin.lookAtPage(target, asked.look, { signal: controller.signal, path: note.path });
           entry.done(look);
           lastLook = look;
         } catch (err) {
@@ -6588,10 +6591,12 @@ class LagrangePlugin extends Plugin {
 
   /* Looks at a note's page for the chat (lookAtPage, section 7), with pictures where they can be taken and the
      provider takes them (lookSendsPictures). Nothing is rendered or captured with "Let Lagrange look at the rendered
-     page" off. Rejects with a reason, worded to follow "could not look at the page:". */
+     page" off. opts: {signal, path: the note the look is meant for, in case another has been opened in its pane}.
+     Rejects with a reason, worded to follow "could not look at the page:". */
   async lookAtPage(view, spec, opts) {
     if (!this.settings.lookAtPage) throw new LagrangeError('looking at the page is turned off in Settings → Lagrange.', { kind: 'setup' });
     if (!view || !view.file || !view.containerEl.isConnected) throw new LagrangeError('the note is no longer open.');
+    if (opts && opts.path && view.file.path !== opts.path) throw new LagrangeError('the note is no longer open in its pane.');
     if (this.looking) throw new LagrangeError('another look at the page is under way.');
     this.looking = true;
     try {

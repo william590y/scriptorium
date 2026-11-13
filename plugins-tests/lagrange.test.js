@@ -1739,7 +1739,7 @@ test('Look contract: the chat prompt names it when looking is on and a note is o
   for (const target of ['"target": "view"', '"target": "section", "heading"', '"target": "passage", "near"', '"target": "lines", "from": 12, "to": 40']) assert.ok(on.includes(target), target);
   assert.match(on, /at most twice for one message/);
   assert.equal(L.LOOKS_PER_MESSAGE, 2);
-  assert.match(on, /your pen writes the edits first, and the look then shows the page as it stands after them/);
+  assert.match(on, /A reply may hold an edits block and, after it, a look block: your pen writes the edits first, and the look then shows the page as it stands after them/);
   assert.ok(on.indexOf('lagrange-edits') < on.indexOf('lagrange-look') && on.indexOf('lagrange-look') < on.indexOf('<note>'), 'after the pen’s contract, before the note');
   const talk = L.chatSystemPrompt(note, clip, false, true);
   assert.ok(talk.includes(L.CHAT_LOOK));
