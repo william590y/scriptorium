@@ -82,6 +82,10 @@ jobs:
         shell: pwsh
         run: python tools/test_setup_vault.py dist/Scriptorium-Setup.exe
 
+      - name: Test adding the TikZJax and Excalidraw plugins (Setup's new vault, update and set-up; the Windows script's PowerShell; the other scripts)
+        shell: pwsh
+        run: python tools/test_diagram_plugins.py dist/Scriptorium-Setup.exe
+
       - name: Test adding a vault to Obsidian's vault list (Setup and the Windows script)
         shell: pwsh
         run: python tools/test_auto_open.py dist/Scriptorium-Setup.exe

@@ -53,7 +53,7 @@ def run(exe, *args):
     else:
         mono = os.environ.get("MONO")
         cmd = [os.path.join(mono, "bin", "mono") if mono else "mono", str(exe), *args]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=dict(os.environ, SCRIPTORIUM_NO_FONTS="1"))   # the fonts have tests of their own (test_fonts.py)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=dict(os.environ, SCRIPTORIUM_NO_FONTS="1", SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1"))   # the fonts and the diagram plugins have tests of their own (test_fonts.py, test_diagram_plugins.py)
     for line in (r.stdout + r.stderr).splitlines():
         print("      | " + line)
     return r

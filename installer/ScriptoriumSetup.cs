@@ -3,7 +3,9 @@
 // It creates a NEW vault folder from the Scriptorium configuration (embedded in this .exe, so it always matches the
 // installer's version), installs Obsidian for the current user if it is missing, and installs EB Garamond and Cormorant
 // Garamond for the current user if they are missing. The Longform plugin is not bundled: if the user ticks it, it is
-// downloaded from its author's official release into the new vault. Every download is pinned by SHA-256. An existing
+// downloaded from its author's official release into the new vault. The two community plugins that Lagrange's diagrams
+// need, TikZJax and Excalidraw, are not bundled either: a new vault, an updated one and one that is set up each get them
+// from the plugins' own releases (see DiagramPlugins). Every download is pinned by SHA-256. An existing
 // folder is never changed, except a Scriptorium vault, which it can update in place: Scriptorium's own files are replaced
 // (the old ones backed up in .obsidian/scriptorium-backup-<time>), the user's notes and settings are kept. Any other
 // folder with files in it (a vault the user already writes in, or a folder of notes) can be set up as a Scriptorium
@@ -78,6 +80,14 @@ namespace ScriptoriumSetup
                     if (args[i] == "--font-root") Fonts.FakeRoot = Path.GetFullPath(args[i + 1]); else Fonts.Source = Path.GetFullPath(args[i + 1]);
                     args = args.Take(i).Concat(args.Skip(i + 2)).ToArray();
                 }
+                // For the tests: --plugin-pins <file> stands in for the pinned releases of the diagram plugins
+                // (one line per file: id|name|version|file|SHA-256|address), so that nothing comes from GitHub.
+                else if (args[i] == "--plugin-pins")
+                {
+                    try { DiagramPlugins.All = DiagramPlugins.Parse(File.ReadAllText(Path.GetFullPath(args[i + 1]), Encoding.UTF8)); }
+                    catch (Exception e) { Console.Error.WriteLine("FAILED: --plugin-pins: " + e.Message); return 1; }
+                    args = args.Take(i).Concat(args.Skip(i + 2)).ToArray();
+                }
                 else i++;
             }
             // Headless, for support: the state of each of the four font faces (--check-fonts), and putting them right
@@ -89,6 +99,19 @@ namespace ScriptoriumSetup
                 try { Installer.ExtractVault(Path.GetFullPath(args[1]), null, true); Console.WriteLine("OK " + args[1]); return 0; }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
             }
+            // Headless (used by the tests): a new vault as the window makes it, in a folder that does not exist yet or is
+            // empty: the embedded vault, then the diagram plugins from their releases. No Obsidian, fonts or Longform.
+            if (args.Length == 2 && args[0] == "--install-only")
+            {
+                try
+                {
+                    string vault = Path.GetFullPath(args[1]);
+                    Installer.ExtractVault(vault, Console.WriteLine, true);
+                    DiagramPlugins.Headless(vault, Console.WriteLine);
+                    return 0;
+                }
+                catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
+            }
             // Headless update (used by the tests): update the Scriptorium vault in that folder in place, without Longform.
             if (args.Length == 2 && args[0] == "--update-only")
             {
@@ -98,6 +121,7 @@ namespace ScriptoriumSetup
                     if (Vaults.Classify(vault) != Vaults.Target.Vault) throw new InvalidOperationException("This folder is not a Scriptorium vault: " + vault);
                     Vaults.Report report = Vaults.Update(vault, null, Console.WriteLine);
                     Console.WriteLine(Vaults.UpdatedMessage(vault, report));
+                    DiagramPlugins.Headless(vault, Console.WriteLine);
                     Fonts.Headless(Console.WriteLine);
                     return 0;
                 }
@@ -121,6 +145,7 @@ namespace ScriptoriumSetup
                     }
                     Vaults.Report report = Vaults.SetUp(vault, null, Console.WriteLine);
                     Console.WriteLine(Vaults.SetUpMessage(vault, report));
+                    DiagramPlugins.Headless(vault, Console.WriteLine);
                     Fonts.Headless(Console.WriteLine);
                     return 0;
                 }
@@ -917,6 +942,199 @@ namespace ScriptoriumSetup
         }
     }
 
+    // ---------- the diagram plugins ----------
+    // Lagrange draws technical figures with the TikZJax plugin and free-form sketches with the Excalidraw plugin. They are
+    // not part of Scriptorium and are not in this installer (TikZJax is MIT-licensed, the Excalidraw plugin AGPL-3.0):
+    // each is downloaded from its own release on GitHub, at a pinned version, and every file is checked against its
+    // SHA-256 before anything is written to .obsidian/plugins/<id>/. A new vault, an updated vault and a vault that is set
+    // up all get them, turned on like Scriptorium's own plugins. The rules, the same as in
+    // installers/Setup-Scriptorium-Vault.py, the script installers and the Scriptorium plugin:
+    //   - a plugin the vault has at the pinned version or a newer one is left exactly as it is; an older one is replaced;
+    //   - a plugin's settings (data.json) are never touched, and nothing is deleted;
+    //   - a plugin that cannot be downloaded, or whose files do not match, is not installed: nothing of it is written,
+    //     what Setup did to the vault stands, and the log names the plugin and says how to add it in Obsidian.
+    // The pins below are written by tools/pin_plugins.py from installers/diagram-plugins.json: change them there.
+    static class DiagramPlugins
+    {
+        public sealed class Plugin { public string Id, Name, Version; public Pinned[] Files; }
+
+        static Plugin Release(string id, string name, string version, string repository, params string[] filesAndHashes)
+        {
+            var files = new List<Pinned>();
+            for (int i = 0; i + 1 < filesAndHashes.Length; i += 2)
+                files.Add(new Pinned(name + " " + version + " (" + filesAndHashes[i] + ")", filesAndHashes[i],
+                                     "https://github.com/" + repository + "/releases/download/" + version + "/" + filesAndHashes[i], filesAndHashes[i + 1]));
+            return new Plugin { Id = id, Name = name, Version = version, Files = files.ToArray() };
+        }
+
+        public static Plugin[] All = {
+            Release("obsidian-tikzjax", "TikZJax", "0.5.2", "artisticat1/obsidian-tikzjax",
+                    "main.js", "cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41",
+                    "manifest.json", "09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1",
+                    "styles.css", "d9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d"),
+            Release("obsidian-excalidraw-plugin", "Excalidraw", "2.29.2", "zsviczian/obsidian-excalidraw-plugin",
+                    "main.js", "49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541",
+                    "manifest.json", "8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9",
+                    "styles.css", "6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0"),
+        };
+
+        // SCRIPTORIUM_NO_DIAGRAM_PLUGINS is set by the tests of everything else, which must not need the network.
+        public static bool Off { get { return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SCRIPTORIUM_NO_DIAGRAM_PLUGINS")); } }
+
+        // A stand-in for the pins (--plugin-pins, for the tests): one line per file, id|name|version|file|SHA-256|address.
+        public static Plugin[] Parse(string text)
+        {
+            var plugins = new List<Plugin>();
+            var files = new Dictionary<string, List<Pinned>>();
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#') continue;
+                string[] f = line.Split('|');
+                if (f.Length != 6 || !Regex.IsMatch(f[0], "^[a-z0-9][a-z0-9-]*$") || !Regex.IsMatch(f[3], @"^[A-Za-z0-9_-]+\.[a-z]+$") || !Regex.IsMatch(f[4], "^[0-9a-f]{64}$"))
+                    throw new FormatException("a line that cannot be read: " + line);
+                if (!files.ContainsKey(f[0])) { files[f[0]] = new List<Pinned>(); plugins.Add(new Plugin { Id = f[0], Name = f[1], Version = f[2] }); }
+                files[f[0]].Add(new Pinned(f[1] + " " + f[2] + " (" + f[3] + ")", f[3], f[5], f[4]));
+            }
+            foreach (Plugin p in plugins) p.Files = files[p.Id].ToArray();
+            return plugins.ToArray();
+        }
+
+        // Versions compare by their numbers, as the other installers compare them: 2.29.2 < 2.30.0 < 10.0.
+        static int[] Key(string version) { return Regex.Matches(version ?? "", "[0-9]+").Cast<Match>().Take(4).Select(m => { int n; return int.TryParse(m.Value, out n) ? n : int.MaxValue; }).ToArray(); }
+
+        public static bool AtLeast(string have, string want)
+        {
+            int[] a = Key(have), b = Key(want);
+            for (int i = 0; i < Math.Max(a.Length, b.Length); i++)
+            {
+                int x = i < a.Length ? a[i] : 0, y = i < b.Length ? b[i] : 0;
+                if (x != y) return x > y;
+            }
+            return true;
+        }
+
+        static string Folder(string vault, Plugin p) { return Path.Combine(vault, ".obsidian", "plugins", p.Id); }
+
+        // The version of the plugin in the vault, or null if it is not there (no manifest that can be read).
+        static string VersionIn(string vault, Plugin p)
+        {
+            try
+            {
+                var o = MiniJson.Parse(File.ReadAllText(Path.Combine(Folder(vault, p), "manifest.json"))) as MiniJson.Obj;
+                string v = o != null ? o.Get("version") as string : null;
+                return string.IsNullOrEmpty(v) ? null : v;
+            }
+            catch { return null; }
+        }
+
+        // Whether the vault's own copy stays: it is the pinned version or a newer one, and its code is there.
+        static bool Keeps(string vault, Plugin p, string have)
+        {
+            return have != null && AtLeast(have, p.Version) && File.Exists(Path.Combine(Folder(vault, p), "main.js"));
+        }
+
+        // What Install would download into this vault, in words (for the plan shown before a vault is set up).
+        public static List<string> PlanLines(string vault)
+        {
+            var lines = new List<string>();
+            if (Off) return lines;
+            foreach (Plugin p in All)
+            {
+                string have = VersionIn(vault, p);
+                if (Keeps(vault, p, have)) continue;
+                lines.Add("  download .obsidian/plugins/" + p.Id + ": " + p.Name + " " + p.Version + ", from its own release on GitHub" +
+                          (have != null ? " (in place of your " + have + ")" : ""));
+            }
+            return lines;
+        }
+
+        public static void Headless(string vault, Action<string> log)
+        {
+            if (Off) return;
+            string temp = Path.Combine(Path.GetTempPath(), "scriptorium-plugins-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try { Install(vault, temp, log, null, CancellationToken.None); }
+            finally { try { Directory.Delete(temp, true); } catch { } }
+        }
+
+        // Adds the plugins to the vault and turns them on (see the top of this class). Never throws: what could not be
+        // done is said through log. status(text, percent) follows the downloads. Returns the names of the plugins that
+        // were not installed.
+        public static List<string> Install(string vault, string temp, Action<string> log, Action<string, int> status, CancellationToken cancel)
+        {
+            var failed = new List<string>();
+            if (Off) return failed;
+            foreach (Plugin p in All)
+            {
+                string have = VersionIn(vault, p);
+                try
+                {
+                    if (Keeps(vault, p, have)) log(p.Name + " " + have + " is already in this vault: left as it is.");
+                    else
+                    {
+                        cancel.ThrowIfCancellationRequested();
+                        // Every file is downloaded and checked in a folder of its own before any is put in the vault.
+                        string staging = Path.Combine(temp, "diagram-" + p.Id);
+                        Directory.CreateDirectory(staging);
+                        for (int i = 0; i < p.Files.Length; i++)
+                        {
+                            int k = i;
+                            if (status != null) status("Downloading " + p.Name + " …", 100 * k / p.Files.Length);
+                            Installer.Download(p.Files[i], Path.Combine(staging, p.Files[i].File),
+                                               (d, t) => { if (status != null) status("Downloading " + p.Name + " …", (int)(100.0 * (k + (t > 0 ? (double)d / t : 0)) / p.Files.Length)); }, cancel);
+                        }
+                        string folder = Folder(vault, p);
+                        Directory.CreateDirectory(folder);
+                        // (its settings, data.json, are never touched; the manifest goes last, so that a copy that is
+                        // only half there still counts as missing the next time)
+                        foreach (Pinned f in p.Files.OrderBy(f => f.File == "manifest.json" ? 1 : 0))
+                        {
+                            string target = Path.Combine(folder, f.File), part = target + ".scriptorium-tmp";
+                            File.Copy(Path.Combine(staging, f.File), part, true);
+                            if (File.Exists(target)) File.Delete(target);
+                            File.Move(part, target);
+                        }
+                        log(have != null ? "Updated " + p.Name + " from " + have + " to " + p.Version + " (from its own release on GitHub)"
+                                         : "Installed " + p.Name + " " + p.Version + " (from its own release on GitHub)");
+                    }
+                    TurnOn(vault, p, log);
+                }
+                catch (Exception e)
+                {
+                    failed.Add(p.Name);
+                    try { foreach (Pinned f in p.Files) File.Delete(Path.Combine(Folder(vault, p), f.File + ".scriptorium-tmp")); } catch { }
+                    string why = e is OperationCanceledException ? "stopped" : e.Message;
+                    log(have != null
+                        ? p.Name + " was NOT updated: it stays at " + have + " (" + why + "). To update it: in Obsidian, Settings > Community plugins > Check for updates."
+                        : p.Name + " was NOT installed (" + why + "). Scriptorium itself is in place. To add it: in Obsidian, Settings > Community plugins > Browse, search for \"" + p.Name + "\", Install, then Enable.");
+                }
+            }
+            return failed;
+        }
+
+        // Adds the plugin to the vault's list of community plugins that are on, if it is not in it. A list that is not a
+        // JSON list is left as it is.
+        static void TurnOn(string vault, Plugin p, Action<string> log)
+        {
+            string file = Path.Combine(vault, ".obsidian", "community-plugins.json");
+            var list = new List<object>();
+            if (File.Exists(file))
+            {
+                try { list = MiniJson.Parse(File.ReadAllText(file)) as List<object>; } catch (FormatException) { list = null; }
+                if (list == null)
+                {
+                    log("Left community-plugins.json as it was (it is not a valid JSON list): turn " + p.Name + " on in Settings > Community plugins.");
+                    return;
+                }
+            }
+            if (list.Any(x => x as string == p.Id)) return;
+            list.Add(p.Id);
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            File.WriteAllBytes(file, new UTF8Encoding(false).GetBytes(MiniJson.Write(list)));
+        }
+    }
+
     // ---------- updating a vault in place ----------
     // A Scriptorium vault is updated by replacing Scriptorium's own files and keeping the user's: the snippet, the three
     // bundled plugins' code, the theme, Longform's code (if it was downloaded) and the vault's README are replaced; every
@@ -1096,6 +1314,7 @@ namespace ScriptoriumSetup
                 var notes = new List<string>();
                 List<Change> changes = PlanSetUp(vault, Installer.Stage(temp), null, notes, out plan.Version);
                 Describe(changes, notes, plan);
+                plan.Lines.AddRange(DiagramPlugins.PlanLines(vault));
                 return plan;
             }
             finally { try { Directory.Delete(temp, true); } catch { } }
@@ -3281,6 +3500,8 @@ namespace ScriptoriumSetup
                         Log("  (" + ex.Message + ")");
                     }
                 }
+                // (the vault exists now: a diagram plugin that cannot be downloaded does not fail or undo the install)
+                DiagramPlugins.Install(dest, temp, Log, (text, percent) => { Status(text); Progress(percent, false); }, cancel.Token);
                 Progress(100, false);
                 AutoOpen.Outcome opened = open ? OpenNewVault(dest, exe) : null;
                 Progress(100, false);
@@ -3387,6 +3608,8 @@ namespace ScriptoriumSetup
             Status(setup ? "Setting up the vault …" : "Updating the vault …"); Progress(0, true);
             Vaults.Report report = setup ? Vaults.SetUp(dest, longformFiles, line => Log(line.TrimStart()))
                                          : Vaults.Update(dest, longformFiles, line => Log(line));
+            // (the vault is updated, or set up, now: the diagram plugins cannot fail or undo that)
+            DiagramPlugins.Install(dest, temp, Log, (text, percent) => { Status(text); Progress(percent, false); }, cancel.Token);
             Progress(100, false);
             if (setup)
             {
@@ -3499,12 +3722,14 @@ namespace ScriptoriumSetup
                 question = "Set up Scriptorium in this vault?";
                 yes.Text = "Set up";
                 says = plan.Adds + plan.Replaces == 0
-                    ? "Scriptorium is already set up here: nothing will be changed."
+                    ? "Scriptorium is already set up here: none of its files will be changed."
                     : "Your notes are not touched. In its .obsidian folder, " + plan.Adds + (plan.Adds == 1 ? " file is" : " files are") + " added and " +
                       plan.Replaces + " replaced or merged: Scriptorium's plugins, snippet and theme are added, your own plugins and " +
                       "snippets stay on, and the theme becomes Typewriter. The folder as it is now is first copied to " +
                       ".obsidian\\scriptorium-backup-….";
             }
+            if (!DiagramPlugins.Off)
+                says += " The TikZJax and Excalidraw plugins, which Lagrange draws diagrams with, are downloaded from their own releases if the vault does not have them.";
             heading = new InkLabel(question, Typefaces.Make(Typefaces.Display, 31f, FontStyle.Regular), Ink.Red, false) { Above = 0.9f, Below = 0.28f };
             body = new InkLabel(says, Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
             where = new InkLabel(vault, Typefaces.Make(Typefaces.Text, 15.5f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2 };

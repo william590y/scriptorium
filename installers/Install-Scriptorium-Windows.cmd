@@ -107,6 +107,7 @@ try {
             'manifest.json' = '8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9'
             'styles.css' = '6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0' } }
     )
+    # ---- adding the diagram plugins ----
     foreach ($plugin in $diagramPlugins) {
         try {
             $pluginTemp = Join-Path $tempPath ('diagram-' + $plugin.Id)
@@ -131,6 +132,7 @@ try {
             $diagramMissing += $plugin.Name
         }
     }
+    # ---- end of the diagram plugins ----
     function Find-Obsidian {
         foreach ($base in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
             if (!$base) { continue }
