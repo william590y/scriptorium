@@ -55,7 +55,7 @@
     cases.push(c);
   };
   const tikzjax = () => app.plugins.plugins['obsidian-tikzjax'];
-  const leaf = app.workspace.getLeavesOfType('markdown')[0];
+  const leaf = app.workspace.getLeavesOfType('markdown')[0] || app.workspace.getLeaf(true);
 
   try {
     if (!tikzjax()) { cases.push({ name: 'TikZJax is on in this vault', ok: false, why: 'the TikZJax plugin is not on: nothing was checked' }); throw new Error('stop'); }

@@ -23,7 +23,7 @@
   const NONE = 'Lagrange found five places where a small body can rest between two great ones. He called the result a curiosity, and for a century it was one.\n\n## A chapter\n\nThe first three lie on the line through the two masses.\n\n> A quotation, set as one.\n\n- one\n- two\n';
   const put = async (path, text) => { const f = app.vault.getAbstractFileByPath(path); if (f) { await app.vault.modify(f, text); return f; } return app.vault.create(path, text); };
   const fileWith = await put('Subtitle check.md', WITH), fileNone = await put('Subtitle check, none.md', NONE);
-  const leaf = app.workspace.getLeavesOfType('markdown')[0];
+  const leaf = app.workspace.getLeavesOfType('markdown')[0] || app.workspace.getLeaf(true);
   const open = async (file, mode) => {
     await leaf.openFile(file, { state: mode === 'reading' ? { mode: 'preview' } : { mode: 'source', source: mode === 'source' } });
     await sleep(900);
@@ -40,7 +40,8 @@
     const title = rectOf(firstText(root().querySelector('.inline-title')));
     const sub = subEl(), s = rectOf(firstText(sub)), box = sub.getBoundingClientRect(), cs = getComputedStyle(sub), after = getComputedStyle(sub, '::after');
     const rule = after.content !== 'none' && after.display !== 'none' && parseFloat(after.borderTopWidth) > 0;
-    const p = firstChar(paraEl());
+    // (the paragraph by its own box: its first letter may be a drop cap in one view and not in the other)
+    const p = paraEl().getBoundingClientRect();
     return { centre: fx((s.left + s.right) / 2 - (title.left + title.right) / 2), top: fx(s.top - title.bottom), rule,
       ruleTop: rule ? fx(box.bottom - (parseFloat(cs.paddingBottom) || 0) - parseFloat(after.borderTopWidth) - title.bottom) : null,
       ruleWidth: rule ? parseFloat(after.width) : null, ruleColour: rule ? after.borderTopColor : null,

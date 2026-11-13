@@ -116,7 +116,8 @@ function repairTikzjax(win) {
       if (stopped || this.getAttribute('type') !== 'text/tikz') { plain(this, value); return; }
       if (loaders.has(this)) { stats.twice++; return; }     // met a second time: its spinner is already on the page
       loaders.set(this, value);
-      pending.add({ script: this, loader: value, since: now(), taken: false });
+      // (home: where the figure stands, which is where its <script> is now and its spinner will be)
+      pending.add({ script: this, loader: value, since: now(), taken: false, home: this.parentElement });
       if (!timer) timer = win.setInterval(tick, 500);
     },
   });
@@ -199,7 +200,7 @@ function repairTikzjax(win) {
         if (now() - p.since > 1000) pending.delete(p);
         continue;
       }
-      p.home = p.loader.parentElement;
+      p.home = p.loader.parentElement || p.home;
       if (p.taken || !worker || busy.size || now() - idleSince < 1000 || now() - p.since < 2000) continue;
       p.taken = true;
       chain = chain.then(() => rescue(p)).then(() => { pending.delete(p); }, () => { pending.delete(p); });

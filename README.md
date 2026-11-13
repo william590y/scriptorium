@@ -147,7 +147,7 @@ are known and left as they are in this version (measured at a 22 px text size in
    after an epigraph or centred verse); a heading's line is deeper in the editor (63 px against 39 px) and its text
    sits 22 px further right, because the editor centres it with the hidden `## `.
 3. **Subtitle (`######`):** since 1.4.1 the editor draws its short rule and the paragraph after the blank line
-   stands where Reading view has it (within 0.1 px); the subtitle and its rule are 1 px lower than in Reading view.
+   stands where Reading view has it (within 0.1 px, measured with the drop cap shown in both); the subtitle and its rule are 1 px lower than in Reading view.
    With the cursor on the subtitle's line its `######` marks show and its text moves 39 px to the right; the rule
    and everything below stay where they are. Where no blank line follows the subtitle, the next paragraph is a line
    higher than in Reading view. Source mode has no rule.

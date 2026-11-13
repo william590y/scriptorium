@@ -142,7 +142,11 @@
     if (!f || !f.classList.contains('lagrange-figure-source')) bad.push(`the figure with an error is ${f ? I.tikzState(f) : 'not there'}, not its source`);
     else {
       if (!/could not draw this figure/.test(f.querySelector('small').textContent)) bad.push('no line that says why');
-      if (!/\\drwa \(0,0\)/.test(f.querySelector('pre code').textContent)) bad.push('the source is not shown');
+      const shown = Array.from(f.querySelectorAll('pre code')).map(c => c.textContent);
+      if (!shown.some(t => /\\drwa \(0,0\)/.test(t))) bad.push('the source is not shown');
+      // (with Scriptorium's "Repair TikZJax rendering" on, what TeX said is there too)
+      const repair = app.plugins.plugins.scriptorium && app.plugins.plugins.scriptorium.tikzRepair;
+      if (repair && !shown.some(t => /Undefined control sequence/.test(t))) bad.push('what TeX said is not shown');
     }
     // a block that stays on TikZJax's spinner (made here: TikZJax itself is not kept waiting)
     const late = body().createDiv({ cls: 'block-language-tikz' });
