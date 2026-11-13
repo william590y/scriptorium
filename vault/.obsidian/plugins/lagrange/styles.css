@@ -605,14 +605,25 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
   position: fixed;
   z-index: var(--layer-tooltip, 70);
   pointer-events: none;
-  white-space: nowrap;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  white-space: normal;                 /* laid over the note's text column: it wraps where the note's lines do */
+  overflow-wrap: break-word;
+  text-align: left;
   line-height: 1;
   font-family: var(--lagrange-hand);
   color: var(--lagrange-rubric);
-  clip-path: inset(-0.6em 100% -0.6em -0.2em);
+  clip-path: inset(0 100% 0 0);
 }
+.lagrange-pen-base { display: inline-block; width: 0; height: 0; vertical-align: baseline; }
+/* New text the pen has yet to write: in the note, in its place, unseen; then it shows through as the handwriting fades. */
+.lagrange-pen-unwritten { opacity: 0; }
+.lagrange-pen-revealing .lagrange-pen-unwritten { opacity: 1; transition: opacity var(--lagrange-pen-reveal, 300ms) ease; }
+/* One of the note's own equations while the pen draws it. */
+.lagrange-pen-drawing { color: var(--lagrange-rubric); }
 /* An equation in the pen's script, typeset by MathJax and drawn symbol by symbol. */
-.lagrange-pen-math { display: inline-block; vertical-align: middle; margin: 0 0.25em; font-size: 0.82em; }
+.lagrange-pen-math { display: inline-block; vertical-align: middle; margin: 0; font-size: 0.82em; text-indent: 0; white-space: nowrap; line-height: 1; }
 .lagrange-pen-math mjx-container { display: inline-block !important; margin: 0 !important; color: inherit; }
 /* Code in the pen's script: a slip of paper, typed on (the typewriter is drawn in the pen's layer). */
 .lagrange-pen-code {
@@ -628,6 +639,7 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
   letter-spacing: 0;
   text-align: left;
   white-space: pre;
+  text-indent: 0;
   color: var(--lagrange-ink);
 }
 .lagrange-pen-code.is-block { display: table; margin: 0.35em 0 0; }   /* on a line of its own, as wide as its code */

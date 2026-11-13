@@ -89,6 +89,7 @@ const DEFAULT_SETTINGS = {
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
   penTrail: true,                     // a fading line of ink behind the pen's nib as it moves
+  penLines: 3,                        // how many lines of a long edit the pen writes out before the rest is set down (1 to 8)
 };
 
 function sanitizeSettings(saved) {
@@ -105,6 +106,7 @@ function sanitizeSettings(saved) {
     s.anthropicModel = DEFAULT_SETTINGS.anthropicModel;
   }
   if (!(s.penSpeed >= 0.5 && s.penSpeed <= 3)) s.penSpeed = DEFAULT_SETTINGS.penSpeed;
+  if (!(Number.isInteger(s.penLines) && s.penLines >= 1 && s.penLines <= 8)) s.penLines = DEFAULT_SETTINGS.penLines;
   if (!EFFORTS.includes(s.effort)) s.effort = '';
   return s;
 }
@@ -262,6 +264,45 @@ function createSSEParser(onEvent) {
   };
 }
 
+/* Models are asked to escape backslashes in the JSON they write, and sometimes do not: "$\frac{a}{b}$" then reads
+   as a form feed and "rac", "\times" as a tab, and "\alpha" is not JSON at all. Given the text of a reply, this
+   doubles the backslashes that are plainly LaTeX's, but only when the reply shows that it was not escaped (it has a
+   backslash that no JSON string can hold, or \frac, \beta and the like, and no properly escaped command): then
+   every backslash is LaTeX's except \" and the JSON escapes \n, \t, \r, \b, \f where they do not start a LaTeX
+   command inside $…$. Text that was escaped properly comes back as it was. */
+const LATEX_BF_RE = /^(?:b(?:egin|eta|ar|ig{1,2}[lrm]?|inom|oldsymbol|mod|ot|ullet|oxed|ackslash)|f(?:rac|orall|lat|rown))(?![A-Za-z])/;
+const LATEX_NRT_RE = /^(?:n(?:abla|u|eq?|eg|ot(?:in)?|leq|geq|mid|onumber|ewline|i|parallel|subseteq|exists)|r(?:ho|ight(?:arrow)?|angle|ceil|floor|m|brace|[vV]ert)|t(?:heta|au|imes|ext(?:bf|it|rm|sf|tt)?|frac|o|op|anh?|ilde|riangle|ag|herefore|binom))(?![A-Za-z])/;
+function repairJsonLatex(text) {
+  const s = String(text == null ? '' : text);
+  if (s.indexOf('\\') < 0 || /\\\\[A-Za-z]{2,}/.test(s)) return s;
+  let evidence = false;
+  for (let i = 0; i < s.length && !evidence; i++) {
+    if (s[i] !== '\\') continue;
+    const n = s[i + 1] || '';
+    if (n === '\\') { i++; continue; }
+    if (/[bf]/.test(n)) evidence = LATEX_BF_RE.test(s.slice(i + 1, i + 14));
+    else if (n === 'u') evidence = !/^u[0-9a-fA-F]{4}/.test(s.slice(i + 1, i + 6));
+    else evidence = /[A-Za-z]/.test(n) && !/[nrt]/.test(n);
+  }
+  if (!evidence) return s;
+  let out = '', math = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i], n = s[i + 1] || '';
+    if (c === '$') { math = !math; out += c; if (n === '$') { out += n; i++; } continue; }
+    if (c === '"') { math = false; out += c; continue; }
+    if (c !== '\\') { out += c; continue; }
+    if (n === '"' || n === '/') { out += c + n; i++; continue; }
+    if (n === '\\') { out += '\\\\\\\\'; i++; continue; }           // LaTeX's line break
+    const word = s.slice(i + 1, i + 14);
+    let latex = true;
+    if (/[bf]/.test(n)) latex = LATEX_BF_RE.test(word) || /^[bf][A-Za-z]/.test(word) && math;
+    else if (/[nrt]/.test(n)) latex = math && LATEX_NRT_RE.test(word);
+    else if (n === 'u') latex = !/^u[0-9a-fA-F]{4}/.test(word);
+    out += latex ? '\\\\' : '\\';
+  }
+  return out;
+}
+
 /* Each balanced JSON array or object in text, parsed, in order of where it starts. Prose around it, and brackets in
    the prose that don't start valid JSON, are skipped. */
 function* jsonValuesIn(text) {
@@ -308,7 +349,7 @@ function normalizeEdit(item) {
    a ``` fence, one surrounded by prose, or {"edits": [...]}. Items without a non-empty "find" and a "replace" string
    are dropped (and counted). */
 function parseEdits(text) {
-  const raw = String(text == null ? '' : text).trim();
+  const raw = repairJsonLatex(text).trim();
   if (!raw) return { edits: [], dropped: 0, error: 'The reply was empty.' };
   const sources = [];
   const fence = /```[^\n`]*\n?([\s\S]*?)```/g;
@@ -480,7 +521,8 @@ function parseAgentReply(reply) {
   const { text, blocks, open } = splitAgentReply(reply);
   const ops = [];
   let dropped = 0, error = null;
-  for (const block of blocks) {
+  for (const written of blocks) {
+    const block = repairJsonLatex(written);
     let list = null;
     for (const value of jsonValuesIn(block)) {
       list = Array.isArray(value) ? value : (value && Array.isArray(value.edits) ? value.edits : (value && typeof value === 'object' ? [value] : null));
@@ -616,10 +658,28 @@ function redoTarget(records) {
 
 /* Splits text into [{type: 'text', text} | {type: 'math', source, display}]. Inline math opens with a $ that is not
    escaped and not followed by white space, and closes with one not preceded by white space and not followed by a
-   digit, on the same line (so "$5 and $10" is text); $$…$$ is display math and may span lines. Code spans and fenced
+   digit, on the same line (so "$5 and $10" is text); $$…$$ is display math and may span lines. Models also write
+   mathematics in LaTeX's own delimiters, which Obsidian does not typeset but the pen can: \(…\) on one line and
+   \[…\] (when what is inside reads as mathematics, see looksLikeMath: in Markdown they are also escaped brackets),
+   and a bare \begin{align}…\end{align} (or another display environment). Those segments also carry {open, close},
+   the delimiters as written, so the source can be put back exactly (mathSource). Code spans and fenced
    code are text, unless opts.code is set: then a fenced block, and a code span of at least CODE_SPAN_MIN characters,
    come out as {type: 'code', text, block, lang} (text is the code itself, without its fence or backticks). */
 const CODE_SPAN_MIN = 4;
+const MATH_ENV_RE = /^\\begin\{((?:equation|align|alignat|flalign|gather|multline|eqnarray|split|aligned|gathered|cases|array|[pbBvV]?matrix)\*?)\}/;
+
+/* Whether the inside of \(…\) or \[…\] reads as mathematics and not as prose in escaped brackets ("\[sic\]"): a
+   command, a script, an equals sign, a sum or comparison, or a single letter. */
+function looksLikeMath(body) {
+  const b = String(body).trim();
+  return /\\[A-Za-z]+|[\^_=]|[0-9A-Za-z)}]\s*[+<>]\s*[0-9A-Za-z({\\]/.test(b) || /^[A-Za-z]$/.test(b);
+}
+
+/* A math segment as it was written, delimiters and all. */
+function mathSource(g) {
+  if (typeof g.open === 'string') return g.open + g.source + g.close;
+  return g.display ? `$$${g.source}$$` : `$${g.source}$`;
+}
 function mathSegments(text, opts) {
   const wantCode = Boolean(opts && opts.code);
   const src = String(text == null ? '' : text);
@@ -628,6 +688,28 @@ function mathSegments(text, opts) {
   const flush = () => { if (buf) { out.push({ type: 'text', text: buf }); buf = ''; } };
   for (let i = 0; i < src.length;) {
     const c = src[i];
+    if (c === '\\' && (src[i + 1] === '(' || src[i + 1] === '[')) {
+      const display = src[i + 1] === '[', close = display ? '\\]' : '\\)';
+      const end = src.indexOf(close, i + 2);
+      const body = end < 0 ? '' : src.slice(i + 2, end);
+      if (body.trim() && (display || !body.includes('\n')) && looksLikeMath(body)) {
+        flush();
+        out.push({ type: 'math', source: body.trim(), display, open: src.slice(i, i + 2) + body.slice(0, body.length - body.trimStart().length), close: body.slice(body.trimEnd().length) + close });
+        i = end + 2;
+        continue;
+      }
+    }
+    if (c === '\\' && src.startsWith('\\begin{', i)) {
+      const m = MATH_ENV_RE.exec(src.slice(i, i + 24));
+      const close = m ? `\\end{${m[1]}}` : '';
+      const end = m ? src.indexOf(close, i) : -1;
+      if (end > 0) {
+        flush();
+        out.push({ type: 'math', source: src.slice(i, end + close.length), display: true, open: '', close: '' });
+        i = end + close.length;
+        continue;
+      }
+    }
     if (c === '\\' && i + 1 < src.length) { buf += src.slice(i, i + 2); i += 2; continue; }
     if (c === '`') {
       const ticks = src.slice(i).match(/^`+/)[0];
@@ -667,6 +749,7 @@ function mathSegments(text, opts) {
         let end = -1;
         for (let j = i + 1; j < src.length && src[j] !== '\n'; j++) {
           if (src[j] === '\\') { j++; continue; }
+          if (src[j] === '`') break;                 // a code span is not mathematics
           if (src[j] === '$') { if (!/\s/.test(src[j - 1]) && !/\d/.test(src[j + 1] || '')) end = j; break; }
         }
         if (end > i + 1) { flush(); out.push({ type: 'math', source: src.slice(i + 1, end), display: false }); i = end + 1; continue; }
@@ -707,12 +790,14 @@ function typeCadence(text, budget, seed) {
 }
 
 /* The pen's script for a replacement: its segments, white space collapsed in the prose, cut to about `limit`
-   characters of prose. An equation is never cut in two and never left out for want of room (it counts for at most 24
-   characters, and the pen writes smaller if it must); only one whose source is longer than 160 characters ends the
-   script, with an ellipsis, as does the prose that runs past the limit. Code is never left out either, and keeps its
-   line breaks and its spacing:
+   characters of prose. An equation is never cut in two and never left out for want of room, however long it is or
+   however far into a long paragraph it comes (it counts for at most 24 characters, and the pen writes smaller if it
+   must): where the prose has run out, the few words that lead up to an equation are still written, after an
+   ellipsis. Only after SCRIPT_EQUATIONS equations does the script end, with an ellipsis. Code is never left out
+   either, and keeps its line breaks and its spacing:
    a block is cut to CODE_LINES lines of CODE_COLS characters, a span to CODE_COLS characters, each with an ellipsis. */
 const CODE_LINES = 6, CODE_COLS = 56;
+const SCRIPT_EQUATIONS = 8, SCRIPT_LEAD = 18;
 function penScript(replacement, limit) {
   const max = limit || 48;
   const segs = mathSegments(String(replacement == null ? '' : replacement).trim(), { code: true })
@@ -721,12 +806,20 @@ function penScript(replacement, limit) {
   if (segs.length && segs[0].type === 'text') segs[0].text = segs[0].text.trimStart();
   if (segs.length && segs[segs.length - 1].type === 'text') segs[segs.length - 1].text = segs[segs.length - 1].text.trimEnd();
   const out = [];
-  let used = 0, full = false;                          // full: no more prose (code after it is still typed)
+  let used = 0, full = false, equations = 0, over = false;   // full: no more prose; over: no more equations either
+  const dotted = () => { const last = out[out.length - 1]; return Boolean(last && last.type === 'text' && /…\s*$/.test(last.text)); };
   const stop = () => { if (!full) { full = true; out.push({ type: 'text', text: ' …' }); } };
-  for (const g of segs) {
+  // The last few words of prose, from the start of a word.
+  const lead = text => {
+    if (text.length <= SCRIPT_LEAD) return text;
+    const tail = text.slice(text.length - SCRIPT_LEAD);
+    return tail.slice(tail.indexOf(' ') + 1);
+  };
+  segs.forEach((g, i) => {
     const room = max - used;
     if (g.type === 'math') {
-      if (full || g.source.length > 160 || room <= 0) { stop(); continue; }
+      if (over || equations >= SCRIPT_EQUATIONS) { over = true; if (!dotted()) out.push({ type: 'text', text: ' …' }); full = true; return; }
+      equations++;
       out.push(g);
       used += Math.min(g.source.length, 24);
     } else if (g.type === 'code') {                     // never left out for want of room
@@ -738,16 +831,55 @@ function penScript(replacement, limit) {
     } else if (!full) {
       if (g.text.length > room) {
         const head = g.text.slice(0, Math.max(0, room - 2)).trimEnd();
+        const next = segs[i + 1], toMath = Boolean(next && next.type === 'math' && equations < SCRIPT_EQUATIONS);
         full = true;
-        out.push({ type: 'text', text: head + ' …' });
+        // prose that runs up to an equation: its last words are written too, or all of it when little would be left out
+        if (toMath && g.text.length - head.length <= SCRIPT_LEAD) out.push(g);
+        else {
+          out.push({ type: 'text', text: head + ' …' });
+          if (toMath) out.push({ type: 'text', text: ' ' + lead(g.text) });
+        }
       } else {
         out.push(g);
         used += g.text.length;
-        if (used >= max && g !== segs[segs.length - 1]) stop();
+        if (used >= max && i < segs.length - 1 && !segs.slice(i + 1).some(n => n.type === 'math')) stop();
+        else if (used >= max) full = true;
       }
+    } else if (!over) {
+      // out of room: only the words that lead up to the next equation are written, or an ellipsis after the last one
+      const next = segs[i + 1];
+      if (next && next.type === 'math' && equations < SCRIPT_EQUATIONS) out.push({ type: 'text', text: (g.text.length <= SCRIPT_LEAD ? '' : dotted() ? ' ' : ' … ') + lead(g.text) });
+      else if (!dotted()) out.push({ type: 'text', text: ' …' });
     }
-  }
+  });
   return out;
+}
+
+/* How far into a piece of Markdown its first written character is: past white space and past what opens a block
+   (a heading's #, a list's bullet or number, a quotation's >), which Live Preview does not show as text. The pen
+   starts writing there. Equal to the text's length when it has nothing to write. */
+function inkOffset(text) {
+  const m = /^\s*(?:(?:#{1,6}|[-*+]|\d{1,9}[.)])[ \t]+|>[ \t]?)*/.exec(String(text == null ? '' : text));
+  return m ? m[0].length : 0;
+}
+
+/* How many lines of handwriting an edit gets, and how fast they are written.
+   penLines(wanted, textLines, spent, speed): the pen writes at most `wanted` lines of the text column (the setting,
+   3 by default) and never more lines than the text itself takes (`textLines`); what does not fit ends in an ellipsis
+   and is set down with the rest. In a run of many edits, once the handwriting of the run has taken PEN_RUN_MS (at
+   pen speed 1; `spent` is in real ms), later edits get one line each, so a long run does not take minutes.
+   penPace(width): ms per px of handwriting at speed 1: the released 9 ms for short pieces, faster for long ones so
+   that PEN_LINE_PX-long lines take about PEN_LINES_MS / 3 each (three lines in 2.5 to 4 s). Pure. */
+const PEN_RUN_MS = 10000, PEN_LINES_MS = 3300;
+function penLines(wanted, textLines, spent, speed) {
+  const want = Math.max(1, Math.min(8, Math.round(Number(wanted) || 3)));
+  const sp = Number(speed) > 0 ? Number(speed) : 1;
+  const allowed = Number(spent) * sp >= PEN_RUN_MS ? 1 : want;
+  return Math.max(1, Math.min(allowed, Math.max(1, Math.round(Number(textLines) || 1))));
+}
+function penPace(width) {
+  const w = Math.max(1, Number(width) || 0);
+  return Math.min(9, Math.max(1.2, PEN_LINES_MS / w));
 }
 
 /* A typeset equation as an element, from `render(source, display)` (Obsidian's renderMath), or null when there is no
@@ -760,6 +892,24 @@ function renderPenMath(source, display, render) {
   } catch (e) {
     return null;
   }
+}
+
+/* How the pen sets an equation down, and why: {how: 'draw' | 'text', why}. 'draw' is the typeset equation, drawn
+   symbol by symbol; 'text' is the fallback, the source written like other words, and `why` then says what was
+   missing (it goes to the console).
+   env: {renderer (obsidian.renderMath exists), loaded (MathJax is there after loadMathJax),
+   error (what loading threw, if anything), typeset (renderMath gave an element), failed (MathJax marked a TeX
+   error in it), symbols (how many it has)}. Pure. */
+function equationPlan(env) {
+  const e = env || {};
+  const text = why => ({ how: 'text', why });
+  if (!e.renderer) return text('this Obsidian has no renderMath');
+  if (e.error) return text(`MathJax did not load (${e.error})`);
+  if (!e.loaded) return text('MathJax did not load in time');
+  if (!e.typeset) return text('MathJax could not typeset it');
+  if (e.failed) return text('MathJax reported a TeX error');
+  if (!(e.symbols > 0)) return text('the typeset equation has no symbols to draw');
+  return { how: 'draw', why: '' };
 }
 
 /* The pen's trail: points [{x, y, t}] (oldest first) no older than `life` ms at `now`, as `bands` strokes from the
@@ -1784,12 +1934,17 @@ function noteBlock(note, clip) {
   return `The note is titled “${note.title}”.${where}\n\n<note>\n${clip.text}\n</note>`;
 }
 
+// Obsidian typesets $…$ and $$…$$ only; \\( \\) and \\[ \\] stay as they are typed.
+const MATH_STYLE =
+  'Write mathematics the way Obsidian reads it: $…$ inside a sentence, and $$…$$ on lines of its own for a displayed ' +
+  'equation (an align or other environment goes inside $$…$$); never \\( \\) or \\[ \\].';
+
 const CHAT_INTRO =
   'You are Lagrange, a writing companion inside Obsidian. The writer uses Scriptorium, a configuration that ' +
   'sets notes like the pages of a printed book. You talk with the writer about the note they have open: answer ' +
   'questions about it, suggest improvements, and explain your thinking briefly. Write plain, warm, precise prose, ' +
   'and use Markdown lightly (a short list or some emphasis when it helps). Quote the note exactly when you quote ' +
-  'it. ';
+  'it. ' + MATH_STYLE + ' ';
 
 const CHAT_TALK_ONLY =
   'You cannot change the note yourself; if the writer wants changes made, they can select a passage and run ' +
@@ -1853,7 +2008,7 @@ const REVISE_SYSTEM =
   'Reply with only the revised passage, ready to replace the original: no preamble, no explanation, and no quotation ' +
   'marks or code fences around it. Keep the passage’s Markdown (emphasis, links, headings, line breaks) unless the ' +
   'instruction asks otherwise, and keep the writer’s voice. The rest of the note is there for context only; change ' +
-  'nothing outside the passage.';
+  'nothing outside the passage. ' + MATH_STYLE;
 
 function reviseUserMessage(note, clip, passage, instruction) {
   return `Instruction: ${instruction}\n\nFor context, the whole note. ${noteBlock(note, clip)}\n\n` +
@@ -2282,24 +2437,35 @@ function rangeRects(view, from, to) {
 }
 
 // ==== LAGRANGE PEN (replaceable) ====
-// The pen that sets Lagrange's edits down in the note: a fountain pen flies to each edit, strikes the old words
-// through in rubric ink, writes the replacement above the line in its own handwriting, then the change is made and
-// the ink lifts off the page. Between edits it hovers; a moment after the last one it flies off.
-// Mathematics in a replacement ($…$, $$…$$) is typeset with Obsidian's MathJax and drawn symbol by symbol, the nib
-// following each one; if it can't be typeset (no MathJax, or an error) the pen writes its source like other text.
+// The pen that sets Lagrange's edits down in the note: a fountain pen flies to each edit and strikes the old words
+// through in rubric ink; the new text then takes its place in the note, unseen at first, and the pen writes it in its
+// own handwriting exactly where it will stand: the first stroke is where the first letter of the new text is (same
+// left edge, same baseline), each further line starts at the left edge of the note's own line and wraps where the
+// text column does, and the lines are the note's lines. The handwriting may be larger than the note's type. A long
+// edit is written for a few lines (settings.penLines, 3 by default; see penLines) and ends in an ellipsis; then the
+// handwriting gives way to the text itself, which is already in its place, so nothing moves. Between edits the pen
+// hovers; a moment after the last one it flies off.
+// Mathematics in a replacement ($…$, $$…$$, and LaTeX's \(…\), \[…\] and bare environments) is drawn symbol by
+// symbol, the nib following each one, where the note typesets it: in Live Preview the pen draws on the note's own
+// typeset equation (an inline one in its line, a displayed one in its centred block), after the words around it are
+// set down. Where the note shows the source instead (Source mode, or an equation the cursor is in) the equation is
+// typeset with Obsidian's MathJax (loaded first, and waited for) in the pen's script; if it can't be typeset (no
+// MathJax, or a TeX error) the pen writes its source like other text, and says why on the console (equationPlan).
 // A short line of ink trails behind the nib as it moves (settings.penTrail) and fades in half a second.
 // Code in a replacement (a fenced block, or a code span of a few characters) is not written but typed: the pen gives
 // way to a small typewriter, and the code appears in the monospace font one character at a time, at a typist's uneven
 // pace, with a carriage return at each line end and no trail of ink; for the prose around it the pen comes back.
 //
 // Contract
-//   createPen(app, settings) -> { edit(view, from, to, replacement): Promise<void>, destroy() }
-//     settings.penSpeed (0.5 slow .. 3 fast) and settings.penTrail are read on every edit. Lagrange calls edit() one
-//     edit at a time, in document order, with the editor locked and all changes folded into one undo step; see
-//     runEdits.
-//   pen.edit(view, from, to, replacement): strike [from, to], write `replacement`, then view.dispatch the change and
-//     remove every mark it added. With prefers-reduced-motion the pen does not fly, leaves no trail and draws no
-//     equation: the old words dim briefly and the change is made.
+//   createPen(app, settings) -> { edit(view, from, to, replacement, run): Promise<void>, destroy() }
+//     settings.penSpeed (0.5 slow .. 3 fast), settings.penTrail and settings.penLines are read on every edit. Lagrange
+//     calls edit() one edit at a time, in document order, with the editor locked and all changes folded into one undo
+//     step; see runEdits. run (optional) is an object shared by the edits of one run: the pen keeps in run.spent how
+//     long its handwriting has taken, and writes less of each later edit once that is long (penLines).
+//   pen.edit(view, from, to, replacement): strike [from, to], view.dispatch the change, write `replacement` over it,
+//     and remove every mark it added. The change is dispatched exactly once, whatever happens. With
+//     prefers-reduced-motion the pen does not fly, leaves no trail and draws no equation: the old words dim briefly
+//     and the change is made.
 //   pen.destroy(): removes the pen, its ink and its decorations from every window, and stops its timers.
 function createPen(app, settings) {
   const setGone = StateEffect.define();   // a DecorationSet, or null to clear
@@ -2313,6 +2479,7 @@ function createPen(app, settings) {
     provide: f => EditorView.decorations.from(f),
   });
   const goneMark = Decoration.mark({ class: 'lagrange-pen-gone' });
+  const unwrittenMark = Decoration.mark({ class: 'lagrange-pen-unwritten' });   // new text the pen has yet to write
   const SVGNS = 'http://www.w3.org/2000/svg';
   const views = new Set();
   const layers = new Map();               // document -> { svg, marks, pen, pos, lift, idle, win, trail }
@@ -2427,13 +2594,17 @@ function createPen(app, settings) {
     L.lift = 0;
     place(L, x, y);
   };
-  /* Obsidian's MathJax, loaded on first use. False where there is none, and the pen then writes the source. */
+  /* Obsidian's MathJax, loaded on first use and waited for: the first equation of a session has to wait for it (a
+     second or two, more on a slow disk), and one drawn before it is there would come out as its source.
+     -> {renderer, loaded, error}, for equationPlan. */
+  const MATHJAX_WAIT = 9000;
   const mathReady = async () => {
+    if (typeof obsidian.renderMath !== 'function') return { renderer: false };
+    let error = '';
     try {
-      if (typeof obsidian.renderMath !== 'function') return false;
-      if (typeof obsidian.loadMathJax === 'function') await Promise.race([obsidian.loadMathJax(), sleep(2500)]);
-      return true;
-    } catch (e) { return false; }
+      if (typeof obsidian.loadMathJax === 'function') await Promise.race([obsidian.loadMathJax(), sleep(MATHJAX_WAIT)]);
+    } catch (e) { error = String((e && e.message) || e || 'an error'); }
+    return { renderer: true, loaded: typeof window.MathJax !== 'undefined' && window.MathJax !== null, error };
   };
   /* The symbols of a typeset equation, in the order TeX reads them: MathJax's CHTML output (Obsidian's) has one
      <mjx-c> per character; its SVG output has paths. */
@@ -2522,19 +2693,126 @@ function createPen(app, settings) {
     place(L, end.x, end.y - 4);
   };
 
+  /* A moment after the last edit the pen flies off. If another edit begins while it is leaving (L.busy counts the
+     edits begun), it stops where it is and is not put away: otherwise the next edit would be written by no pen. */
+  /* Where the character at pos stands: {x, top, bottom, baseline} in the viewport, or null if it is not drawn (off
+     screen). The baseline is found from the font's own ascent and descent, which is what the character's box is. */
+  const charBox = (view, pos) => {
+    const c = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
+    if (!c) return null;
+    let ratio = 0.8;
+    try {
+      const at = view.domAtPos(pos);
+      const el = at.node.nodeType === 1 ? at.node : at.node.parentElement;
+      const win = el.ownerDocument.defaultView, cs = win.getComputedStyle(el);
+      const ctx = (charBox.canvas || (charBox.canvas = el.ownerDocument.createElement('canvas'))).getContext('2d');
+      ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      const m = ctx.measureText('x');
+      if (m.fontBoundingBoxAscent > 0) ratio = m.fontBoundingBoxAscent / (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent);
+    } catch (e) { /* the usual proportion */ }
+    return { x: c.left, top: c.top, bottom: c.bottom, baseline: c.top + (c.bottom - c.top) * ratio };
+  };
+  /* The text column at pos: the left and right edges between which the note's line wraps, and the height of its lines. */
+  const columnAt = (view, pos) => {
+    const win = view.dom.ownerDocument.defaultView || window;
+    let el = null;
+    try { const at = view.domAtPos(pos); el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line'); } catch (e) { el = null; }
+    const box = (el || view.contentDOM).getBoundingClientRect(), cs = win.getComputedStyle(el || view.contentDOM);
+    const left = box.left + (parseFloat(cs.paddingLeft) || 0), right = box.right - (parseFloat(cs.paddingRight) || 0);
+    const fs = parseFloat(cs.fontSize) || 16;
+    return { left, right: Math.max(right, left + 40), lineHeight: parseFloat(cs.lineHeight) || fs * 1.5, fontSize: fs };
+  };
+  /* Waits until the character at pos stands still (the change, Typewriter Mode and smooth scrolling move the text
+     for a few frames), bringing it on screen if it is not. -> its charBox, or null if it cannot be measured. */
+  const settled = async (view, win, pos) => {
+    let box = null, prev = null, steady = 0, asked = false;
+    for (let i = 0; i < 60 && steady < 3 && !destroyed; i++) {
+      await nextFrame(win);
+      box = charBox(view, pos);
+      if (!box && !asked) { asked = true; view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) }); }
+      steady = box && prev && Math.abs(box.top - prev.top) < 0.5 && Math.abs(box.x - prev.x) < 0.5 ? steady + 1 : 0;
+      prev = box;
+    }
+    return box;
+  };
+  /* The note's own typeset equations that an edit has just put in (Live Preview): those that were not there `before`
+     and whose source is one of `maths`, in the order they stand. -> [{el, source}] */
+  const bare = t => String(t || '').replace(/\s+/g, '');
+  const newEquations = (view, before, maths, claimed) => {
+    const wanted = maths.map(g => bare(g.source)), out = [];
+    for (const el of view.contentDOM.querySelectorAll('mjx-container')) {
+      if (before.has(el) || claimed.has(el)) continue;
+      const m = el.querySelector('mjx-math[data-latex]') || el.querySelector('[data-latex]');
+      const i = m ? wanted.indexOf(bare(m.getAttribute('data-latex'))) : -1;
+      if (i < 0) continue;
+      wanted[i] = null;
+      claimed.add(el);
+      el.style.opacity = '0';
+      out.push({ el, source: maths[i].source });
+    }
+    return out;
+  };
+  /* Draws one of the note's own equations where it stands, as drawGlyph draws each symbol; one too long for that is
+     uncovered from left to right under the nib. It is in the pen's ink while it is drawn, then turns to the note's. */
+  const drawInPlace = async (L, box, k) => {
+    const win = L.win, glyphs = mathGlyphs(box);
+    if (!box.isConnected) return;
+    let shown = 0;
+    const reveal = x => {
+      const r = box.getBoundingClientRect();
+      shown = Math.max(shown, x - r.left);
+      box.style.clipPath = `inset(-0.6em ${Math.max(0, r.width - shown).toFixed(1)}px -0.6em -0.2em)`;
+    };
+    box.classList.add('lagrange-pen-drawing');
+    const start = box.getBoundingClientRect();
+    reveal(start.left);
+    if (glyphs.length && glyphs.length <= 90) {
+      for (const g of glyphs) g.style.opacity = '0';
+      box.style.opacity = '';
+      const each = Math.min(170, 3600 / glyphs.length) * k;
+      for (const g of glyphs) {
+        if (destroyed || !box.isConnected) break;
+        await drawGlyph(L, g, each, reveal);
+      }
+      for (const g of glyphs) { g.style.opacity = ''; g.style.clipPath = ''; }
+    } else {
+      box.style.opacity = '';
+      await fly(L, start.left, start.top + start.height * 0.6, 280 * k, 6);
+      await tween(win, Math.min(2400, start.width * 9) * k, t => {
+        const r = box.getBoundingClientRect(), x = r.left + r.width * t;
+        reveal(x);
+        place(L, x, r.top + r.height * 0.6 + Math.sin((x - r.left) * 0.55) * 3.2 - 2);
+      });
+    }
+    box.style.clipPath = '';
+    box.style.transition = 'color 420ms ease';
+    box.classList.remove('lagrange-pen-drawing');
+    win.setTimeout(() => { box.style.transition = ''; }, 480);
+  };
+
   const park = (L, view) => {
     L.win.clearTimeout(L.idle);
+    const busy = L.busy;
     L.idle = L.win.setTimeout(async () => {
-      if (destroyed || !L.pos) return;
+      if (destroyed || !L.pos || L.busy !== busy) return;
       const r = view.dom.getBoundingClientRect();
-      await fly(L, r.right + 80, r.top - 60, 700);
+      const a = { ...L.pos }, x = r.right + 80, y = r.top - 60;
+      const mx = (a.x + x) / 2, my = Math.min(a.y, y) - Math.min(60, 20 + Math.hypot(x - a.x, y - a.y) * 0.15);
+      await tween(L.win, 700, k => {
+        if (L.busy !== busy) return;
+        const e = ease(k), u = 1 - e;
+        L.lift = Math.sin(k * Math.PI) * 14;
+        place(L, u * u * a.x + 2 * u * e * mx + e * e * x, u * u * a.y + 2 * u * e * my + e * e * y);
+      });
+      if (L.busy !== busy) return;
+      L.lift = 0;
       L.pen.style.display = 'none';
       L.pos = null;
     }, 1400);
   };
 
   return {
-    async edit(view, from, to, replacement) {
+    async edit(view, from, to, replacement, run) {
       if (destroyed) throw new Error('The pen was put away.');
       const doc = view.dom.ownerDocument, win = doc.defaultView || window;
       const still = prefersReducedMotion(win);
@@ -2561,12 +2839,22 @@ function createPen(app, settings) {
       }
       const L = layerFor(doc);
       win.clearTimeout(L.idle);
+      L.busy = (L.busy || 0) + 1;
+      L.lift = 0;
       const vr = view.dom.getBoundingClientRect();
       if (!L.pos) place(L, Math.min(win.innerWidth - 20, vr.right + 80), Math.max(10, vr.top - 40));
       L.pen.style.display = '';
       const r0 = rects[0];
       const mid = r => r.top + r.height * 0.58;
-      const ink = [];
+      const text = String(replacement == null ? '' : replacement);
+      const ink = [];                                   // the strokes that strike the old words out
+      const claimed = new Set();                        // the note's own equations the pen has taken to draw
+      let committed = false, hand = null, following = false;
+      const commit = spec => {
+        if (committed) return;
+        committed = true;
+        view.dispatch(Object.assign({ changes: { from, to, insert: text } }, spec));
+      };
       try {
         await fly(L, r0.left - 2, mid(r0), 650 * k);
         if (to > from) {
@@ -2589,112 +2877,252 @@ function createPen(app, settings) {
               place(L, q.x, q.y);
             });
           }
+          if (text) await sleep(200 * k);               // the struck words are seen struck, before they go
         }
-        let hand = null, handEnd = { x: r0.right, y: r0.top };
-        const script = replacement && !destroyed ? penScript(replacement, 48) : [];
-        if (script.length) {
-          hand = doc.createElement('div');
-          hand.className = 'lagrange-pen-hand';
-          const typeset = script.some(g => g.type === 'math') && await mathReady();
+        const lead = inkOffset(text), start = from + lead, end = from + text.length;
+        if (destroyed || lead >= text.length) {
+          if (!text && to > from) await sleep(260 * k);
+          commit({ effects: setGone.of(null) });
+        } else {
+          // The new text goes into the note now, unseen, so that everything after it is where it will stay and the
+          // pen can write where the text stands. Its equations: MathJax is loaded first, so Live Preview typesets them
+          // at once, and the cursor is kept out of one that opens the text (Live Preview shows the source of an
+          // equation the cursor touches).
+          const live = Boolean(view.dom.closest('.is-live-preview'));
+          const maths = mathSegments(text).filter(g => g.type === 'math');
+          const mj = maths.length ? await mathReady() : null;
+          const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
+          const spec = { effects: setGone.of(Decoration.set([unwrittenMark.range(start, end)])) };
+          if (before && from > 0 && /^(?:\$|\\\(|\\\[|\\begin\{)/.test(text)) spec.selection = { anchor: from - 1 };
+          commit(spec);
+          const fadeInk = Math.round(160 * k);
+          for (const n of ink) { n.style.transition = `opacity ${fadeInk}ms ease`; n.style.opacity = '0'; }
+          win.setTimeout(() => { for (const n of ink.splice(0)) n.remove(); }, fadeInk + 40);
+          let targets = before ? newEquations(view, before, maths, claimed) : [];
+          let at = await settled(view, win, start);
+          if (before) targets = targets.concat(newEquations(view, before, maths, claimed));
+          const inNote = targets.map(t => bare(t.source));
+          if (before && targets.length < maths.length) {
+            console.debug(`Lagrange: ${maths.length - targets.length} of ${maths.length} equation(s) in this edit are not typeset in the note here (off screen, the cursor is in one, or Obsidian does not read their delimiters), so the pen draws them in its script.`);
+          }
+          // The pen's script: the words (and code), and the equations the note does not typeset itself.
+          const lines = rangeRects(view, start, end);
+          const col = columnAt(view, start);
+          const mayWrite = penLines(settings && settings.penLines, lines.length, run && run.spent, speed);
+          const script = (at ? penScript(text, Math.min(520, 150 * mayWrite)) : []).filter(g => {
+            if (g.type !== 'math') return true;
+            const i = inNote.indexOf(bare(g.source));
+            if (i < 0) return true;
+            inNote[i] = null;
+            return false;
+          });
           const pieces = [];
-          for (const g of script) {
-            const span = doc.createElement('span');
-            if (g.type === 'code') {
-              // typed text, a marker where the next letter lands, and the text still to come (it holds the slip's shape)
-              span.className = `lagrange-pen-code${g.block ? ' is-block' : ''}`;
-              span.appendChild(doc.createElement('span'));
-              span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-mark';
-              span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-rest';
-              span.lastChild.textContent = g.text;
-              span.style.visibility = 'hidden';         // the slip is laid down when its turn comes
-              hand.appendChild(span);
-              pieces.push({ el: span, code: true, text: g.text });
-              continue;
-            }
-            const m = g.type === 'math' && typeset ? renderPenMath(g.source, g.display, obsidian.renderMath) : null;
-            if (m) { span.className = 'lagrange-pen-math'; span.appendChild(m); }
-            else span.textContent = g.type === 'math' ? (g.display ? `$$${g.source}$$` : `$${g.source}$`) : g.text;
-            hand.appendChild(span);
-            pieces.push({ el: span, math: Boolean(m) });
-          }
-          let fs = (parseFloat(win.getComputedStyle(view.contentDOM).fontSize) || 16) * 1.3;
-          hand.style.fontSize = `${fs.toFixed(1)}px`;
-          doc.body.appendChild(hand);
-          ink.push(hand);
-          if (pieces.some(q => q.math)) {
-            // MathJax adds the styles for the symbols it used; wait for them, and for the fonts, before measuring.
-            try { if (typeof obsidian.finishRenderMath === 'function') await Promise.race([obsidian.finishRenderMath(), sleep(1200)]); } catch (e) { /* drawn as it is */ }
-            await nextFrame(win);
-          }
-          let hb = hand.getBoundingClientRect();
-          const room = vr.width - 8;
-          if (hb.width > room && room > 40) {              // too wide for the page: write it smaller
-            fs = Math.max(fs * 0.55, fs * room / hb.width);
-            hand.style.fontSize = `${fs.toFixed(1)}px`;
-            hb = hand.getBoundingClientRect();
-          }
-          const cw = hb.width, ch = hb.height;
-          // A replacement is written above the words it replaces. An insertion is written below its place: from
-          // the start of the line when it opens a new paragraph (as an append does), else under the caret.
-          let cx0 = r0.left + (r0.width - cw) / 2, cy0 = r0.top - ch * (ch > fs * 1.6 ? 0.85 : 0.62);
-          if (to === from) {
-            cy0 = r0.bottom + 2;
-            if (/^\s*\n/.test(replacement) || from === view.state.doc.length) {
-              const start = view.coordsAtPos(view.state.doc.lineAt(from).from);
-              if (start) cx0 = start.left;
-            }
-          }
-          cx0 = Math.max(vr.left + 4, Math.min(cx0, vr.right - cw - 4));
-          cy0 = Math.max(vr.top + 2, Math.min(cy0, vr.bottom - ch - 2));
-          hand.style.left = `${cx0}px`;
-          hand.style.top = `${cy0}px`;
-          // The ink shows up to x (viewport): the hand is uncovered from the left as the nib passes.
-          // (never covered again: a block of code sits on a line of its own, under prose that may be wider.)
-          let shown = cx0;
-          const reveal = x => { shown = Math.max(shown, x); hand.style.clipPath = `inset(-0.6em ${Math.max(0, cx0 + cw - shown).toFixed(1)}px -0.6em -0.2em)`; };
-          const by = cy0 + ch * 0.78;
-          for (const piece of pieces) {
-            if (destroyed) break;
-            const pr = piece.el.getBoundingClientRect();
-            if (piece.code) {
-              reveal(pr.right);                         // the slip is laid down empty; its letters are typed
-              piece.el.style.visibility = '';
-              await typeCode(L, piece, k);
-              continue;
-            }
-            const glyphs = piece.math ? mathGlyphs(piece.el) : [];
-            if (glyphs.length && glyphs.length <= 90) {
-              for (const g of glyphs) g.style.opacity = '0';
-              let seen = pr.left;
-              reveal(seen);
-              const each = Math.min(170, 3600 / glyphs.length) * k;
-              for (const g of glyphs) {
-                if (destroyed) break;
-                await drawGlyph(L, g, each, x => { if (x > seen) { seen = x; reveal(seen); } });
+          if (script.length) {
+            hand = doc.createElement('div');
+            hand.className = 'lagrange-pen-hand';
+            hand.appendChild(doc.createElement('span')).className = 'lagrange-pen-base';   // sits on the first line's baseline
+            for (const g of script) {
+              const span = doc.createElement('span');
+              if (g.type === 'code') {
+                // typed text, a marker where the next letter lands, and the text still to come (it holds the slip's shape)
+                span.className = `lagrange-pen-code${g.block ? ' is-block' : ''}`;
+                span.appendChild(doc.createElement('span'));
+                span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-mark';
+                span.appendChild(doc.createElement('span')).className = 'lagrange-pen-code-rest';
+                span.lastChild.textContent = g.text;
+                span.style.visibility = 'hidden';         // the slip is laid down when its turn comes
+                hand.appendChild(span);
+                pieces.push({ el: span, code: true, text: g.text });
+                continue;
               }
-              reveal(pr.right);
-            } else {
-              const py = pieces.length > 1 ? pr.top + pr.height * 0.78 : by;   // beside a tall slip of code, each piece has its own line
-              if (Math.hypot(pr.left - L.pos.x, py - L.pos.y) > 4) await fly(L, pr.left, py, 280 * k, 6);
-              await tween(win, Math.min(2400, pr.width * 9) * k, t => {
-                const x = pr.left + pr.width * t;
-                reveal(x);
-                place(L, x, py + Math.sin((x - cx0) * 0.55) * 3.2 - 2);
-              });
+              if (g.type !== 'math') {
+                span.textContent = g.text;
+                hand.appendChild(span);
+                pieces.push({ el: span, math: false, prose: true });
+                continue;
+              }
+              // An equation: drawn as MathJax typesets it or, failing that, written as its source (equationPlan).
+              const m = mj && mj.renderer && mj.loaded && !mj.error ? renderPenMath(g.source, g.display, obsidian.renderMath) : null;
+              const plan = equationPlan(Object.assign({}, mj, {
+                typeset: Boolean(m), failed: Boolean(m && m.querySelector('mjx-merror, [data-mjx-error]')), symbols: m ? mathGlyphs(m).length : 0,
+              }));
+              if (plan.how === 'draw') { span.className = 'lagrange-pen-math'; span.appendChild(m); }
+              else {
+                console.debug(`Lagrange: an equation was written as text, not drawn: ${plan.why}.`, mathSource(g));
+                span.textContent = mathSource(g);
+              }
+              hand.appendChild(span);
+              pieces.push({ el: span, math: plan.how === 'draw', prose: plan.how !== 'draw' });
             }
+            // Laid over the text column: the first line starts where the text's first letter is, the others at the
+            // column's left edge, on the note's lines.
+            let fs = col.fontSize * 1.3;
+            const lay = () => {
+              hand.style.fontSize = `${fs.toFixed(1)}px`;
+              hand.style.lineHeight = `${col.lineHeight.toFixed(2)}px`;
+              hand.style.left = `${col.left.toFixed(2)}px`;
+              hand.style.width = `${(col.right - col.left).toFixed(2)}px`;
+              hand.style.textIndent = `${Math.max(0, at.x - col.left).toFixed(2)}px`;
+              hand.style.top = '0px';
+              const base = hand.firstChild.getBoundingClientRect().bottom - hand.getBoundingClientRect().top;
+              hand.style.top = `${(at.baseline - base).toFixed(2)}px`;
+            };
+            doc.body.appendChild(hand);
+            lay();
+            if (pieces.some(q => q.math)) {
+              // MathJax adds the styles for the symbols it used; wait for them, and for the fonts, before measuring.
+              try { if (typeof obsidian.finishRenderMath === 'function') await Promise.race([obsidian.finishRenderMath(), sleep(1200)]); } catch (e) { /* drawn as it is */ }
+              try { if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(900)]); } catch (e) { /* drawn as it is */ }
+              await nextFrame(win);
+              at = charBox(view, start) || at;
+              lay();
+            }
+            // No more lines than it may write, and on one line no further than the text itself goes (what follows it
+            // on the line is the note's): first a smaller hand, then fewer words, ending in an ellipsis.
+            const last = lines[lines.length - 1];
+            const fits = () => {
+              const hb = hand.getBoundingClientRect();
+              if (Math.round(hb.height / col.lineHeight) > mayWrite) return false;
+              if (lines.length !== 1 || !last) return true;
+              const tail = pieces.length ? pieces[pieces.length - 1].el.getClientRects() : [];
+              return !tail.length || tail[tail.length - 1].right <= Math.max(last.right, at.x + 24) + 6;
+            };
+            for (let i = 0; i < 4 && lines.length === 1 && !fits(); i++) { fs *= 0.94; lay(); }
+            for (let i = 0; i < 80 && pieces.length && !fits(); i++) {
+              const q = pieces[pieces.length - 1];
+              if (!q.prose) {
+                if (pieces.length === 1 || q.code) break;      // an equation or code alone is never left out
+                q.el.remove(); pieces.pop(); continue;
+              }
+              const words = q.el.textContent.replace(/\s*…\s*$/, '').trimEnd();
+              const cut = words.slice(0, Math.max(0, Math.min(words.length - 1, Math.floor(words.length * 0.9)))).replace(/\s*\S*$/, '');
+              if (!cut.trim()) {
+                if (pieces.length === 1) { q.el.textContent = words.slice(0, Math.max(1, Math.floor(words.length * 0.8))); if (words.length <= 2) break; continue; }
+                q.el.remove(); pieces.pop();
+                const p = pieces[pieces.length - 1];
+                if (p && p.prose && !/…\s*$/.test(p.el.textContent)) p.el.textContent = p.el.textContent.trimEnd() + ' …';
+                continue;
+              }
+              q.el.textContent = cut + ' …';
+            }
+            // While it is written the hand stays on the text, wherever the note scrolls or reflows to.
+            following = true;
+            const follow = () => {
+              if (!following || destroyed || !hand.isConnected) return;
+              const now = charBox(view, start);
+              if (now && (Math.abs(now.x - at.x) > 0.4 || Math.abs(now.baseline - at.baseline) > 0.4)) { at = now; lay(); }
+              win.requestAnimationFrame(follow);
+            };
+            win.requestAnimationFrame(follow);
+            // The ink shows where the nib has been: each stretch of a line it has passed, kept as a box in the hand's own
+            // measure (so it holds when the hand moves).
+            const shown = [];
+            const clip = () => { hand.style.clipPath = shown.length ? `path("${shown.map(b => `M${b.l.toFixed(1)} ${b.t.toFixed(1)}H${b.r.toFixed(1)}V${b.b.toFixed(1)}H${b.l.toFixed(1)}Z`).join('')}")` : 'inset(0 100% 0 0)'; };
+            // (a line's box is the note's line and a little below it, for the tails of its letters: not the line under it)
+            const within = (r, whole) => {
+              const hb = hand.getBoundingClientRect(), half = whole ? r.height / 2 + 2 : col.lineHeight / 2, c = (r.top + r.bottom) / 2 - hb.top;
+              return { l: r.left - hb.left - 2, t: c - half, r: r.right - hb.left + 2, b: c + half + (whole ? 0 : col.lineHeight * 0.03) };
+            };
+            clip();
+            const widthOf = q => Array.from(q.el.getClientRects()).reduce((a, r) => a + r.width, 0);
+            const pace = penPace(pieces.filter(q => q.prose).reduce((a, q) => a + widthOf(q), 0));
+            const t0 = win.performance.now();
+            for (const piece of pieces) {
+              if (destroyed) break;
+              if (piece.code) {
+                shown.push(within(piece.el.getBoundingClientRect(), true));   // the slip is laid down empty; its letters are typed
+                clip();
+                piece.el.style.visibility = '';
+                await typeCode(L, piece, k);
+                continue;
+              }
+              if (piece.math) {
+                const glyphs = mathGlyphs(piece.el);
+                const box = within(piece.el.getBoundingClientRect(), true), right = box.r;
+                const upTo = x => { box.r = Math.max(box.r, Math.min(right, x - hand.getBoundingClientRect().left)); clip(); };
+                box.r = box.l;
+                shown.push(box);
+                if (glyphs.length && glyphs.length <= 90) {
+                  for (const g of glyphs) g.style.opacity = '0';
+                  const each = Math.min(170, 3600 / glyphs.length) * k;
+                  for (const g of glyphs) {
+                    if (destroyed) break;
+                    await drawGlyph(L, g, each, upTo);
+                  }
+                } else {
+                  const pr = piece.el.getBoundingClientRect();
+                  await fly(L, pr.left, pr.top + pr.height * 0.7, 280 * k, 6);
+                  await tween(win, Math.min(2400, pr.width * 9) * k, t => {
+                    const r = piece.el.getBoundingClientRect(), x = r.left + r.width * t;
+                    upTo(x);
+                    place(L, x, r.top + r.height * 0.7 + Math.sin(x * 0.55) * 3.2 - 2);
+                  });
+                }
+                box.r = right;
+                clip();
+                continue;
+              }
+              // words: along each line they take, the nib a little above the baseline and never still
+              const n = piece.el.getClientRects().length;
+              for (let i = 0; i < n && !destroyed; i++) {
+                const first = piece.el.getClientRects()[i];
+                if (!first || first.width < 0.5) continue;
+                const box = within(first), right = box.r, width = first.width;
+                box.r = box.l;
+                shown.push(box);
+                const y0 = first.top + first.height * 0.72;
+                if (Math.hypot(first.left - L.pos.x, y0 - L.pos.y) > 4) await fly(L, first.left, y0, (i ? 240 : 280) * k, 6);
+                await tween(win, Math.max(60, width * pace) * k, t => {
+                  const r = piece.el.getClientRects()[i] || first, x = r.left + r.width * t;
+                  box.r = box.l + (right - box.l) * t;
+                  clip();
+                  place(L, x, r.top + r.height * 0.72 + Math.sin(x * 0.55) * 3.2 - 2);
+                });
+                box.r = right;
+              }
+            }
+            hand.style.clipPath = 'none';
+            if (run) run.spent = (run.spent || 0) + (win.performance.now() - t0);
+            await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
+            await sleep(380 * k);
           }
-          hand.style.clipPath = 'none';
-          handEnd = { x: cx0 + cw, y: cy0 };
+          // The handwriting gives way to the text, which is already where it belongs.
+          const fade = Math.round(300 * k);
+          view.dom.style.setProperty('--lagrange-pen-reveal', `${fade}ms`);
+          view.dom.classList.add('lagrange-pen-revealing');
+          if (hand) { hand.style.transition = `opacity ${fade}ms ease`; hand.style.opacity = '0'; }
+          if (targets.length && !destroyed) {
+            await sleep(fade * 0.6);
+            // Then the equations, each where the note has it.
+            for (const t of targets.slice(0, SCRIPT_EQUATIONS)) {
+              if (destroyed) break;
+              await drawInPlace(L, t.el, k);
+            }
+            if (!destroyed) {
+              await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
+              await sleep(380 * k);                       // the finished equation is looked at for a moment
+            }
+          } else if (!hand) {
+            await sleep(120 * k);
+          } else {
+            await sleep(fade);
+          }
         }
-        await fly(L, Math.min(vr.right - 12, handEnd.x + 30), handEnd.y - 18, 280 * k, 10);
-        await sleep(380 * k);
       } finally {
+        following = false;
         L.type.style.display = 'none';
         L.pen.style.display = '';
-        view.dispatch({ changes: { from, to, insert: replacement }, effects: setGone.of(null) });
+        commit({});
+        for (const el of claimed) { el.style.opacity = ''; el.style.clipPath = ''; el.classList.remove('lagrange-pen-drawing'); for (const g of mathGlyphs(el)) { g.style.opacity = ''; g.style.clipPath = ''; } }
         const fade = Math.round(300 * k);
+        const gone = hand;
         for (const n of ink) { n.style.transition = `opacity ${fade}ms ease`; n.style.opacity = '0'; }
-        win.setTimeout(() => { for (const n of ink) n.remove(); }, fade + 40);
+        if (gone) { gone.style.transition = `opacity ${fade}ms ease`; gone.style.opacity = '0'; }
+        win.setTimeout(() => { for (const n of ink) n.remove(); if (gone) gone.remove(); }, fade + 40);
+        // The text is in full view by now (or the pen was put away): the marks on it come off.
+        try { view.dispatch({ effects: setGone.of(null) }); } catch (e) { /* the view is gone */ }
+        view.dom.classList.remove('lagrange-pen-revealing');
+        view.dom.style.removeProperty('--lagrange-pen-reveal');
         park(L, view);
       }
     },
@@ -2761,7 +3189,7 @@ async function runEdits(view, located, opts) {
     return { applied: ok, skipped, changes, docBefore };
   }
 
-  const run = { composed: ChangeSet.empty(docBefore.length), closed: false, cancelled: false };
+  const run = { composed: ChangeSet.empty(docBefore.length), closed: false, cancelled: false, spent: 0 };   // spent: see createPen
   const doc = view.dom.ownerDocument;
   const onKey = ev => { if (ev.key === 'Escape') run.cancelled = true; };
   doc.addEventListener('keydown', onKey, true);
@@ -2781,7 +3209,7 @@ async function runEdits(view, located, opts) {
         // The cursor goes to the edit first, so the edit is on screen even with typewriter scrolling (Typewriter
         // Mode keeps the cursor's line centred).
         view.dispatch({ selection: { anchor: from }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
-        await opts.pen.edit(view, from, to, e.replace);
+        await opts.pen.edit(view, from, to, e.replace, run);
       } catch (err) {
         failure = err;
         skipped.push(Object.assign({}, e, { why: 'the pen failed' }));
@@ -3759,6 +4187,13 @@ class LagrangeSettingTab extends PluginSettingTab {
         .onChange(async v => { s.penSpeed = v; await save(); }))
       .setDisabled(!s.showPen);
     new Setting(containerEl)
+      .setName('Lines the pen writes')
+      .setDesc('A long edit is written out for this many lines of the page, then the rest is set down at once; a shorter ' +
+        'edit is written in full. In a run of many edits, later ones get a single line once the writing has taken about ten seconds.')
+      .addSlider(sl => sl.setLimits(1, 8, 1).setValue(s.penLines).setDynamicTooltip()
+        .onChange(async v => { s.penLines = v; await save(); }))
+      .setDisabled(!s.showPen);
+    new Setting(containerEl)
       .setName('Ink trail')
       .setDesc('A thin line of ink follows the pen as it moves and fades at once. Never shown when your system asks for reduced motion.')
       .addToggle(t => t.setValue(s.penTrail).onChange(async v => { s.penTrail = v; await save(); }))
@@ -4324,7 +4759,8 @@ LagrangePlugin.internals = {
   DEFAULT_SETTINGS, ANTHROPIC_MODELS, ANTHROPIC_VERSION, FALLBACK_BETA, sanitizeSettings, anthropicModelId,
   LOADER_THEMES, LOADER_CAPTIONS, EFFORTS, CLAUDE_CODE_MODELS, effortSupported, effortFor, modelChoices, setModel, footLabel, modelLabel,
   rewindTo, userChangedSince, pruneCheckpoints, spliceChange, undoTarget, redoTarget, CHECKPOINTS_KEPT, CHECKPOINT_CHARS,
-  splitAgentReply, parseAgentReply, locateOps, demoChatEdits, mathSegments, hasMath, hasCode, typeCadence, penScript, renderPenMath, trailBands,
+  splitAgentReply, parseAgentReply, locateOps, demoChatEdits, mathSegments, mathSource, looksLikeMath, hasMath, hasCode, typeCadence, penScript, renderPenMath, trailBands,
+  equationPlan, repairJsonLatex, inkOffset, penLines, penPace, PEN_RUN_MS,
   createSSEParser, jsonValuesIn, parseEdits, findAll, looseFindAll, locateEdits, clipText, cleanRevision,
   parseErrorBody, describeError, noteStats, excerpt, demoProofreadEdits, demoRevise, demoChatReply,
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,

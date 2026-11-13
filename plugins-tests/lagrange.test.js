@@ -1022,7 +1022,7 @@ test('penScript: text is cut to the limit, an equation is kept whole; without a 
   assert.match(show(long), / …$/);
   assert.equal(show(L.penScript('The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$', 48)),
     'The Euler–Lagrange equation: <\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0>');
-  assert.equal(show(L.penScript(`so $${'x+'.repeat(100)}y$ ends`, 48)), 'so  …', 'an equation too long to draw ends the script');
+  assert.equal(show(L.penScript(`so $${'x+'.repeat(100)}y$ ends`, 48)), `so <${'x+'.repeat(100)}y> ends`, 'a long equation is not left out');
   assert.equal(show(L.penScript('$a$ then ' + 'word '.repeat(30), 48)).startsWith('<a> then word'), true);
   assert.deepEqual(L.penScript('', 48), []);
   // the fallback: no renderer, a renderer that throws, or one that returns no element
@@ -1036,6 +1036,150 @@ test('penScript: text is cut to the limit, an equation is kept whole; without a 
   assert.deepEqual(seen, [['x^2', true]]);
   // Under Node, Obsidian's renderMath is a stub that cannot be called: the pen falls back rather than throwing.
   assert.equal(L.renderPenMath('x', false, stubs.obsidian.renderMath), null);
+});
+
+test('mathSegments: LaTeX delimiters \\(…\\), \\[…\\] and bare environments are mathematics; escaped brackets in prose are not', () => {
+  const seg = t => L.mathSegments(t).map(g => (g.type === 'math' ? [g.display ? 'D' : 'I', g.source] : g.text));
+  assert.deepEqual(seg('Momentum is \\(p = mv\\), and\n\n\\[ F = \\frac{dp}{dt} \\]'),
+    ['Momentum is ', ['I', 'p = mv'], ', and\n\n', ['D', 'F = \\frac{dp}{dt}']]);
+  assert.deepEqual(seg('\\[\na^2 + b^2 = c^2\n\\]'), [['D', 'a^2 + b^2 = c^2']]);
+  assert.deepEqual(seg('for every \\(x\\) in \\(\\mathbb{R}\\)'), ['for every ', ['I', 'x'], ' in ', ['I', '\\mathbb{R}']]);
+  // Markdown's escaped brackets, and things that only look like delimiters
+  assert.deepEqual(seg('He wrote \\[sic\\] and \\(optional\\) and \\[1\\].'), ['He wrote \\[sic\\] and \\(optional\\) and \\[1\\].']);
+  assert.deepEqual(seg('unclosed \\(x = 1 and \\[y = 2'), ['unclosed \\(x = 1 and \\[y = 2']);
+  assert.deepEqual(seg('\\(x = 1\nacross lines\\)'), ['\\(x = 1\nacross lines\\)']);
+  assert.deepEqual(seg('a line break \\\\(x = 1\\\\) is not math'), ['a line break \\\\(x = 1\\\\) is not math']);
+  assert.deepEqual(seg('Code `\\(x = 1\\)` and\n```\n\\[y = 2\\]\n\\begin{align}a\\end{align}\n```\nstay'),
+    ['Code `\\(x = 1\\)` and\n```\n\\[y = 2\\]\n\\begin{align}a\\end{align}\n```\nstay']);
+  // a display environment with no dollars around it, as models sometimes write it
+  const env = '\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}';
+  assert.deepEqual(seg(`So\n${env}\nholds.`), ['So\n', ['D', env], '\nholds.']);
+  assert.deepEqual(seg(`$$\n${env}\n$$`), [['D', env]]);
+  assert.deepEqual(seg('\\begin{itemize}\\item x\\end{itemize}'), ['\\begin{itemize}\\item x\\end{itemize}']);
+  assert.deepEqual(seg('\\begin{align} never closed'), ['\\begin{align} never closed']);
+  // currency and code next to real mathematics
+  assert.deepEqual(seg('It costs $5 and $10, so $x = 15$.'), ['It costs $5 and $10, so ', ['I', 'x = 15'], '.']);
+  assert.deepEqual(seg('$5 for `a$b` and $c$'), ['$5 for `a$b` and ', ['I', 'c']]);
+  assert.deepEqual(seg('price \\$5 and \\$10'), ['price \\$5 and \\$10']);
+  // the source is put back exactly as it was written
+  for (const t of ['$x^2$', '$$\\frac12$$', '\\(p = mv\\)', '\\[ F = ma \\]', '\\[\nF = ma\n\\]', env]) {
+    const g = L.mathSegments(t);
+    assert.equal(g.length, 1, t);
+    assert.equal(L.mathSource(g[0]), t);
+  }
+  assert.equal(L.looksLikeMath('sic'), false);
+  assert.equal(L.looksLikeMath('see p. 3-4'), false);
+  assert.equal(L.looksLikeMath('a + b'), true);
+  assert.equal(L.looksLikeMath('\\alpha'), true);
+  assert.equal(L.hasMath('only \\(n\\) here'), true);
+});
+
+test('penScript: an equation is drawn wherever it comes in a long replacement, with the words that lead up to it', () => {
+  const show = s => s.map(g => (g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  const maths = t => L.penScript(t, 48).filter(g => g.type === 'math').map(g => g.source);
+  // 1.2.0 cut the script at 48 characters of prose and dropped everything after, equations included
+  const para = 'The kinetic energy of a moving body of mass $m$ and speed $v$ is $E_k = \\tfrac{1}{2}mv^2$, so it grows with the square of its speed.';
+  assert.equal(show(L.penScript(para, 48)), 'The kinetic energy of a moving body of mass <m> and speed <v> is <E_k = \\tfrac{1}{2}mv^2> …');
+  const maxwell = 'Maxwell\'s equations describe how electric and magnetic fields arise and change, and together they predict waves ' +
+    'that travel at the speed of light, $c = 1/\\sqrt{\\mu_0 \\varepsilon_0}$:\n\n$$\n\\begin{align}\n\\nabla \\cdot \\mathbf{E} &= ' +
+    '\\frac{\\rho}{\\varepsilon_0} \\\\\n\\nabla \\cdot \\mathbf{B} &= 0 \\\\\n\\nabla \\times \\mathbf{E} &= -\\frac{\\partial \\mathbf{B}}{\\partial t} \\\\\n' +
+    '\\nabla \\times \\mathbf{B} &= \\mu_0 \\mathbf{J} + \\mu_0 \\varepsilon_0 \\frac{\\partial \\mathbf{E}}{\\partial t}\n\\end{align}\n$$';
+  const m = L.penScript(maxwell, 48);
+  assert.equal(m.filter(g => g.type === 'math').length, 2, 'the inline equation and the align block (longer than 160 characters) are both drawn');
+  assert.equal(m[m.length - 1].display, true);
+  assert.match(show(m), /^Maxwell's equations describe how electric and … speed of light, <c = /);
+  // only an equation; an equation first; an equation last; LaTeX delimiters
+  assert.deepEqual(maths('$$E = mc^2$$'), ['E = mc^2']);
+  assert.deepEqual(maths(' $p = mv$'), ['p = mv']);
+  assert.deepEqual(maths('word '.repeat(40) + 'and at last $z$'), ['z']);
+  assert.match(show(L.penScript('word '.repeat(40) + 'and at last $z$', 48)), /^(word )+w … word and at last <z>$/);
+  assert.deepEqual(maths('Momentum is \\(p = mv\\), and\n\n\\[ F = \\frac{dp}{dt} \\]'), ['p = mv', 'F = \\frac{dp}{dt}']);
+  // prose after the last equation, once the room is used up, is an ellipsis and no more
+  assert.match(show(L.penScript('word '.repeat(12) + '$a$ ' + 'tail '.repeat(20), 48)), /<a> …$/);
+  assert.ok(!/… ?…/.test(show(L.penScript('word '.repeat(12) + '$a$ ' + 'more '.repeat(8) + '$b$ ' + 'tail '.repeat(20), 48))), 'never two ellipses in a row');
+  // a paragraph thick with equations: the first SCRIPT_EQUATIONS are drawn, then the script ends
+  const thick = L.penScript('a $x$ b $y$ c $z$ '.repeat(6), 48);
+  assert.equal(thick.filter(g => g.type === 'math').length, 8);
+  assert.match(show(thick), / …$/);
+  // code is still typed and never left out
+  assert.deepEqual(L.penScript('so $x$ and `print(x)` then', 48).map(g => g.type), ['text', 'math', 'text', 'code', 'text']);
+});
+
+test('equationPlan: an equation is drawn when MathJax typeset it, and written as its source (with a reason) when it could not', () => {
+  const ok = { renderer: true, loaded: true, error: '', typeset: true, failed: false, symbols: 7 };
+  assert.deepEqual(L.equationPlan(ok), { how: 'draw', why: '' });
+  assert.equal(L.equationPlan(Object.assign({}, ok, { symbols: 400 })).how, 'draw', 'however long it is');
+  const why = env => { const p = L.equationPlan(Object.assign({}, ok, env)); assert.equal(p.how, 'text'); assert.ok(p.why); return p.why; };
+  assert.match(why({ renderer: false }), /no renderMath/);                 // an Obsidian without it
+  assert.match(why({ loaded: false }), /did not load in time/);            // MathJax still loading after the wait
+  assert.match(why({ error: 'offline', loaded: false }), /did not load \(offline\)/);
+  assert.match(why({ typeset: false }), /could not typeset/);              // renderMath threw or gave nothing
+  assert.match(why({ failed: true }), /TeX error/);
+  assert.match(why({ symbols: 0 }), /no symbols/);
+  assert.equal(L.equationPlan().how, 'text');
+  assert.equal(L.equationPlan(null).how, 'text');
+});
+
+test('repairJsonLatex: LaTeX that was not escaped for JSON is put right; escaped LaTeX and ordinary text are left alone', () => {
+  const fix = raw => JSON.parse(L.repairJsonLatex(raw));
+  // \f, \t and \b would be a form feed, a tab and a backspace; \a and \s are not JSON at all
+  assert.deepEqual(fix('[{"append": "$$E = \\frac{1}{2}mv^2 \\times \\beta$$"}]'), [{ append: '$$E = \\frac{1}{2}mv^2 \\times \\beta$$' }]);
+  assert.deepEqual(fix('[{"append": "so $\\alpha \\ne \\nu$ and \\"q\\"\\n\\n$$\\n\\nabla \\cdot E = \\rho \\\\ x$$"}]'),
+    [{ append: 'so $\\alpha \\ne \\nu$ and "q"\n\n$$\n\\nabla \\cdot E = \\rho \\\\ x$$' }]);
+  assert.deepEqual(fix('[{"find": "a", "replace": "$\\sigma_x$ and\\nnot $\\theta$"}]'), [{ find: 'a', replace: '$\\sigma_x$ and\nnot $\\theta$' }]);
+  // written as the prompt asks: nothing to do
+  for (const good of ['[{"append": "$$E = \\\\frac{1}{2}$$\\nnot\\ttab"}]', '[{"append": "a\\nb \\u00e9 \\"c\\""}]', '[]', 'no backslash', '']) {
+    assert.equal(L.repairJsonLatex(good), good);
+  }
+  assert.equal(L.repairJsonLatex(null), '');
+  // through the parsers
+  const reply = 'Adding it.\n\n```lagrange-edits\n[{"append": "$$E = \\frac{1}{2}mv^2$$"}]\n```\n';
+  assert.deepEqual(L.parseAgentReply(reply).ops, [{ op: 'append', text: '$$E = \\frac{1}{2}mv^2$$', reason: '' }]);
+  assert.equal(L.parseAgentReply('```lagrange-edits\n[{"append": "$\\alpha$"}]\n```').error, null);
+  assert.deepEqual(L.parseEdits('[{"find": "x", "replace": "$\\beta$", "reason": "r"}]').edits, [{ find: 'x', replace: '$\\beta$', reason: 'r' }]);
+});
+
+test('inkOffset: the pen starts at the first written character, past white space and what opens a block', () => {
+  assert.equal(L.inkOffset('Plain words'), 0);
+  assert.equal(L.inkOffset('\n\nA new paragraph'), 2);
+  assert.equal(L.inkOffset(' and more'), 1);
+  assert.equal(L.inkOffset('## A heading'), 3);
+  assert.equal(L.inkOffset('\n- an item'), 3);
+  assert.equal(L.inkOffset('\n12. an item'), 5);
+  assert.equal(L.inkOffset('> quoted'), 2);
+  assert.equal(L.inkOffset('> - quoted item'), 4);
+  assert.equal(L.inkOffset('\n\n$$E = mc^2$$'), 2);
+  assert.equal(L.inkOffset('-dash, not a list'), 0);
+  assert.equal(L.inkOffset('*emphasis* first'), 0);
+  assert.equal(L.inkOffset('#tag first'), 0);
+  assert.equal(L.inkOffset('  \n '), 4, 'nothing to write: the whole length');
+  assert.equal(L.inkOffset(''), 0);
+  assert.equal(L.inkOffset(null), 0);
+});
+
+test('penLines and penPace: three lines of a long edit, fewer late in a long run, and long lines written faster', () => {
+  assert.equal(L.DEFAULT_SETTINGS.penLines, 3);
+  assert.equal(L.penLines(3, 7, 0, 1), 3, 'a paragraph: three lines are written');
+  assert.equal(L.penLines(3, 2, 0, 1), 2, 'never more lines than the text takes');
+  assert.equal(L.penLines(3, 1, 0, 1), 1);
+  assert.equal(L.penLines(5, 9, 0, 1), 5);
+  assert.equal(L.penLines(undefined, 9, 0, 1), 3);
+  assert.equal(L.penLines(99, 20, 0, 1), 8);
+  assert.equal(L.penLines(0, 0, 0, 1), 1);
+  // a run of many edits: once its handwriting has taken PEN_RUN_MS (at speed 1), one line each
+  assert.equal(L.penLines(3, 7, L.PEN_RUN_MS - 1, 1), 3);
+  assert.equal(L.penLines(3, 7, L.PEN_RUN_MS, 1), 1);
+  assert.equal(L.penLines(3, 7, L.PEN_RUN_MS / 2, 2), 1, 'a faster pen reaches it in less time');
+  assert.equal(L.penLines(3, 7, L.PEN_RUN_MS, 0.5), 3);
+  // pace: short pieces as before (9 ms a px); three 700 px lines in 2.5 to 4 s
+  assert.equal(L.penPace(100), 9);
+  const three = 3 * 700 * L.penPace(3 * 700);
+  assert.ok(three >= 2500 && three <= 4000, `three lines take ${three} ms`);
+  assert.ok(L.penPace(100000) >= 1.2);
+  assert.equal(L.penPace(0), 9);
+  assert.equal(L.sanitizeSettings({ penLines: 5 }).penLines, 5);
+  assert.equal(L.sanitizeSettings({ penLines: 0 }).penLines, 3);
+  assert.equal(L.sanitizeSettings({ penLines: 2.5 }).penLines, 3);
 });
 
 test('trailBands: the newest ink is the darkest and widest, old ink is dropped, and the strokes join up', () => {

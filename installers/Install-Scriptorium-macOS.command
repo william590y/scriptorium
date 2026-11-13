@@ -32,15 +32,35 @@ verify_hash() {
 verify_hash "$work_dir/Writing.zip" '855ceb85e9c3760fbaa956d9845f0b370bab5010dc3fb548a6687b26ada66dd3'
 unzip -q "$work_dir/Writing.zip" -d "$work_dir/vault"
 [ -f "$work_dir/vault/.obsidian/appearance.json" ] || { printf 'Invalid configuration archive.\n'; exit 1; }
-app_path="$(osascript -l JavaScript -e 'ObjC.import("AppKit"); const url = $.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier("md.obsidian"); if (url && !url.isNil()) ObjC.unwrap(url.path)' 2>/dev/null || true)"
-if [ ! -d "$app_path" ] && [ -d /Applications/Obsidian.app ]; then
-  app_path=/Applications/Obsidian.app
-fi
-if [ ! -d "$app_path" ]; then
+# ---- Finding Obsidian ----
+# Obsidian counts as installed only if the app is really there. macOS can still name an Obsidian that was removed: the
+# one in the Trash, or a path whose app is gone. Such leftovers do not count, and Obsidian is installed again.
+usable_app() {
+  case "$1" in ''|*/.Trash/*|*/.Trashes/*) return 1 ;; esac
+  [ -d "$1" ] && [ -x "$1/Contents/MacOS/Obsidian" ]
+}
+find_obsidian_app() {
+  local found
+  found="$(osascript -l JavaScript -e 'ObjC.import("AppKit"); const url = $.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier("md.obsidian"); if (url && !url.isNil()) ObjC.unwrap(url.path)' 2>/dev/null || true)"
+  for found in "$found" "${OBSIDIAN_APPLICATIONS:-/Applications}/Obsidian.app" "$HOME/Applications/Obsidian.app"; do
+    if usable_app "$found"; then printf '%s\n' "$found"; return 0; fi
+  done
+  return 1
+}
+# ---- End of finding Obsidian ----
+app_path="$(find_obsidian_app || true)"
+if [ -z "$app_path" ]; then
   app_path="$HOME/Applications/Obsidian.app"
-  if [ ! -d "$app_path" ]; then
+  if [ -e "$app_path" ]; then
+    printf '%s is there but is not a working Obsidian. Move it to the Trash, then run this again.\n' "$app_path"
+    exit 1
+  fi
+  if true; then
     echo "Installing Obsidian in $HOME/Applications ..."
-    curl --progress-bar --fail --location --proto '=https' --tlsv1.2 'https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.0/Obsidian-1.15.0.dmg' -o "$work_dir/Obsidian.dmg"
+    if ! curl --progress-bar --fail --location --proto '=https' --tlsv1.2 'https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.0/Obsidian-1.15.0.dmg' -o "$work_dir/Obsidian.dmg"; then
+      printf 'Obsidian could not be downloaded, so it was not installed and nothing else was changed.\nCheck the connection and run this again, or install Obsidian from https://obsidian.md first.\n'
+      exit 1
+    fi
     verify_hash "$work_dir/Obsidian.dmg" 'd3f837e6fd3efaf65fa0bec987b18296982995d4ddae3171a7f7f67e0e2b7aa8'
     mount_dir="$work_dir/disk"
     mkdir "$mount_dir"
@@ -50,11 +70,17 @@ if [ ! -d "$app_path" ]; then
     staging_app="$(mktemp -d "$HOME/Applications/.obsidian-XXXXXXXX")"
     if ! ditto "$mount_dir/Obsidian.app" "$staging_app/Obsidian.app" || ! mv -n "$staging_app/Obsidian.app" "$app_path"; then
       rm -rf "$staging_app"
+      printf 'Obsidian could not be copied to %s, so it was not installed and nothing else was changed.\n' "$app_path"
       exit 1
     fi
     rm -rf "$staging_app"
     hdiutil detach "$mount_dir" >/dev/null
     trap 'rm -rf "$work_dir"' EXIT
+    if ! usable_app "$app_path"; then
+      printf 'Obsidian was copied, but %s is still not a working app, so nothing else was changed.\nInstall Obsidian from https://obsidian.md, then run this again.\n' "$app_path"
+      exit 1
+    fi
+    printf 'Installed Obsidian (%s)\n' "$app_path"
   fi
 fi
 # Install missing font families for the current user.

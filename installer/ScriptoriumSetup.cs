@@ -125,6 +125,21 @@ namespace ScriptoriumSetup
                 }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
             }
+            // Headless (used by the tests): whether Obsidian counts as installed, given what the registry says the
+            // obsidian:// links run ("" for no such link) and the folders programs are installed in. Exit code 0 if it is.
+            if (args.Length == 1 && args[0] == "--find-obsidian")   // this computer, as the window decides it
+            {
+                string here = Installer.FindObsidian();
+                Console.WriteLine(Installer.DescribeObsidian(here, Installer.ProtocolCommand()));
+                return here != null ? 0 : 1;
+            }
+            if (args.Length >= 2 && args[0] == "--find-obsidian")
+            {
+                string command = args[1].Length > 0 ? args[1] : null;
+                string found = Installer.LocateObsidian(args.Skip(2), command);
+                Console.WriteLine(Installer.DescribeObsidian(found, command));
+                return found != null ? 0 : 1;
+            }
             // Headless (used by the tests): open the vault <vault> with the Obsidian <exe>, as Install does when "Open the
             // vault in Obsidian" is ticked. Exit code 0 if its plugins were turned on.
             if (args.Length == 3 && args[0] == "--auto-open-only")
@@ -320,44 +335,75 @@ namespace ScriptoriumSetup
         }
 
         // ---------- Obsidian ----------
+        // Obsidian is installed when its program is on the disk, and only then. Obsidian's uninstaller leaves things
+        // behind (the obsidian:// link in the registry, the settings folder), so none of those says it is installed:
+        // a link whose program is gone counts as not installed, and Setup offers to install Obsidian again.
         public static string FindObsidian()
         {
-            foreach (string baseDir in new[] {
+            return LocateObsidian(new[] {
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) })
-            {
-                if (string.IsNullOrEmpty(baseDir)) continue;
-                foreach (string rel in new[] { @"Obsidian\Obsidian.exe", @"Programs\Obsidian\Obsidian.exe" })
-                {
-                    string exe = Path.Combine(baseDir, rel);
-                    if (File.Exists(exe)) return exe;
-                }
-            }
-            return ObsidianFromProtocol();
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }, ProtocolCommand());
         }
 
-        // The program the obsidian:// links open ("C:\...\Obsidian.exe" "%1"), for an Obsidian installed elsewhere.
-        static string ObsidianFromProtocol()
+        // Obsidian.exe under one of the folders programs are installed in, or else the program that the obsidian:// links
+        // open (command, as the registry has it), for an Obsidian installed elsewhere; null if neither is a file.
+        public static string LocateObsidian(IEnumerable<string> baseDirs, string command)
+        {
+            foreach (string baseDir in baseDirs)
+            {
+                if (string.IsNullOrEmpty(baseDir)) continue;
+                foreach (string exe in new[] { Path.Combine(baseDir, "Obsidian", "Obsidian.exe"), Path.Combine(baseDir, "Programs", "Obsidian", "Obsidian.exe") })
+                    if (IsProgram(exe)) return exe;
+            }
+            string linked = ProtocolExe(command);
+            return linked != null && IsProgram(linked) ? linked : null;
+        }
+
+        static bool IsProgram(string exe)
+        {
+            try { return File.Exists(exe) && new FileInfo(exe).Length > 0; } catch { return false; }
+        }
+
+        // The program named by the obsidian:// link's command ("C:\...\Obsidian.exe" "%1", or the same without the quotation
+        // marks); null if it names none. It may no longer exist.
+        public static string ProtocolExe(string command)
+        {
+            command = (command ?? "").Trim();
+            string exe;
+            if (command.StartsWith("\""))
+            {
+                int end = command.IndexOf('"', 1);
+                exe = end > 1 ? command.Substring(1, end - 1) : "";
+            }
+            else
+            {
+                int end = command.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+                exe = end > 0 ? command.Substring(0, end + 4) : "";
+            }
+            exe = exe.Trim();
+            return exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? exe : null;
+        }
+
+        // What the registry says the obsidian:// links run; null when there is no such link (or off Windows).
+        public static string ProtocolCommand()
         {
             if (!IsWindows) return null;
             try
             {
                 using (RegistryKey k = Registry.ClassesRoot.OpenSubKey(@"obsidian\shell\open\command"))
-                {
-                    string command = k != null ? (k.GetValue("") as string ?? "").Trim() : "";
-                    int end = command.StartsWith("\"") ? command.IndexOf('"', 1) : -1;
-                    string exe = end > 1 ? command.Substring(1, end - 1) : "";
-                    return exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(exe) ? exe : null;
-                }
+                    return k != null ? (k.GetValue("") as string ?? "") : null;
             }
             catch { return null; }
         }
 
-        public static bool ObsidianProtocolRegistered()
+        // One line for the record: where Obsidian is, or why it counts as not installed.
+        public static string DescribeObsidian(string exe, string command)
         {
-            if (!IsWindows) return false;
-            using (RegistryKey k = Registry.ClassesRoot.OpenSubKey(@"obsidian\shell\open\command")) return k != null;
+            if (exe != null) return "installed: " + exe;
+            string linked = ProtocolExe(command);
+            if (command != null) return "not installed: the obsidian:// link is left over from an Obsidian that was removed" + (linked != null ? " (" + linked + " is gone)" : "");
+            return "not installed";
         }
 
         // ---------- fonts ----------
@@ -2467,7 +2513,8 @@ namespace ScriptoriumSetup
         }
 
         bool FontsInstalled() { return !preview && Installer.FontFamilyInstalled("EB Garamond") && Installer.FontFamilyInstalled("Cormorant Garamond"); }
-        bool ObsidianInstalled() { return !preview && (Installer.FindObsidian() != null || Installer.ObsidianProtocolRegistered()); }
+        // Only a program on the disk counts (Installer.FindObsidian): not the obsidian:// link an uninstalled Obsidian leaves.
+        bool ObsidianInstalled() { return !preview && Installer.FindObsidian() != null; }
 
         // ---------- the page ----------
         const float PageWidth = 600, PageMargin = 40;
@@ -2708,11 +2755,15 @@ namespace ScriptoriumSetup
                     using (Process p = Process.Start(new ProcessStartInfo(setup, "/S /currentuser") { UseShellExecute = false }))
                     {
                         p.WaitForExit();
-                        if (p.ExitCode != 0) throw new InvalidOperationException("Obsidian setup exited with code " + p.ExitCode + ".");
+                        if (p.ExitCode != 0)
+                            throw new InvalidOperationException("Obsidian's installer failed (exit code " + p.ExitCode + "), so Obsidian was not installed. " +
+                                "Nothing else was changed. Install Obsidian from https://obsidian.md, then run Scriptorium Setup again.");
                     }
                     exe = Installer.FindObsidian();
-                    if (exe == null && !Installer.ObsidianProtocolRegistered()) throw new InvalidOperationException("Obsidian setup did not complete.");
-                    Log("Installed Obsidian");
+                    if (exe == null)
+                        throw new InvalidOperationException("Obsidian's installer ran, but Obsidian is still not on this computer (Obsidian.exe was not found). " +
+                            "Nothing else was changed. Install Obsidian from https://obsidian.md, then run Scriptorium Setup again.");
+                    Log("Installed Obsidian (" + exe + ")");
                 }
                 if (fonts)
                 {
@@ -2799,7 +2850,7 @@ namespace ScriptoriumSetup
         // the user is asked to close it and retry, or to skip (the vault is then left for "Open folder as vault").
         AutoOpen.Outcome OpenNewVault(string dest, string exe)
         {
-            if (exe == null) return new AutoOpen.Outcome { Problem = "Obsidian.exe was not found" };
+            if (exe == null) return new AutoOpen.Outcome { Problem = "Obsidian is not installed on this computer (Obsidian.exe was not found)" };
             while (AutoOpen.ObsidianRunning())
             {
                 Status("Obsidian is open …");
@@ -2824,8 +2875,9 @@ namespace ScriptoriumSetup
         {
             try
             {
+                // (never through the obsidian:// link alone: without the program it is a leftover that opens nothing)
                 if (exe != null) Process.Start(new ProcessStartInfo(exe, "obsidian://choose-vault") { UseShellExecute = false });
-                else Process.Start("obsidian://choose-vault");
+                else Log("Obsidian is not installed on this computer: install it from https://obsidian.md, then open the folder above as a vault.", true);
             }
             catch (Exception ex) { Log("Could not open Obsidian: " + ex.Message, true); }
         }
@@ -2884,7 +2936,7 @@ namespace ScriptoriumSetup
                 try
                 {
                     if (exe != null) Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false });
-                    else Process.Start("obsidian://open?path=" + Uri.EscapeDataString(dest));
+                    else Log("Obsidian is not installed on this computer, so the vault was not opened: install it from https://obsidian.md.", true);
                 }
                 catch (Exception ex) { Log("Could not open Obsidian: " + ex.Message, true); }
             }

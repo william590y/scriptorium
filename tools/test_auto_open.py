@@ -277,6 +277,178 @@ def run_cases(ed, work):
         check(not ok and file.read_text(encoding="utf-8") == content, f"{what}: refused, the file unchanged")
 
 
+# ---- Is Obsidian installed? ----
+# Each script installs Obsidian unless it finds one. What a removed Obsidian leaves behind (a link handler whose program
+# is gone, an app in the Trash, a registry key) must not count as one, or the script installs nothing and then has
+# nothing to open. The part of each script that decides is taken from the script and run against a made-up machine.
+def section(path, start, end):
+    text = path.read_text(encoding="utf-8")
+    m = re.search(re.escape(start) + r"\r?\n(.*?)" + re.escape(end), text, re.S)
+    if not m:
+        sys.exit(f"cannot find {start!r} in {path}")
+    return m.group(1).replace("\r\n", "\n")
+
+
+def make_program(path, text="#!/bin/sh\nexit 0\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+def find_obsidian_linux(work):
+    print("\nInstall-Scriptorium-Linux.sh: is Obsidian installed?")
+    code = section(LINUX, "# ---- Finding Obsidian ----", "# ---- End of finding Obsidian ----")
+    script = "set -euo pipefail\n" + code + "\nif find_obsidian; then printf 'found %s\\n' \"${launcher[*]}\"; else echo none; fi\n"
+    count = [0]
+
+    def machine(**has):
+        count[0] += 1
+        home = work / f"linux{count[0]}"
+        tools = home / "bin"
+        tools.mkdir(parents=True)
+        # xdg-mime answers with the handler in "handler"; flatpak knows Obsidian only if "flatpak" is set
+        make_program(tools / "xdg-open")
+        make_program(tools / "xdg-mime", "#!/bin/sh\nprintf '%s\\n' \"${FAKE_HANDLER:-}\"\n")
+        if "flatpak" in has:
+            make_program(tools / "flatpak", "#!/bin/sh\n" + ("exit 0\n" if has["flatpak"] else "exit 1\n"))
+        return home, tools
+
+    def find(home, tools, handler=""):
+        env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin", "FAKE_HANDLER": handler,
+               "XDG_DATA_HOME": str(home / ".local" / "share"), "XDG_DATA_DIRS": str(home / "usr-share")}
+        r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+        return r.stdout.strip() if r.returncode == 0 else f"error {r.returncode}: {r.stderr.strip()}"
+
+    def entry(home, exec_line, where=".local/share"):
+        d = home / where / "applications"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "obsidian.desktop").write_text(f"[Desktop Entry]\nName=Obsidian\nExec={exec_line}\nType=Application\nMimeType=x-scheme-handler/obsidian;\n")
+
+    if shutil.which("obsidian"):
+        print("      (an obsidian command is on PATH here: these cases are not run)")
+        return
+    home, tools = machine()
+    check(find(home, tools) == "none", "nothing there: not installed")
+    check(find(home, tools, "obsidian.desktop") == "none", "a handler for obsidian:// links is named, but its .desktop entry is gone: not installed")
+    entry(home, f"{home}/Applications/Obsidian.AppImage %u")
+    check(find(home, tools, "obsidian.desktop") == "none", "the handler's .desktop entry is there, the AppImage it starts is not: not installed")
+    make_program(home / "opt" / "Obsidian Folder" / "obsidian")
+    entry(home, f'env FOO=1 "{home}/opt/Obsidian Folder/obsidian" --flag %u')
+    check(find(home, tools, "obsidian.desktop") == "found xdg-open", "the handler's program exists (env, quotation marks, a space in the path): installed")
+    entry(home, "no-such-obsidian-program %u")
+    check(find(home, tools, "obsidian.desktop") == "none", "the handler starts a command that is not on PATH: not installed")
+    home, tools = machine()
+    entry(home, "xdg-open %u", "usr-share")
+    check(find(home, tools, "obsidian.desktop") == "found xdg-open", "a system-wide .desktop entry whose command is on PATH: installed")
+
+    home, tools = machine()
+    (home / "Applications").mkdir()
+    (home / "Applications" / "Obsidian.AppImage").write_text("")
+    (home / "Applications" / "Obsidian.AppImage").chmod(0o755)
+    check(find(home, tools) == "none", "an empty Obsidian.AppImage: not installed")
+    make_program(home / "Applications" / "Obsidian.AppImage")
+    check(find(home, tools) == f"found {home}/Applications/Obsidian.AppImage", "an Obsidian.AppImage that can run: installed")
+    (home / "Applications" / "Obsidian.AppImage").chmod(0o644)
+    check(find(home, tools) == "none", "an Obsidian.AppImage that cannot run: not installed")
+
+    home, tools = machine(flatpak=False)
+    check(find(home, tools) == "none", "flatpak is there but has no Obsidian: not installed")
+    home, tools = machine(flatpak=True)
+    check(find(home, tools) == "found flatpak run md.obsidian.Obsidian", "Obsidian from flatpak: installed")
+
+    home, tools = machine()
+    make_program(tools / "obsidian", "#!/bin/sh\necho 'unable to find Obsidian'\n")
+    check(find(home, tools) == "none", "only Obsidian's command line client is on PATH: not installed")
+    make_program(tools / "obsidian")
+    check(find(home, tools) == "found obsidian", "an obsidian command that is the program: installed")
+
+
+def find_obsidian_macos(work):
+    print("\nInstall-Scriptorium-macOS.command: is Obsidian installed?")
+    code = section(MACOS, "# ---- Finding Obsidian ----", "# ---- End of finding Obsidian ----")
+    script = "set -euo pipefail\n" + code + "\nif found=\"$(find_obsidian_app)\"; then printf 'found %s\\n' \"$found\"; else echo none; fi\n"
+    count = [0]
+
+    def machine():
+        count[0] += 1
+        home = work / f"mac{count[0]}"
+        make_program(home / "bin" / "osascript", "#!/bin/sh\nprintf '%s\\n' \"${FAKE_BUNDLE:-}\"\n")   # what macOS says md.obsidian is
+        (home / "SystemApplications").mkdir()
+        return home
+
+    def app(path, working=True):
+        (path / "Contents" / "MacOS").mkdir(parents=True)
+        if working:
+            make_program(path / "Contents" / "MacOS" / "Obsidian")
+        return path
+
+    def find(home, bundle=""):
+        env = {"HOME": str(home), "PATH": f"{home / 'bin'}:/usr/bin:/bin", "FAKE_BUNDLE": str(bundle),
+               "OBSIDIAN_APPLICATIONS": str(home / "SystemApplications")}
+        r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+        return r.stdout.strip() if r.returncode == 0 else f"error {r.returncode}: {r.stderr.strip()}"
+
+    home = machine()
+    check(find(home) == "none", "nothing there: not installed")
+    check(find(home, home / "Somewhere" / "Obsidian.app") == "none", "macOS names an Obsidian.app that is gone: not installed")
+    trashed = app(home / ".Trash" / "Obsidian.app")
+    check(find(home, trashed) == "none", "macOS names the Obsidian.app in the Trash: not installed")
+    husk = app(home / "Applications" / "Obsidian.app", working=False)
+    check(find(home, husk) == "none", "an Obsidian.app folder with no program in it: not installed")
+    good = app(home / "SystemApplications" / "Obsidian.app")
+    check(find(home, trashed) == f"found {good}", "the one in the Trash is passed over for the one in Applications")
+    home = machine()
+    mine = app(home / "Applications" / "Obsidian.app")
+    check(find(home) == f"found {mine}", "Obsidian.app in the user's Applications: installed")
+    home = machine()
+    elsewhere = app(home / "Tools" / "Obsidian.app")
+    check(find(home, elsewhere) == f"found {elsewhere}", "macOS names a working Obsidian.app elsewhere: installed")
+
+
+# Windows only (it needs PowerShell and the registry): the script's Find-Obsidian, against the real machine when it has
+# no Obsidian (as a CI runner has none), with the obsidian:// link registered as an uninstalled Obsidian leaves it.
+def find_obsidian_windows(work):
+    print("\nInstall-Scriptorium-Windows.cmd: is Obsidian installed?")
+    import winreg
+    code = "function Find-Obsidian {\n" + section(WINDOWS, "    function Find-Obsidian {", "    $exe = Find-Obsidian\n    if (!$exe) {")
+    check("Test-Path -LiteralPath $protocol" not in WINDOWS.read_text(encoding="utf-8"), "the script no longer takes the registry key alone for an installed Obsidian")
+
+    def find():
+        ps = code + "\n$found = Find-Obsidian\nif ($found) { Write-Output \"found $found\" } else { Write-Output 'none' }\n"
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, text=True, timeout=120)
+        for line in (r.stdout + r.stderr).splitlines():
+            print("      | " + line)
+        return r.stdout.strip()
+
+    key = r"Software\Classes\obsidian\shell\open\command"
+    if find() != "none":
+        print("      (Obsidian is installed on this machine: the registry cases are not run)")
+        return
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, key).Close()
+        print("      (this user already has an obsidian:// link: the registry cases are not run)")
+        return
+    except OSError:
+        pass
+    program = work / "Registered" / "Obsidian.exe"
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{program}" "%1"')
+        check(find() == "none", "the obsidian:// link is registered, Obsidian.exe is gone: not installed")
+        program.parent.mkdir(parents=True)
+        program.write_bytes(b"MZ program")
+        check(find() == f"found {program}", "the link's program exists: installed")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f"{program} %1")
+        check(find() == f"found {program}", "the same, written without quotation marks")
+    finally:
+        for sub in (key, r"Software\Classes\obsidian\shell\open", r"Software\Classes\obsidian\shell", r"Software\Classes\obsidian"):
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
+            except OSError:
+                pass
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: test_auto_open.py Scriptorium-Setup.exe | --scripts-only")
@@ -299,6 +471,12 @@ def main():
             # realpath: on Windows runners TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which .NET Framework's
             # Path.GetFullPath expands to the long name; compare against the long form, as Obsidian would see the folder.
             run_cases(ed, Path(os.path.realpath(tmp)))
+    with tempfile.TemporaryDirectory(prefix="scriptorium-find-obsidian-") as tmp:
+        if os.name == "nt":
+            find_obsidian_windows(Path(os.path.realpath(tmp)))
+        else:
+            find_obsidian_linux(Path(tmp))
+            find_obsidian_macos(Path(tmp))
     print(f"\n{'All auto-open checks passed.' if not failures else f'{len(failures)} check(s) FAILED:'}")
     for f in failures:
         print("  " + f)
