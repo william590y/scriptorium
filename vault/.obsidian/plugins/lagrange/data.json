@@ -19,5 +19,6 @@
   "loaderTheme": "random",
   "showPen": true,
   "penSpeed": 1,
-  "penTrail": true
+  "penTrail": true,
+  "penLines": 3
 }

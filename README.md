@@ -156,9 +156,12 @@ the image returns to the note.
 Lagrange talks with you about the note you have open and edits it when you ask. Click the **pen-nib icon** (or run
 **Lagrange: Open**) for the chat in the right sidebar and type: a question gets an answer, and a request for a change
 ("fix the grammar", "tighten the second paragraph", "add the equation for kinetic energy") is carried out in the note.
-Each edit is struck through and written in by a pen, in handwriting, with a thin trail of ink behind the nib; an
-equation is typeset and drawn symbol by symbol, and code (a fenced block, or a code span) is typed on a small
-typewriter that takes the pen's place. The edits are then listed in the chat with their reasons.
+Each edit is struck through and written in by a pen, in handwriting, with a thin trail of ink behind the nib. The
+pen writes where the new text stands in the note: its first stroke is where the first letter will be, and its lines
+are the note's lines. A long edit is written for three lines (**Settings → Lagrange → Lines the pen writes**) and
+the rest is set down at once. An equation is drawn symbol by symbol where the note typesets it, wherever in the edit
+it comes, and code (a fenced block, or a code span) is typed on a small typewriter that takes the pen's place. The
+edits are then listed in the chat with their reasons.
 
 **Undo and redo.** One **Undo** in the editor takes back all the edits of a request. The two arrows at the head of the
 chat do the same for Lagrange's edits only: **Undo** takes back its latest run of edits and **Redo** makes it again,
