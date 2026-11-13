@@ -232,7 +232,10 @@ else:
         script = work / "part.ps1"
         script.write_text("$ErrorActionPreference = 'Stop'\n" + download + f"\n$tempPath = {quote(work / 'temp')}\n$staging = {quote(work / 'vault')}\n"
                           "$diagramMissing = @()\n$diagramPlugins = @(\n" + table + "\n)\n" + adding + "\nWrite-Host ('MISSING:' + ($diagramMissing -join ','))\n", encoding="utf-8-sig")
-        r = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)], capture_output=True, text=True, timeout=300)
+        # (started from PowerShell 7, as in CI, Windows PowerShell would inherit its module path and not find its own
+        # Get-FileHash; a user starts the .cmd from Explorer or cmd.exe, where there is no such variable)
+        env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+        r = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)], capture_output=True, text=True, timeout=300, env=env)
         for line in (r.stdout + r.stderr).splitlines():
             print("      | " + line)
         return work / "vault", r
