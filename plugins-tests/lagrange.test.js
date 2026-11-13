@@ -1632,6 +1632,12 @@ test('Editing while the pen writes: off by default, a setting, and a run never l
   assert.match(js, /setName\('Let me edit while the pen writes'\)/);
   assert.ok(!/readOnly\.of\(true\)|editable\.of\(false\)|\.reconfigure\(/.test(js), 'the editor stays editable, and is not reconfigured (which makes Typewriter Mode scroll back to the cursor)');
   for (const type of ['pointerdown', 'mousedown', 'beforeinput', 'paste', 'drop', 'compositionstart', 'keydown']) assert.ok(js.includes(`'${type}'`), `${type} is listened for`);
+  // Obsidian replaces a note's first character by itself to have it highlighted afresh: that is not the writer typing
+  assert.equal(js.split('tr.startState.doc.eq(tr.state.doc)').length - 1, 2, 'a change that leaves the text as it was neither ends a run nor moves the pen');
+  // text the pen has yet to write is unseen, and so are the boxes around it (a code block's tint, a code span's)
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /\.cm-line\.lagrange-pen-unwritten-line \{[^}]*background-color: transparent !important/);
+  assert.match(css, /span:has\(> \.lagrange-pen-unwritten\):not\(\.lagrange-pen-unwritten\) \{[^}]*background-color: transparent !important/);
 });
 
 test('Rewind: a turn during which the writer typed is not taken for Lagrange’s alone', () => {

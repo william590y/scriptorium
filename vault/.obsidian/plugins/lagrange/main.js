@@ -2576,6 +2576,21 @@ function createPen(app, settings) {
   });
   const goneMark = Decoration.mark({ class: 'lagrange-pen-gone' });
   const unwrittenMark = Decoration.mark({ class: 'lagrange-pen-unwritten' });   // new text the pen has yet to write
+  const unwrittenLine = Decoration.line({ class: 'lagrange-pen-unwritten-line' }); // a line that is all new text: its box is unseen too
+  /* The marks that keep new text unseen until it is written: the text from `lead` on, and every line of the note that
+     the text fills entirely (so that the tinted box of a code block, or a rule under a heading, does not show before
+     its words). from: where the text was put; whole: whether the text begins and ends at line ends of the note. */
+  const unwritten = (from, text, lead, startsLine, endsLine) => {
+    const marks = [unwrittenMark.range(from + lead, from + text.length)];
+    const lines = text.split('\n');
+    let at = from;
+    lines.forEach((line, i) => {
+      const first = i === 0, last = i === lines.length - 1;
+      if ((!first || startsLine) && (!last || endsLine)) marks.push(unwrittenLine.range(at));
+      at += line.length + 1;
+    });
+    return Decoration.set(marks, true);
+  };
   const SVGNS = 'http://www.w3.org/2000/svg';
   const views = new Set();
   const layers = new Map();               // EditorView -> { sheet, svg, marks, pen, pos, lift, idle, win, trail }
@@ -2591,6 +2606,7 @@ function createPen(app, settings) {
     if (!update.docChanged || !tracked.size) return;
     for (const tr of update.transactions) {
       if (!tr.docChanged || tr.annotation(penWrite)) continue;
+      if (tr.startState.doc.eq(tr.state.doc)) continue;   // text replaced by itself (Obsidian's resetSyntaxHighlighting): nothing has moved
       for (const p of tracked) if (p.view === update.view) p.map(tr.changes);
     }
   });
@@ -3192,7 +3208,10 @@ function createPen(app, settings) {
           const mj = maths.length ? await mathReady(L) : null;
           const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
           if (!at.dirty) {
-            const spec = { effects: setGone.of(Decoration.set([unwrittenMark.range(at.from + lead, at.from + text.length)])) };
+            const old = view.state.doc;
+            const startsLine = at.from === 0 || old.sliceString(at.from - 1, at.from) === '\n';
+            const endsLine = at.to === old.length || old.sliceString(at.to, at.to + 1) === '\n';
+            const spec = { effects: setGone.of(unwritten(at.from, text, lead, startsLine, endsLine)) };
             const sel = view.state.selection.main;
             if (before && at.from > 0 && /^(?:\$|\\\(|\\\[|\\begin\{)/.test(text) && sel.to >= at.from && sel.from <= at.to) spec.selection = { anchor: at.from - 1 };
             commit(spec);
@@ -3500,6 +3519,9 @@ const runExtension = () => runExt || (runExt = [
       if (tr.annotation(penWrite)) run.undo = tr.changes.invert(tr.startState.doc).compose(run.undo);
       else {
         run.undo = run.undo.map(tr.changes);
+        // (a change that leaves the text as it was is nobody's typing: Obsidian makes one, replacing the first
+        // character by itself, to have a note highlighted afresh when a language or MathJax has loaded)
+        if (tr.startState.doc.eq(tr.state.doc)) continue;
         run.touched = true;
         if (run.onUserChange) run.onUserChange();
       }

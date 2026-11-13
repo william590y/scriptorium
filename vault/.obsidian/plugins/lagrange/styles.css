@@ -657,6 +657,22 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
 /* New text the pen has yet to write: in the note, in its place, unseen; then it shows through as the handwriting fades. */
 .lagrange-pen-unwritten { opacity: 0; }
 .lagrange-pen-revealing .lagrange-pen-unwritten { opacity: 1; transition: opacity var(--lagrange-pen-reveal, 300ms) ease; }
+/* Nor do the boxes of unwritten text show before its words: a line that is all new text (a code block's tinted
+   lines, a heading's rule), and the tint behind a code span. */
+.cm-editor:not(.lagrange-pen-revealing) .cm-line.lagrange-pen-unwritten-line {
+  background-color: transparent !important;
+  background-image: none !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+.cm-editor:not(.lagrange-pen-revealing) .cm-line.lagrange-pen-unwritten-line::before,
+.cm-editor:not(.lagrange-pen-revealing) .cm-line.lagrange-pen-unwritten-line::after,
+.cm-editor:not(.lagrange-pen-revealing) .cm-line.lagrange-pen-unwritten-line :is(.code-block-flair, .copy-code-button, .collapse-indicator, .cm-indent) { opacity: 0 !important; }
+.cm-editor:not(.lagrange-pen-revealing) .cm-line span:has(> .lagrange-pen-unwritten):not(.lagrange-pen-unwritten) {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
 /* One of the note's own equations while the pen draws it. */
 .lagrange-pen-drawing { color: var(--lagrange-rubric); }
 /* An equation in the pen's script, typeset by MathJax and drawn symbol by symbol. */

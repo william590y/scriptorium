@@ -400,15 +400,18 @@
     document.querySelectorAll('.notice').forEach(n => n.remove());
   });
 
-  await extra('scrolling, the arrow keys and Ctrl+C do not end the run', async (out, fail) => {
+  await extra('scrolling, the arrow keys, Ctrl+C and a change that changes nothing do not end the run', async (out, fail) => {
     const { cm, run } = await begin('The paragraph before the filler.');
     cm.scrollDOM.dispatchEvent(new WheelEvent('wheel', { deltaY: 40, bubbles: true }));
     cm.scrollDOM.scrollTop += 20;
     for (const init of [{ key: 'ArrowDown' }, { key: 'c', ctrlKey: true }, { key: 'Shift' }, { key: 'PageDown' }]) cm.contentDOM.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true }, init)));
+    // nor does Obsidian's own change that replaces the first character by itself (it makes one to highlight a note afresh)
+    cm.dispatch({ changes: { from: 0, to: 1, insert: cm.state.doc.sliceString(0, 1) }, userEvent: 'set' });
     await sleep(200);
     if (!document.querySelector('.lagrange-pen-hand')) fail('the handwriting went');
     const res = await run;
     if (res.ended) fail(`the run was ended (${res.ended})`);
+    if (res.touched) fail('a change that left the text as it was is taken for the writer’s typing');
     if (!same(cm.state.doc.toString(), afterOps(NOTE))) fail('the note is not right');
     document.querySelectorAll('.notice').forEach(n => n.remove());
   });
@@ -500,7 +503,7 @@
     chat.clear();
   });
 
-  await extra('hovering Lagrange’s controls shows no bubble (a ribbon icon, hovered the same way, does)', async (out, fail) => {
+  await extra('hovering Lagrange’s controls shows no bubble: tooltips are off for each of them (and a scripted hover shows none)', async (out, fail) => {
     const chat = await plugin.activateView(false);
     plugin.constructor.mountLoader(chat.logEl.createDiv({ cls: 'lagrange-loader-slot' }), 'orbit');
     chat.openPicker();
@@ -520,12 +523,15 @@
     };
     const ribbon = document.querySelector('.side-dock-ribbon-action[aria-label]');
     out.control = ribbon ? await hover(ribbon) : '';
-    if (!out.control) fail('the check is not telling: a ribbon icon showed no tooltip when hovered this way');
+    // (Obsidian shows tooltips for scripted hovers only in some states of the window; when the ribbon icon shows
+    // none, the hovering below proves nothing, and the check rests on --no-tooltip, which is what Obsidian reads)
+    out.hoverTells = Boolean(out.control);
     const els = Array.from(chat.contentEl.querySelectorAll('[aria-label], button, input, label, .lagrange-loader')).filter(e => e.getBoundingClientRect().width > 0);
     out.controls = els.length;
     for (const el of els) {
       if (el.hasAttribute('title')) fail(`a title attribute on “${el.getAttribute('title')}”`);
-      const text = await hover(el);
+      if (getComputedStyle(el).getPropertyValue('--no-tooltip').trim() !== 'true') fail(`Obsidian would show a tooltip over ${el.getAttribute('aria-label') || el.className}: its --no-tooltip is not true`);
+      const text = out.hoverTells ? await hover(el) : '';
       if (text) fail(`a bubble “${text.slice(0, 40)}” over ${el.getAttribute('aria-label') || el.className}`);
     }
     if (!chat.contentEl.querySelectorAll('button[aria-label]').length) fail('the buttons lost their accessible names');
