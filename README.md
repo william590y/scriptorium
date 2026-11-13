@@ -131,6 +131,37 @@ Callouts (`> [!note]`, `> [!tip]`, `> [!warning]`, `> [!error]` and the others) 
 the snippet: a tinted slip with a broad band and a printer's mark (☞ for a note, † for danger), darker for the more
 urgent kinds, in Reading view and Live Preview, light and dark.
 
+### Live Preview and Reading view: what still differs
+
+Scriptorium sets the page in Reading view and in an exported PDF; the editor (Live Preview) is closer to it than it
+was, and with **Show drop caps while editing** on the opening paragraph is the same in both to within a pixel. The
+rest of the editor is as it was in 1.3.1. These differences are known and left as they are in this version (measured
+at a 22 px text size in a 792 px column):
+
+1. **Paragraphs:** the editor shows the blank line between paragraphs and no indent; Reading view sets no gap and
+   indents every paragraph after the first by 1.5 em.
+2. **Under a heading:** the opening paragraph stands about 17 px lower under the note's title in the editor (more
+   after an epigraph or centred verse); a heading's line is deeper in the editor (63 px against 39 px) and its text
+   sits 22 px further right, because the editor centres it with the hidden `## `.
+3. **Subtitle (`######`):** the editor draws no short rule under it and sets it 22 px further right; the paragraph
+   after it is 27 px higher than in Reading view.
+4. **Quotations:** the editor sets the text at the bar and to the full width; Reading view sets it in from the bar and
+   keeps the right of the column free, so quotations wrap differently.
+5. **Lists:** hanging bullets and justified text in the editor; Reading view indents and does not justify.
+6. **Body paragraphs** (all but an opening one with its drop cap shown): the editor keeps a line's trailing space on
+   the line, so a line that Reading view just fills can lose its last word, and justified lines space a little
+   differently.
+7. **Centred and right-aligned text:** the `:::` marker lines show, small and faint, in the editor; Reading view
+   hides them and sets a line of space above and below.
+8. **Typewriter Mode** (shipped on) pads the top of the editor so that the cursor's line stays in place, so vertical
+   positions in the window differ from Reading view by design.
+9. **Footnotes in the margin, callouts, image captions and the scene-break ornament under the cursor** are Reading
+   view only, as before.
+10. **With drop caps shown while editing:** a paragraph that begins with an HTML tag has its drop cap in Reading view
+    only; Arrow Down from the initial goes to the line under it, not to the second line; beside a picture initial the
+    cursor before and after the hidden letter stands in the same place; and a short opening paragraph is followed by
+    the blank line beside the initial, so the next paragraph starts one line lower than in Reading view.
+
 ### Marginalia
 
 ![Footnotes set in the right margin beside their references, each under a small numbered box, with an unnumbered marginal note below them](docs/marginalia.png)
