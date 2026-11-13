@@ -3228,8 +3228,28 @@ function driveProblem(message, kind, steps) {
 }
 
 /* One HTTP request with Node's http or https: request({method, url, headers, body, sink, signal, timeoutMs}) ->
-   {status, headers, body}. With sink, the bytes of a 2xx answer are passed to sink(chunk) as they arrive instead. */
+   {status, headers, body}. With sink, the bytes of a 2xx answer are passed to sink(chunk) as they arrive instead.
+   A GET that is sent elsewhere (301, 302, 303, 307) is followed, up to five times; the sign-in is not carried to
+   another host. (308 is not followed: in a resumable upload it means "carry on".) */
 function driveHttp(mods, defaults) {
+  const once = driveHttpOnce(mods, defaults);
+  return async req => {
+    let r = req;
+    for (let hop = 0; ; hop++) {
+      const res = await once(r);
+      const to = res.headers && res.headers.location;
+      if ((r.method && r.method !== 'GET') || ![301, 302, 303, 307].includes(res.status) || !to || hop >= 5) return res;
+      let next;
+      try { next = new URL(to, r.url); } catch (e) { return res; }
+      if (!/^https?:$/.test(next.protocol) || (new URL(r.url).protocol === 'https:' && next.protocol !== 'https:')) return res;
+      const headers = Object.assign({}, r.headers);
+      if (next.host !== new URL(r.url).host) delete headers.Authorization;
+      r = Object.assign({}, r, { url: next.href, headers });
+    }
+  };
+}
+
+function driveHttpOnce(mods, defaults) {
   return req => new Promise((resolve, reject) => {
     if (req.signal && req.signal.aborted) { reject(driveAbort()); return; }
     let u;

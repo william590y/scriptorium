@@ -35,6 +35,8 @@ function fakeGoogle(options) {
   };
   /* Puts a file in the pretend Drive as another app would have (Claude's connector, the Drive web page): the client
      under test must not be able to see it. */
+  const signKey = crypto.randomBytes(16);
+  g.sign = id => crypto.createHmac('sha256', signKey).update(id).digest('hex');
   g.seed = (f, app) => add(Object.assign({ app: app || 'another-app', parents: ['root'] }, f));
   g.pathOf = f => { const parts = []; for (let x = f; x; x = g.files.get((x.parents || [])[0])) parts.unshift(x.name); return parts.join('/'); };
   g.tree = app => Object.fromEntries([...g.files.values()].filter(f => !f.trashed && f.mimeType !== FOLDER && (!app || f.app === app)).map(f => [g.pathOf(f), f]));
@@ -161,6 +163,14 @@ function fakeGoogle(options) {
       send(res, 200, view(f));
       return;
     }
+    // A signed download link needs no sign-in, and must not be sent one.
+    const signed = /^\/drive\/v3\/files\/([^/]+)$/.exec(p);
+    if (signed && q.get('sig') && q.get('sig') === g.sign(decodeURIComponent(signed[1]))) {
+      if (req.headers.authorization) { apiError(res, 400, 'badRequest', 'The sign-in was sent to another host'); return; }
+      const f = g.files.get(decodeURIComponent(signed[1]));
+      send(res, 200, f.bytes);
+      return;
+    }
     if (!app) { apiError(res, 401, 'authError', 'Invalid Credentials'); return; }
     if (!g.apiOn) { apiError(res, 403, 'accessNotConfigured', 'Google Drive API has not been used in project 1234567890 before or it is disabled.'); return; }
     const mine = id => { const f = g.files.get(id); return f && f.app === app ? f : null; };
@@ -221,6 +231,8 @@ function fakeGoogle(options) {
       const f = mine(decodeURIComponent(one[1]));
       if (!f) { apiError(res, 404, 'notFound', `File not found: ${decodeURIComponent(one[1])}.`); return; }
       if (req.method === 'GET' && q.get('alt') === 'media') {
+        // g.redirectDownloads: the content is served from another address (and another host name), as a signed link.
+        if (g.redirectDownloads && !q.get('sig')) { send(res, 302, '', { Location: `http://localhost:${g.server.address().port}/drive/v3/files/${f.id}?alt=media&sig=${g.sign(f.id)}` }); return; }
         let bytes = g.corruptDownloads.has(f.id) ? Buffer.concat([f.bytes.subarray(0, f.bytes.length - 1), Buffer.from([f.bytes[f.bytes.length - 1] ^ 1])]) : f.bytes;
         const r = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '');
         let status = 200, headers = {};

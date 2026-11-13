@@ -399,7 +399,7 @@ a later run (Google keeps a session for a week). There is no size limit of Scrip
 written into the same Drive file (Drive keeps its earlier versions for a while). Downloads are resumed with `Range`
 where they broke off and hashed as they arrive. Answers 429, 5xx and rate-limit 403 are tried again with a doubling
 wait, as [Google asks](https://developers.google.com/workspace/drive/api/guides/handle-errors). An empty file is
-recorded in the backup's list only.
+recorded in the backup's list only. The requests go straight to Google: an HTTP proxy set in the system is not used.
 
 **Phones and tablets: not supported.** The sign-in needs a program that can listen on `127.0.0.1` for Google's answer
 and read and write files outside the vault, which Obsidian on a phone or tablet cannot. Google's older alternative,

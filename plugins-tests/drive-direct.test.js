@@ -527,6 +527,22 @@ test('direct: a large download broken off carries on with Range, and is written 
   assert.equal(sha(fs.readFileSync(path.join(dir3, 'film.mp4'))), sha(big));
 });
 
+test('direct: a download that Google serves from another address is followed there, without the sign-in', async t => {
+  const { g, kit } = await setup(t);
+  const dir = tmp(t, 'vault-');
+  write(dir, 'a.md', 'redirected\n');
+  write(dir, 'big.bin', noise(700 * KIB, 2));
+  await device(t, kit, dir, 'laptop')().sync();
+  g.redirectDownloads = true;
+  const dir2 = tmp(t, 'retrieved-');
+  const [v] = await device(t, kit, tmp(t, 'list-'), 'desktop', { vault: '' })().vaults();
+  const r = await device(t, kit, dir2, 'desktop')().retrieve(v);
+  assert.deepEqual([r.downloaded, r.failed.length], [2, 0]);
+  assert.equal(fs.readFileSync(path.join(dir2, 'a.md'), 'utf8'), 'redirected\n');
+  assert.equal(sha(fs.readFileSync(path.join(dir2, 'big.bin'))), sha(noise(700 * KIB, 2)));
+  // An upload's 308 ("carry on") is never taken for a redirect: covered by the resumable tests above.
+});
+
 /* ---------- the two ways, side by side ---------- */
 
 test('direct: it cannot see a backup that Claude\'s connector made; a vault backed up that way before gets a new, complete backup', async t => {
