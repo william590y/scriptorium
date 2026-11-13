@@ -16,6 +16,9 @@
 // pens' handwriting ever meets, that the note is in the end exactly what one pen leaves (the same edits are run again
 // with "Several pens at once" off) in less time, that the view does not move when the run ends, and that a key, a
 // click, typing alongside and Undo do with three pens what they do with one.
+// And, where a chapter's opening paragraph has its drop cap in Live Preview (Scriptorium 1.4): that handwriting which
+// begins with the initial begins at the initial's left edge on the first line's baseline, and that later lines of
+// handwriting beside an initial (a letter, or a picture) begin after it, where the note's own lines begin.
 // This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
 // `node --test`; it is a manual check, or one a machine can run through the DevTools protocol.
 //
@@ -321,7 +324,9 @@
               if (line) {
                 const edge = line.getBoundingClientRect().left + parseFloat(getComputedStyle(line).paddingLeft);
                 // (beside a drop cap the note's own lines begin after the initial, and so must the handwriting's)
-                const own = line.classList.contains('scriptorium-opening') ? noteLines(cm, starts[Math.min(handNo, starts.length - 1)], lefts.length) : [];
+                let opening = false;
+                for (let el = line, n = 0; el && n < lefts.length + 2 && !opening; el = el.nextElementSibling, n++) opening = el.classList.contains('scriptorium-opening');
+                const own = opening ? noteLines(cm, starts[Math.min(handNo, starts.length - 1)], lefts.length) : [];
                 lefts.slice(1).forEach((x, i) => {
                   const want = own[i + 1] != null ? own[i + 1] : edge;
                   seen.beside = Math.max(seen.beside || 0, want - edge);

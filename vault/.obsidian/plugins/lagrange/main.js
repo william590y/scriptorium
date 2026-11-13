@@ -3899,7 +3899,8 @@ function createPen(app, settings) {
           if (c && c.bottom - c.top > tall) { cap = c; capAt = p; }
         }
         if (!cap) return null;
-        right = cap.right + px(letter.marginRight);
+        const end = view.coordsAtPos(capAt + 1, -1);       // (a place has no width: the letter's right edge is the place after it)
+        right = Math.max(cap.right, end && end.bottom - end.top > tall ? end.right : cap.right) + px(letter.marginRight);
         bottom = cap.bottom + px(letter.marginBottom);
         if (pos <= capAt) return { right: right - o.x, bottom: bottom - o.y, own: true };
       } else return null;
@@ -4398,9 +4399,10 @@ function createPen(app, settings) {
               hand.style.left = `${col.left.toFixed(2)}px`;
               hand.style.width = `${(col.right - col.left).toFixed(2)}px`;
               // Beside a drop cap the lines begin after it: a float of the initial's width and depth holds its place
-              // (from the second line on, where the text written is the initial's own paragraph from its first letter).
+              // (from the second line on, where the text written is the initial's own paragraph from its first letter:
+              // the float's shape leaves the first line free).
               const cap = rows.length ? null : besideInitial(L, view, at.start, first);
-              const beside = cap ? Math.max(0, cap.right - col.left) : 0, under = cap && cap.own ? col.lineHeight : 0;
+              const beside = cap ? Math.max(0, cap.right - col.left) : 0, under = cap && cap.own ? col.lineHeight * 1.4 : 0;   // (well into the second line: the first is a little deeper than a line where a tall letter stands on it)
               hand.classList.toggle('is-beside-initial', beside > 0);
               hand.style.setProperty('--lagrange-pen-beside', `${beside.toFixed(2)}px`);
               hand.style.setProperty('--lagrange-pen-beside-from', `${under.toFixed(2)}px`);
@@ -4415,7 +4417,7 @@ function createPen(app, settings) {
               hand.style.top = '0px';
               const base = hand.firstChild.getBoundingClientRect().bottom - hand.getBoundingClientRect().top;
               hand.style.top = `${(first.baseline - base).toFixed(2)}px`;
-              if (beside) hand.style.setProperty('--lagrange-pen-beside-deep', `${Math.max(1, cap.bottom - (first.baseline - base) - under).toFixed(2)}px`);
+              if (beside) hand.style.setProperty('--lagrange-pen-beside-deep', `${Math.max(1, cap.bottom - (first.baseline - base)).toFixed(2)}px`);
             };
             L.sheet.appendChild(hand);
             lay();

@@ -109,6 +109,7 @@
       align: cs.textAlign, pad: cs.paddingTop, indent: cs.textIndent, text: cs.fontSize, textLeading: cs.lineHeight, hyphens: cs.hyphens,
       image: image ? `${be.float} ${be.position} ${be.width} x ${be.height} ${be.marginTop} ${be.marginRight} ${be.marginBottom} ${be.marginLeft}` : '',
       picture: image ? `${be.backgroundImage} | ${be.webkitMaskImage || be.maskImage} | ${be.backgroundColor}` : '',
+      kept: Array.from(el.querySelectorAll('.sc-keep')).map(k => k.textContent).join(''),   // the word kept whole on the small-capped line
     };
     const view = el.closest('.markdown-source-view, .markdown-preview-view'), title = view && view.querySelector('.inline-title');
     return { cap, lines, style, image, has: Boolean(cap) || image, box: { left: base.left, top: base.top, width: base.width, height: base.height, under: title ? base.top - title.getBoundingClientRect().bottom : NaN } };
@@ -319,6 +320,27 @@
     }
     await theme(false);
     await plugin.updateSettings({ initials: 'yinit', fancyMode: false });
+    await run('no word is split across the small-capped first line: the word Reading view keeps whole is kept whole in the editor', async out => {
+      // (a long word is moved along the first line until Reading view would break it there, and keeps it whole)
+      for (let k = 4; k <= 16 && !out.kept; k++) {
+        const text = `The ${'old '.repeat(k)}incomprehensibilities of the natural philosophers were at first a matter of words, and afterwards of numbers, and the numbers have not made them fewer.`;
+        await open(note('', '## A chapter', text, SECOND), 'reading');
+        const p = readPara('The old');
+        const word = p && p.querySelector('.sc-keep');
+        if (!word) continue;
+        out.kept = word.textContent;
+        const got = await both(out, note('', '## A chapter', text, SECOND), 'The old', 'dropped');
+        if (got && got.a.style.kept !== out.kept) out.why.push(`the editor keeps “${got.a.style.kept}” whole, Reading view “${out.kept}”`);
+        // typing in the paragraph leaves the note's text alone, and the word is still whole
+        const cm = cmOf(); await setMode('live');
+        const end = cm.state.doc.line(3).to;
+        cm.dispatch({ changes: { from: end, insert: ' More.' }, userEvent: 'input.type' }); await sleep(200);
+        const line = liveLine('The old');
+        if (!line.querySelector('.sc-keep') || line.querySelector('.sc-keep').textContent !== out.kept) out.why.push('after typing in the paragraph the word is no longer kept whole');
+        if (cm.state.doc.line(3).text !== `${text} More.`) out.why.push('the note’s text is not what was typed');
+      }
+      if (!out.kept) out.why.push('Reading view kept no word whole in any of the paragraphs tried: the case is not what it was written for');
+    });
 
     // ---- aligned text ----
     const VERSE = ['Tyger Tyger, burning bright,', 'In the forests of the night;'];

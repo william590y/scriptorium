@@ -716,7 +716,7 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
   float: left;
   width: var(--lagrange-pen-beside, 0px);
   height: var(--lagrange-pen-beside-deep, 0px);
-  margin-top: var(--lagrange-pen-beside-from, 0px);
+  shape-outside: inset(var(--lagrange-pen-beside-from, 0px) 0px 0px 0px);
 }
 .lagrange-pen-seg.is-written, .lagrange-pen-hand.is-done .lagrange-pen-seg { visibility: visible; }
 .lagrange-pen-hand .lagrange-pen-math, .lagrange-pen-hand .lagrange-pen-code { visibility: hidden; }
