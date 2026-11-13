@@ -51,12 +51,21 @@
     '# Pen position check', 'A paragraph of prose stands before the verse, long enough to wrap onto a second line of the page, so that the column is plain to see.',
     '::: center\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::', '::: right\n— William Blake\n:::', 'The paragraph after the verse.',
   ].join('\n\n') + '\n';
+  // (a note whose own drop cap is a set of images: the paragraph begins with a letter Dropcat has)
+  const CAPNOTE = ['---', 'dropcap: Dropcat', '---', '## The pendulum', '', 'The pendulum keeps its own time, whatever the width of its swing, or near enough that the difference did not trouble anybody for a hundred years; the discovery is the reason there are clocks worth the name, and navigators who know where they are, and a great many people who are punctual against their will.', '', 'Short line here.', ''].join('\n');
   const PARA = 'Energy is never lost, only moved about: what a falling stone loses in height it gains in speed, and what it gains in speed it gives up, when it lands, as heat and sound and a dent in the ground. The books balance to the last farthing, which is why the idea has outlived every theory that was built upon it, and why a perpetual motion machine is a fraud before it is switched on. Nobody has yet caught the universe cheating.';
 
   // name, mode ('live' | 'source' | 'reading'), note text (default NOTE), the operations, and what to expect
   const cases = [
     { name: 'replace mid-paragraph', ops: [{ find: 'The kinetic energy of a moving body grows with the square of its speed.', replace: 'The energy of motion grows as the square of the speed, so twice as fast is four times as hard to stop.' }] },
     { name: 'replace at a line wrap (first words of the paragraph)', ops: [{ find: 'A body at rest stays at rest, and a body in motion keeps its motion', replace: 'What is still stays still, and what moves keeps moving' }] },
+    { name: 'a drop cap: the opening paragraph’s first words rewritten (the hand begins at the initial’s edge, on the first line; three lines written)', cap: 'own', lines: 3,
+      ops: [{ find: 'A body at rest stays at rest, and a body in motion keeps its motion', replace: 'Whatever is still stays still, and whatever moves keeps moving at the same speed and along the same line for as long as nothing pushes it or pulls it, which is the whole of the first law and the beginning of the science' }] },
+    { name: 'beside a drop cap: a sentence that begins on the opening paragraph’s first line rewritten (its later lines begin after the initial)', cap: 'beside', lines: 3,
+      ops: [{ find: 'and a body in motion keeps its motion, unless something acts on it', replace: 'and whatever moves keeps moving at the same speed and along the same line for as long as nothing pushes it or pulls it, which is the whole of the first law and the beginning of the science' }] },
+    { name: 'beside a drop cap that is a picture (a set of images): a sentence on the first line rewritten', cap: 'beside', picture: true, lines: 3, note: CAPNOTE,
+      ops: [{ find: 'whatever the width of its swing, or near enough', replace: 'however wide or narrow its swing may be, or so nearly that the difference, which is there, and which Huygens measured, and for which he bent the cheeks of his clocks, did not trouble anybody else' }] },
+    { name: 'a chapter is appended: its opening paragraph has its drop cap when the pen has written it', cap: 'after', ops: [{ append: '## A new chapter\n\nIts opening paragraph follows the heading, and is long enough to run on to a second line of the page.' }] },
     { name: 'replace one word', ops: [{ find: 'Short line here.', replace: 'Short sentence here.' }] },
     { name: 'insert after a sentence', ops: [{ insert_after: 'Short line here.', text: ' And a second sentence comes after it.' }] },
     { name: 'insert a new paragraph', ops: [{ insert_after: 'Short line here.', text: '\n\nA new paragraph is put in after the short line, and it runs on for a while so that it wraps.' }] },
@@ -153,9 +162,17 @@
   const canvas = document.createElement('canvas').getContext('2d');
   // Where the character at pos stands in the note: its left edge and its baseline.
   const glyphAt = (cm, pos) => {
-    const c = cm.coordsAtPos(pos, 1) || cm.coordsAtPos(pos, -1);
+    let c = cm.coordsAtPos(pos, 1) || cm.coordsAtPos(pos, -1);
     if (!c) return null;
     const at = cm.domAtPos(pos), el = at.node.nodeType === 1 ? at.node : at.node.parentElement, cs = getComputedStyle(el);
+    // A drop cap (Scriptorium sets the first letter of a chapter's opening paragraph three lines deep in Live
+    // Preview, or a picture in its place) is a letter of the first line: it stands at its own left edge, on the
+    // baseline of the letter after it.
+    const lineHeight = parseFloat(getComputedStyle(el.closest('.cm-line') || el).lineHeight) || 24, tall = c.bottom - c.top;
+    if (tall > lineHeight * 1.8 || tall < lineHeight * 0.3) {
+      const next = cm.coordsAtPos(pos + 1, 1);
+      if (next && next.bottom > next.top && next.bottom - next.top <= lineHeight * 1.8) c = { left: c.left, top: next.top, bottom: next.bottom };
+    }
     canvas.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
     const m = canvas.measureText('x'), ratio = m.fontBoundingBoxAscent / (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent);
     return { x: c.left, baseline: c.top + (c.bottom - c.top) * ratio };
@@ -303,7 +320,13 @@
               const line = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
               if (line) {
                 const edge = line.getBoundingClientRect().left + parseFloat(getComputedStyle(line).paddingLeft);
-                for (const x of lefts.slice(1)) seen.lineDx = Math.max(seen.lineDx, Math.abs(x - edge));
+                // (beside a drop cap the note's own lines begin after the initial, and so must the handwriting's)
+                const own = line.classList.contains('scriptorium-opening') ? noteLines(cm, starts[Math.min(handNo, starts.length - 1)], lefts.length) : [];
+                lefts.slice(1).forEach((x, i) => {
+                  const want = own[i + 1] != null ? own[i + 1] : edge;
+                  seen.beside = Math.max(seen.beside || 0, want - edge);
+                  seen.lineDx = Math.max(seen.lineDx, Math.abs(x - want));
+                });
               }
             }
           } else seen.unmatchedFrames++;
@@ -389,6 +412,14 @@
       if (c.aligned && seen.frames && seen.set !== c.aligned) fail(`the note sets this text ${seen.set || 'nowhere'}, not ${c.aligned}: are the Scriptorium plugin and its snippet on?`);
       if (seen.markers) fail(`the handwriting wrote a marker line (in ${seen.markers} frames)`);
       if (c.lines && seen.lines < c.lines) fail(`the pen wrote ${seen.lines} line(s), not ${c.lines}`);
+      if (c.cap) {
+        // the paragraph has its drop cap in the editor (Scriptorium is on), and the case met it
+        const opening = Array.from(cm.contentDOM.querySelectorAll('.cm-line.scriptorium-opening'));
+        out.cap = opening.length;
+        if (!opening.length) fail('no paragraph of the note has a drop cap in Live Preview: is the Scriptorium plugin (1.4 or later) on, with its snippet?');
+        if (c.picture && !opening.some(l => l.classList.contains('scriptorium-dropcap-image'))) fail('the drop cap is not a picture: is the set Dropcat in the plugin’s folder?');
+        if (c.cap !== 'after') { out.beside = +(seen.beside || 0).toFixed(1); if (!(seen.beside > 20)) fail('no later line of the handwriting was beside the initial: the case is not what it was written for'); }
+      }
       if (c.math != null && !c.loose && drawn !== c.math) fail(`the pen drew on ${drawn} of the note's equations, not ${c.math}`);
       if (mdx > TOL) fail(`an equation was drawn ${mdx.toFixed(1)} px from where it rests`);
       if (mdsize > 0.02) fail(`an equation was drawn ${(mdsize * 100).toFixed(1)}% off its final size`);

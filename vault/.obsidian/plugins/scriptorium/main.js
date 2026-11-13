@@ -1026,10 +1026,12 @@ function linesDropcap(lines, body) {
   return noteDropcap(said);
 }
 
-/* The paragraphs of a note that open a chapter, from its lines: [{line, text, standing, led}], line being the line
-   of the note the paragraph's first letter is on (the line after the marker, in aligned text); text, the paragraph
-   as it is shown; standing, whether it is aligned text that asked for its drop cap (a standing initial); led,
-   whether the line begins with marks that Live Preview shows only by the cursor. A paragraph that opens a chapter
+/* The paragraphs of a note that open a chapter, from its lines: [{line, text, standing, led, gap}], line being the
+   line of the note the paragraph's first letter is on (the line after the marker, in aligned text); text, the
+   paragraph as it is shown; standing, whether it is aligned text that asked for its drop cap (a standing initial);
+   led, whether the line begins with marks that Live Preview shows only by the cursor; gap, where the first word is
+   the initial alone ("A body at rest", "I remember"), the space after it as [from, to] in the line: beside a
+   dropped initial Reading view sets no space at the head of the line. A paragraph that opens a chapter
    but has no initial is left out: aligned text that did not ask for one, and a paragraph that begins with an
    embedded file, mathematics, a comment or an HTML tag. plan is alignPlan(lines). Pure. */
 function openingPlan(lines, plan) {
@@ -1042,7 +1044,8 @@ function openingPlan(lines, plan) {
       const first = marks && marks.first ? b.from + 1 : b.from, last = marks && marks.last ? b.to - 1 : b.to;
       if (first <= last && !/^\s*(?:!\[|\$|%%|<)/.test(lines[first])) {
         const text = lines.slice(first, last + 1).map(l => shownLine(l).replace(/\s+$/, '')).join('\n').replace(/^\s+/, '');
-        out.push({ line: first, text, standing: Boolean(marks), led: /^\s*[*_~=\[`\\]/.test(lines[first]) });
+        const lone = /^(\s*\p{P}*[\p{L}\p{N}]\p{P}*)([ \t]+)\S/u.exec(lines[first]);
+        out.push({ line: first, text, standing: Boolean(marks), led: /^\s*[*_~=\[`\\]/.test(lines[first]), gap: lone && !marks ? [lone[1].length, lone[1].length + lone[2].length] : null });
       }
     }
     before = prev;
@@ -1104,6 +1107,7 @@ function dropcapExtension(plugin) {
     const { lines, plan } = docPlan(state.doc);
     return { said: linesDropcap(lines, plan.body), openings: openingPlan(lines, plan) };
   };
+  const gap = Decoration.mark({ class: 'scriptorium-opening-gap' });   // the space after an initial that is a word by itself
   const decorate = (state, value) => {
     const builder = new RangeSetBuilder(), froms = [];
     if (value.openings.length) {
@@ -1115,6 +1119,7 @@ function dropcapExtension(plugin) {
         const made = openingLine(o, choice.which, choice.set, plugin.settings.initials, path, url => plugin.ratioKnown(url), value.inked);
         if (!made) continue;
         builder.add(line.from, line.from, Decoration.line(made.style ? { class: made.classes, attributes: { style: made.style } } : { class: made.classes }));
+        if (o.gap && line.from + o.gap[1] <= line.to) builder.add(line.from + o.gap[0], line.from + o.gap[1], gap);
         froms.push(line.from);
       }
     }

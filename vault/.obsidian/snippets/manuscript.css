@@ -346,6 +346,33 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-op
   margin: -3.08em 0 0 calc(-1 * var(--scriptorium-initial-room));
 }
 
+/* ---------- Drop caps in Live Preview: marks at the head of the line ----------
+   The editor's opening line is set by the rules above and in section 5 (every rule for Reading view's paragraph
+   names the line too, by the class scriptorium-opening that the Scriptorium plugin gives it). Where the paragraph
+   begins with marks that Live Preview hides while the cursor is elsewhere ("**Bold** beginning", "[[A link]]
+   first"), the editor leaves an empty placeholder with a cursor stop on each side, and the stops are images: an
+   image before the first letter would keep it from being an initial. They are not drawn there. (With the cursor on
+   the line the marks show, and the plugin takes the class off the line.) */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening > img.cm-widgetBuffer:first-child,
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening > img.cm-widgetBuffer:first-child + span[contenteditable="false"]:empty + img.cm-widgetBuffer {
+  display: none !important;                              /* (Obsidian sets them inline, and says it is important) */
+}
+/* Where the initial is a word by itself ("A body at rest"), the space after it would stand at the head of the first
+   line, and move that line by its width: Reading view sets no space there (the letter is floated out of the line,
+   and a line does not begin with a space), nor does the editor: the plugin marks the space, and here it is given no
+   width (it cannot be left to collapse: text that can be edited keeps its spaces). It is still in the note. Beside
+   a standing initial, and after a picture, the space is a space in both views. */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening:not(.scriptorium-align-dropcap):not(.scriptorium-dropcap-image) .scriptorium-opening-gap {
+  font-size: 0;
+  letter-spacing: 0;
+}
+/* The editor keeps the space at a line's end on that line (CodeMirror's white-space: break-spaces), so a line that
+   Reading view just fills loses its last word to the next line there. The opening paragraph breaks its lines as
+   Reading view breaks them: the space hangs in the margin. */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening {
+  white-space: pre-wrap;
+}
+
 /* ---------- Superscripts (footnote references) and subscripts keep the leading even ----------
    A raised [1] would otherwise push its line away from the one above. */
 .markdown-rendered :is(sup, sub) {

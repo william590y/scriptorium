@@ -709,6 +709,15 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
   -webkit-mask-image: linear-gradient(to right, #000 calc(var(--lagrange-pen-x, 0px) - 7px), transparent var(--lagrange-pen-x, 0px));
   mask-image: linear-gradient(to right, #000 calc(var(--lagrange-pen-x, 0px) - 7px), transparent var(--lagrange-pen-x, 0px));
 }
+/* Beside a drop cap (Scriptorium's, in Live Preview) the note's lines begin after the initial, and the handwriting's
+   lines with them: a float as wide and as deep as the initial holds its place. */
+.lagrange-pen-hand.is-beside-initial::before {
+  content: "";
+  float: left;
+  width: var(--lagrange-pen-beside, 0px);
+  height: var(--lagrange-pen-beside-deep, 0px);
+  margin-top: var(--lagrange-pen-beside-from, 0px);
+}
 .lagrange-pen-seg.is-written, .lagrange-pen-hand.is-done .lagrange-pen-seg { visibility: visible; }
 .lagrange-pen-hand .lagrange-pen-math, .lagrange-pen-hand .lagrange-pen-code { visibility: hidden; }
 .lagrange-pen-hand :is(.lagrange-pen-math, .lagrange-pen-code).is-on,

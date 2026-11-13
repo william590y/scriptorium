@@ -94,8 +94,10 @@
         if (!rc || !rc.width || !rc.height) continue;
         if (rc.height >= 2 * fs) { if (!cap) cap = { letter: n.data[i], left: rc.left - base.left, top: rc.top - base.top, width: rc.width, height: rc.height }; continue; }
         const last = lines[lines.length - 1];
-        if (!last || rc.top > last.top + 0.6 * fs) lines.push({ text: n.data[i], left: rc.left - base.left, top: rc.top - base.top, right: rc.right - base.left });
-        else { last.text += n.data[i]; last.left = Math.min(last.left, rc.left - base.left); last.right = Math.max(last.right, rc.right - base.left); }
+        // (a line is measured by its letters: the editor keeps a space at a line's end where Reading view has none)
+        const space = /\s/.test(n.data[i]);
+        if (!last || rc.top - base.top > last.top + 0.6 * fs) { if (!space) lines.push({ text: n.data[i], left: rc.left - base.left, top: rc.top - base.top, right: rc.right - base.left }); }
+        else { last.text += n.data[i]; if (!space) { last.left = Math.min(last.left, rc.left - base.left); last.right = Math.max(last.right, rc.right - base.left); } }
       }
     }
     const fl = getComputedStyle(el, '::first-letter'), line = getComputedStyle(el, '::first-line'), be = getComputedStyle(el, '::before');
@@ -108,7 +110,8 @@
       image: image ? `${be.float} ${be.position} ${be.width} x ${be.height} ${be.marginTop} ${be.marginRight} ${be.marginBottom} ${be.marginLeft}` : '',
       picture: image ? `${be.backgroundImage} | ${be.webkitMaskImage || be.maskImage} | ${be.backgroundColor}` : '',
     };
-    return { cap, lines, style, image, has: Boolean(cap) || image, box: { left: base.left, top: base.top, width: base.width, height: base.height } };
+    const view = el.closest('.markdown-source-view, .markdown-preview-view'), title = view && view.querySelector('.inline-title');
+    return { cap, lines, style, image, has: Boolean(cap) || image, box: { left: base.left, top: base.top, width: base.width, height: base.height, under: title ? base.top - title.getBoundingClientRect().bottom : NaN } };
   };
   /* The differences between a paragraph in the editor (a) and in Reading view (b): [why], and the largest in px.
      only: how many lines to compare (a paragraph of several lines of the note is several lines of the editor). */
@@ -132,24 +135,46 @@
     }
     return { why, max };
   };
-  const words = el => (el.innerText || el.textContent || '').replace(/^:{3,}[^\n]*\n/, '').replace(/\s+/g, ' ').trim().slice(0, 28);
+  const words = el => String(el.textContent || '').replace(/^\s*:{3,}[^\n]*\n/, '').replace(/\s+/g, ' ').trim().slice(0, 20);
   /* The editor's line that begins with `start`, and Reading view's paragraph that does. */
   const liveLine = start => Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).find(l => l.textContent.replace(/[*_=~`\[\]]/g, '').trim().startsWith(start));
   const readPara = start => Array.from(leaf.view.containerEl.querySelectorAll('.markdown-preview-sizer > div > p')).find(p => words(p).startsWith(start));
-  /* Every paragraph with a drop cap, by its first words: scrolled through, since both views draw only what is near. */
-  const scan = async (scroller, pick) => {
-    const found = new Map();
+  /* A drop cap that has just been chosen is inked in for a moment (its colour comes up): measured when it is dry. */
+  const dry = async () => { for (let i = 0; i < 40 && leaf.view.containerEl.querySelector('.scriptorium-dropcap-inked'); i++) await sleep(100); };
+  /* Every paragraph with a drop cap, by its first words: both views draw only what is near, so Reading view is
+     scrolled through, and the editor is gone through line by line. */
+  const kind = m => (m.has ? (m.image ? 'image' : m.style.float === 'left' ? 'dropped' : 'standing') : 'none');
+  const readCaps = async () => {
+    const scroller = leaf.view.containerEl.querySelector('.markdown-preview-view'), found = new Map();
     for (let y = 0, guard = 0; guard < 300; y += 350, guard++) {
       scroller.scrollTop = y; await sleep(130);
-      for (const el of pick()) { const m = measure(el); found.set(words(el), m.has ? (m.image ? 'image' : m.style.float === 'left' ? 'dropped' : 'standing') : 'none'); }
+      for (const el of leaf.view.containerEl.querySelectorAll('.markdown-preview-sizer > div.el-p > p')) found.set(words(el), kind(measure(el)));
       if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) break;
     }
     scroller.scrollTop = 0;
     await sleep(100);
     return found;
   };
-  const liveCaps = () => scan(cmOf().scrollDOM, () => Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).filter(l => l.textContent.trim() && !/^(?:HyperMD-(?!quote)|cm-)/.test(Array.from(l.classList).filter(c => c !== 'cm-line' && c !== 'cm-active').join(' ') || 'x') || l.classList.contains('scriptorium-opening')));
-  const readCaps = () => scan(leaf.view.containerEl.querySelector('.markdown-preview-view'), () => Array.from(leaf.view.containerEl.querySelectorAll('.markdown-preview-sizer > div.el-p > p')));
+  const liveCaps = async () => {
+    const cm = cmOf(), found = new Map(), doc = cm.state.doc;
+    for (let n = 1; n <= doc.lines; n++) {
+      const line = doc.line(n);
+      if (!/\S/.test(line.text) || /^(?:#{1,6} |>|[-*] |\d+\. |```|\||\$\$|%%|\[\^|:::|=+$|-+$)/.test(line.text)) continue;
+      cm.dispatch({ effects: cm.constructor.scrollIntoView(line.from, { y: 'center' }) });
+      let el = null;
+      for (let i = 0; i < 60 && !el; i++) {
+        await frame();
+        if (i === 30) cm.scrollDOM.scrollTop = Math.max(0, cm.lineBlockAt(line.from).top);   // (asked again, another way)
+        if (line.from < cm.viewport.from || line.from > cm.viewport.to) continue;
+        try { const at = cm.domAtPos(line.from + 1); el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line'); if (el && !el.isConnected) el = null; } catch (e) { el = null; }
+      }
+      await frame();
+      found.set(words({ textContent: S.shownLine(line.text) }), el ? kind(measure(el)) : 'not drawn');
+    }
+    cm.scrollDOM.scrollTop = 0;
+    await sleep(100);
+    return found;
+  };
 
   // The sets of drop caps the harness adds: one as the writer adds files (colours kept), one as Lagrange hands a drawing over (one colour).
   const svg = (letter, w, h, fill) => new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect x="6" y="6" width="${w - 12}" height="${h - 12}" fill="none" stroke="${fill}" stroke-width="12"/><text x="${w / 2}" y="${h * 0.78}" text-anchor="middle" font-family="Georgia, serif" font-size="${h * 0.8}" font-weight="700" fill="${fill}">${letter}</text></svg>`);
@@ -201,20 +226,23 @@
     await open(text, 'live');
     const line = liveLine(start);
     if (!line) { out.why.push(`no line of the editor begins “${start}”`); return null; }
+    await dry();
     const a = measure(line);
     await setMode('reading');
+    await dry();
     const p = readPara(start);
     if (!p) { out.why.push(`no paragraph of Reading view begins “${start}”`); return null; }
     const b = measure(p);
-    const kind = m => (m.has ? (m.image ? 'image' : m.style.float === 'left' ? 'dropped' : 'standing') : 'none');
     if (kind(b) !== expect) out.why.push(`Reading view has ${kind(b)}, the case expects ${expect}`);
     if (kind(a) !== expect) out.why.push(`the editor has ${kind(a)}, expected ${expect}`);
-    const diff = compare(a, b, only);
-    out.why.push(...diff.why);
-    out.maxPx = Number(diff.max.toFixed(2));
-    out.lines = a.lines.length;
-    out.x = Number((a.box.left - b.box.left).toFixed(2));        // where the paragraph itself stands in the window, editor less Reading view
-    out.y = Number((a.box.top - b.box.top).toFixed(2));
+    if (expect !== 'none' || kind(a) !== 'none') {   // (a paragraph without an initial is set as every other paragraph of the view is)
+      const diff = compare(a, b, only);
+      out.why.push(...diff.why);
+      out.maxPx = Math.max(out.maxPx || 0, Number(diff.max.toFixed(2)));
+      out.lines = a.lines.length;
+    }
+    out.x = Number((a.box.left - b.box.left).toFixed(2));          // where the paragraph stands: the column, editor less Reading view
+    out.y = Number((a.box.under - b.box.under).toFixed(2));        // and how far under the note's title (not asserted: the views space their blocks differently)
     if (Math.abs(a.box.left - b.box.left) > TOL || Math.abs(a.box.width - b.box.width) > TOL) out.why.push(`the column is at ${a.box.left.toFixed(1)}, ${a.box.width.toFixed(1)} wide in the editor; at ${b.box.left.toFixed(1)}, ${b.box.width.toFixed(1)} wide in Reading view`);
     return { a, b };
   };
@@ -233,8 +261,9 @@
       out.caps = caps(read).length;
       out.paragraphs = read.size;
       for (const [k, v] of read) if (v !== 'none' && live.get(k) !== v) out.why.push(`“${k}” is ${v} in Reading view, ${live.get(k) || 'not found'} in the editor`);
-      for (const [k, v] of live) if (v !== 'none' && read.get(k) !== v) out.why.push(`“${k}” is ${v} in the editor, ${read.get(k) || 'not found'} in Reading view`);
+      for (const [k, v] of live) if (v !== 'none' && v !== 'not drawn' && read.get(k) !== v) out.why.push(`“${k}” is ${v} in the editor, ${read.get(k) || 'not found'} in Reading view`);
       const want = ['A body at re', 'Conservation', 'Energy is ne', 'Golf stands ', 'Lima is a pa', 'Romeo stands', 'Sierra begin', 'Tango begins', '“Uniform,” s', 'Whiskey is t', 'Xray is cent', '1984 begins ', 'Galileo is s', 'Inertia was ', 'What a falli'];
+      out.editor = caps(live).filter(c => !/not drawn/.test(c)).length;
       const got = caps(read).map(c => c.split(':')[0]);
       for (const w of want) if (!got.includes(w)) out.why.push(`Reading view gives “${w}” no drop cap: the case is not what it was written for`);
       if (got.length !== want.length) out.why.push(`${got.length} drop caps in Reading view, ${want.length} expected: ${got.filter(g => !want.includes(g)).join(', ')}`);
@@ -245,13 +274,13 @@
       const live = await liveCaps();
       await setMode('reading');
       const read = await readCaps();
-      if (live.get(words({ innerText: PARAS.B })) !== 'none' || read.get(words({ innerText: PARAS.B })) !== 'none') out.why.push(`the top paragraph: ${live.get(words({ innerText: PARAS.B }))} in the editor, ${read.get(words({ innerText: PARAS.B }))} in Reading view`);
-      if (live.get(words({ innerText: PARAS.T })) !== 'dropped' || read.get(words({ innerText: PARAS.T })) !== 'dropped') out.why.push(`under the heading: ${live.get(words({ innerText: PARAS.T }))} in the editor, ${read.get(words({ innerText: PARAS.T }))} in Reading view`);
+      if (live.get(words({ textContent: PARAS.B })) !== 'none' || read.get(words({ textContent: PARAS.B })) !== 'none') out.why.push(`the top paragraph: ${live.get(words({ textContent: PARAS.B }))} in the editor, ${read.get(words({ textContent: PARAS.B }))} in Reading view`);
+      if (live.get(words({ textContent: PARAS.T })) !== 'dropped' || read.get(words({ textContent: PARAS.T })) !== 'dropped') out.why.push(`under the heading: ${live.get(words({ textContent: PARAS.T }))} in the editor, ${read.get(words({ textContent: PARAS.T }))} in Reading view`);
     });
 
     // ---- each kind of drop cap: the same face, size and place, and the same lines ----
     const KINDS = [
-      { name: 'Yinit (the default)', letter: 'E' }, { name: 'Yinit', letter: 'Q' }, { name: 'Yinit', letter: 'W' }, { name: 'Yinit', letter: 'A' },
+      { name: 'Yinit (the default)', letter: 'E' }, { name: 'Yinit', letter: 'Q' }, { name: 'Yinit', letter: 'W' }, { name: 'Yinit, an initial that is a word by itself', letter: 'A' },
       { name: 'Goudy Initialen, the note’s own', props: 'dropcap: goudy', letter: 'T' },
       { name: 'a plain capital, the note’s own', props: 'dropcap: plain', letter: 'C' },
       { name: 'none, the note’s own', props: 'dropcap: none', letter: 'E', expect: 'none' },
@@ -262,6 +291,7 @@
       { name: 'a font of initials (Kanzlei Initialen)', props: 'dropcap: Kanzlei Initialen', letter: 'W' },
       { name: 'a font of initials, one file a letter (Deutsche Zierschrift), the vault’s', vault: 'set:Deutsche Zierschrift', letter: 'A' },
       { name: 'a set of images (Dropcat)', props: 'dropcap: Dropcat', letter: 'Q', expect: 'image' },
+      { name: 'a set of images, an initial that is a word by itself', props: 'dropcap: Dropcat', letter: 'I', text: `I take it that inertia ${PARAS.I.slice(8)}`, start: 'I take it', expect: 'image' },
       { name: 'a set of images (Gene Wolfe), the vault’s', vault: 'set:Gene Wolfe', letter: 'T', expect: 'image' },
       { name: 'a set of images without the paragraph’s letter: the vault’s drop cap', props: 'dropcap: Dropcat', letter: 'E' },
       { name: 'a set the writer added (images in colour, not square)', props: `dropcap: ${SETS[0]}`, letter: 'E', expect: 'image' },
@@ -309,15 +339,20 @@
     }
     await run('a note that is centred as a whole: no drop cap unless its properties ask for one', async out => {
       await both(out, note('align: center', '## Verse', VERSE.join('\n'), 'More of it.'), 'Tyger', 'none', 1);
-      await both(out, note('align: center\ndropcap-aligned: true', '## Verse', VERSE.join('\n'), 'More of it.'), 'Tyger', 'standing', 1);
+      // (other words: Reading view keeps a block it has drawn while the block's own text is the same, and does not mark it again when only the properties change)
+      await both(out, note('align: center\ndropcap-aligned: true', '## Verse', 'Tiger, tiger, burning bright\nIn the forests of the night,', 'More of it.'), 'Tiger', 'standing', 1);
     });
 
     // ---- the first letter is still the note's text ----
     const TEXT = note('', '## A chapter', PARAS.E, SECOND);
     const from = () => cmOf().state.doc.line(3).from;   // the paragraph's first letter
-    const shape = () => { const m = measure(liveLine(cmOf().state.doc.line(3).text.slice(0, 12))); return { cap: m.cap, tops: m.lines.map(l => Math.round(l.top * 10) / 10), lefts: m.lines.map(l => Math.round(l.left * 10) / 10), box: m.box, text: m.lines.map(l => l.text) }; };
+    const shape = () => {
+      const el = liveLine(cmOf().state.doc.line(3).text.slice(0, 12)), m = measure(el);
+      const next = Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).find(l => l.textContent.startsWith('A second paragraph'));
+      return { cap: m.cap, tops: m.lines.map(l => Math.round(l.top * 10) / 10), lefts: m.lines.map(l => Math.round(l.left * 10) / 10), box: m.box, next: next ? next.getBoundingClientRect().top - m.box.top : 0, text: m.lines.map(l => l.text) };
+    };
     const same = (a, b, what, out) => {
-      const far = Math.max(Math.abs(a.cap.left - b.cap.left), Math.abs(a.cap.top - b.cap.top), Math.abs(a.cap.width - b.cap.width), Math.abs(a.box.top - b.box.top), Math.abs(a.box.height - b.box.height),
+      const far = Math.max(Math.abs(a.cap.left - b.cap.left), Math.abs(a.cap.top - b.cap.top), Math.abs(a.cap.width - b.cap.width), Math.abs(a.next - b.next), Math.abs(a.box.height - b.box.height),
         ...a.tops.map((t, i) => Math.abs(t - (b.tops[i] == null ? 1e3 : b.tops[i]))), ...a.lefts.map((t, i) => Math.abs(t - (b.lefts[i] == null ? 1e3 : b.lefts[i]))));
       if (far > 0.5) out.why.push(`${what}: something moved by ${far.toFixed(1)} px`);
       return far;
@@ -361,15 +396,11 @@
       await frame(); await frame();
       const picked = window.getSelection().toString();
       if (picked !== 'Energy is never lost,') out.why.push(`the page’s selection is “${picked}”`);
-      let copied = null;
-      const onCopy = e => { copied = e.clipboardData ? e.clipboardData.getData('text/plain') : null; };
-      document.addEventListener('copy', onCopy);
-      const did = document.execCommand('copy');
-      await frame();
-      document.removeEventListener('copy', onCopy);
-      if (copied == null) { try { copied = require('electron').clipboard.readText(); } catch (e) { copied = null; } }
-      out.copied = did ? String(copied).slice(0, 12) : 'not tried';
-      if (copied !== 'Energy is never lost,') out.why.push(`the clipboard has “${String(copied).slice(0, 30)}”`);
+      const data = new DataTransfer();
+      cm.contentDOM.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }));   // the editor fills the clipboard itself
+      const copied = data.getData('text/plain');
+      out.copied = copied.slice(0, 12);
+      if (copied !== 'Energy is never lost,') out.why.push(`the clipboard has “${copied.slice(0, 30)}”`);
       const line = liveLine('Energy is never');
       if (!line.textContent.startsWith('Energy is never lost')) out.why.push(`the line’s own text begins “${line.textContent.slice(0, 20)}”`);
       const node = document.createTreeWalker(line, NodeFilter.SHOW_TEXT).nextNode();
@@ -377,10 +408,6 @@
       out.spellcheck = cm.contentDOM.getAttribute('spellcheck');
       if (line.querySelector('.cm-widgetBuffer, img, [contenteditable="false"]')) out.why.push('something was put into the line');
       if (cm.state.doc.toString().indexOf('Energy is never lost') !== at) out.why.push('a search of the note does not find the paragraph’s first words where they are');
-      cm.dispatch({ selection: { anchor: at } });
-      const found = window.find('Energy is never', true, false, true);
-      out.find = found;
-      if (!found) out.why.push('the page’s own search does not find the paragraph’s first words');
     });
     await run('nothing moves when the cursor comes into the paragraph, or while it is typed in', async out => {
       await open(TEXT, 'live');
@@ -392,7 +419,7 @@
       for (const pos of [at, at + 1, at + 40, line.to]) { cm.dispatch({ selection: { anchor: pos } }); await frame(); await frame(); far = Math.max(far, same(before, shape(), `the cursor at ${pos - at}`, out)); }
       // typed at the end of the paragraph, a letter at a time, looked at on every frame
       let frames = 0, moved = 0, on = true;
-      const watch = () => { if (!on) return; frames++; try { const s = shape(); const f = Math.max(Math.abs(s.cap.left - before.cap.left), Math.abs(s.cap.top - before.cap.top), Math.abs(s.box.top - before.box.top), ...before.tops.slice(0, 3).map((t, i) => Math.abs(t - s.tops[i]))); moved = Math.max(moved, f); } catch (e) { moved = Math.max(moved, 999); } requestAnimationFrame(watch); };
+      const watch = () => { if (!on) return; frames++; try { const s = shape(); const f = Math.max(Math.abs(s.cap.left - before.cap.left), Math.abs(s.cap.top - before.cap.top), Math.abs(s.cap.width - before.cap.width), Math.abs(s.box.width - before.box.width), ...before.tops.slice(0, 3).map((t, i) => Math.abs(t - s.tops[i])), ...before.lefts.slice(0, 3).map((t, i) => Math.abs(t - s.lefts[i]))); moved = Math.max(moved, f); } catch (e) { moved = Math.max(moved, 999); } requestAnimationFrame(watch); };
       requestAnimationFrame(watch);
       const typed = ' And more.';
       for (let i = 0; i < typed.length; i++) { const end = cm.state.doc.line(3).to; cm.dispatch({ changes: { from: end, insert: typed[i] }, selection: { anchor: end + 1 }, userEvent: 'input.type' }); await sleep(45); }

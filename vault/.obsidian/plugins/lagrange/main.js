@@ -3842,13 +3842,14 @@ function createPen(app, settings) {
   /* Where the character at pos stands: {x, top, bottom, baseline} on the sheet, or null if it is not drawn (off
      screen). The baseline is found from the font's own ascent and descent, which is what the character's box is. */
   const charBox = (L, view, pos) => {
-    const c = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
+    let c = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
     if (!c) return null;
     let ratio = 0.8;
     try {
       const at = view.domAtPos(pos);
       const el = at.node.nodeType === 1 ? at.node : at.node.parentElement;
       const win = el.ownerDocument.defaultView, cs = win.getComputedStyle(el);
+      c = onItsLine(c, pos < view.state.doc.length ? view.coordsAtPos(pos + 1, 1) : null, parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 16) * 1.5);
       const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
       // (a font is measured once: this is asked for every pen in every frame)
       const known = charBox.fonts || (charBox.fonts = new Map());
@@ -3864,6 +3865,47 @@ function createPen(app, settings) {
     } catch (e) { /* the usual proportion */ }
     const o = org(L);
     return { x: c.left - o.x, top: c.top - o.y, bottom: c.bottom - o.y, baseline: c.top - o.y + (c.bottom - c.top) * ratio };
+  };
+  /* An initial counts as a letter of the line it opens. Scriptorium sets the first letter of a chapter's opening
+     paragraph as a drop cap, in Live Preview too: three lines deep (its box is far taller than a line), or not
+     drawn at all where a picture stands for it (its box has no height). The pen writes words on the lines of the
+     text, so such a letter is given the height of the letter after it (next), and keeps its own left edge. */
+  const onItsLine = (c, next, lineHeight) => {
+    const h = c.bottom - c.top;
+    if (!next || !(next.bottom > next.top) || (h <= lineHeight * 1.8 && h >= lineHeight * 0.3)) return c;
+    return next.bottom - next.top > lineHeight * 1.8 ? c : { left: c.left, right: c.right, top: next.top, bottom: next.bottom };
+  };
+  /* The initial that the text at pos stands beside, if it does: the lines beside a drop cap (a letter three lines
+     deep, or a picture in its place) begin after it, and so must the lines of the handwriting. → {right, bottom,
+     own} on the sheet (where those lines begin; where the initial ends; own, whether the text at pos begins with
+     the initial itself, and so begins at the margin), or null: there is none, or the text stands below it. first
+     is the charBox of pos. */
+  const besideInitial = (L, view, pos, first) => {
+    try {
+      const at = view.domAtPos(pos), el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
+      if (!el || !el.classList.contains('scriptorium-opening')) return null;
+      const win = L.win, o = org(L), px = v => parseFloat(v) || 0;
+      const picture = win.getComputedStyle(el, '::before'), letter = win.getComputedStyle(el, '::first-letter');
+      let right = 0, bottom = 0;
+      if (picture.content !== 'none' && picture.content !== 'normal' && picture.float === 'left') {
+        const box = el.getBoundingClientRect(), cs = win.getComputedStyle(el);
+        right = box.left + px(cs.paddingLeft) + px(picture.marginLeft) + px(picture.width) + px(picture.marginRight);
+        bottom = box.top + px(cs.paddingTop) + px(picture.marginTop) + px(picture.height) + px(picture.marginBottom);
+      } else if (letter.float === 'left') {
+        const line = view.state.doc.lineAt(pos), tall = px(win.getComputedStyle(el).lineHeight) * 1.8;
+        let cap = null, capAt = -1;
+        for (let p = line.from; p < Math.min(line.to, line.from + 8) && !cap; p++) {
+          const c = view.coordsAtPos(p, 1);
+          if (c && c.bottom - c.top > tall) { cap = c; capAt = p; }
+        }
+        if (!cap) return null;
+        right = cap.right + px(letter.marginRight);
+        bottom = cap.bottom + px(letter.marginBottom);
+        if (pos <= capAt) return { right: right - o.x, bottom: bottom - o.y, own: true };
+      } else return null;
+      right -= o.x; bottom -= o.y;
+      return first.top < bottom - 2 && first.x >= right - 2 ? { right, bottom, own: false } : null;
+    } catch (e) { return null; }
   };
   /* The text column at pos: the left and right edges (on the sheet) between which the note's line wraps, and the
      height of its lines. */
@@ -3888,6 +3930,11 @@ function createPen(app, settings) {
       const c = /\S/.test(doc.sliceString(p, p + 1)) ? view.coordsAtPos(p, 1) : null;
       mids.push(c ? (c.top + c.bottom) / 2 : null);
       at.push(c);
+    }
+    for (let i = 0; i + 1 < at.length; i++) {
+      if (!at[i] || !at[i + 1]) continue;
+      const c = onItsLine(at[i], at[i + 1], lineHeight);
+      if (c !== at[i]) { at[i] = c; mids[i] = (c.top + c.bottom) / 2; }
     }
     const starts = lineStarts(mids, lineHeight * 0.5), rows = [];
     starts.forEach((s, n) => {
@@ -4350,7 +4397,15 @@ function createPen(app, settings) {
               hand.style.lineHeight = `${col.lineHeight.toFixed(2)}px`;
               hand.style.left = `${col.left.toFixed(2)}px`;
               hand.style.width = `${(col.right - col.left).toFixed(2)}px`;
-              hand.style.textIndent = `${Math.max(0, first.x - col.left).toFixed(2)}px`;
+              // Beside a drop cap the lines begin after it: a float of the initial's width and depth holds its place
+              // (from the second line on, where the text written is the initial's own paragraph from its first letter).
+              const cap = rows.length ? null : besideInitial(L, view, at.start, first);
+              const beside = cap ? Math.max(0, cap.right - col.left) : 0, under = cap && cap.own ? col.lineHeight : 0;
+              hand.classList.toggle('is-beside-initial', beside > 0);
+              hand.style.setProperty('--lagrange-pen-beside', `${beside.toFixed(2)}px`);
+              hand.style.setProperty('--lagrange-pen-beside-from', `${under.toFixed(2)}px`);
+              hand.style.setProperty('--lagrange-pen-beside-deep', '1px');
+              hand.style.textIndent = `${Math.max(0, first.x - col.left - (under ? 0 : beside)).toFixed(2)}px`;
               hand.style.whiteSpace = rows.length ? 'nowrap' : '';
               for (const lead of leads) {
                 const now = charBox(L, view, at.start + lead.row.off);
@@ -4360,6 +4415,7 @@ function createPen(app, settings) {
               hand.style.top = '0px';
               const base = hand.firstChild.getBoundingClientRect().bottom - hand.getBoundingClientRect().top;
               hand.style.top = `${(first.baseline - base).toFixed(2)}px`;
+              if (beside) hand.style.setProperty('--lagrange-pen-beside-deep', `${Math.max(1, cap.bottom - (first.baseline - base) - under).toFixed(2)}px`);
             };
             L.sheet.appendChild(hand);
             lay();

@@ -991,6 +991,14 @@ test('drop caps in Live Preview: aligned text has none unless it asks, a standin
   assert.deepEqual(openings(text).map(o => [o.line, o.standing]), [[11, false]], 'the first paragraph that is not aligned');
   const asked = ['## Verse', '', ...block('center dropcap', ...VERSE2), 'The prose after it.'].join('\n');
   assert.deepEqual(openings(asked).map(o => [o.line, o.standing, o.text]), [[3, true, VERSE2.join('\n')]], 'the line after the marker, and not the paragraph after the block');
+  // an initial that is a word by itself: the space after it is marked (Reading view sets none at the head of the line)
+  const gap = line => openings(`## Two\n\n${line}`).map(o => o.gap);
+  assert.deepEqual(gap('A body at rest stays at rest.'), [[1, 2]]);
+  assert.deepEqual(gap('“I” is a word by itself.'), [[3, 4]]);
+  assert.deepEqual(gap('**A** body, in bold.'), [[5, 6]]);
+  assert.deepEqual(gap('At rest a body stays.'), [null]);
+  assert.deepEqual(gap('A'), [null]);
+  assert.deepEqual(gap('::: center dropcap\nA body at rest\n:::'), [null], 'beside a standing initial the space is a space');
   const note = ['---', 'align: center', '---', '## Verse', '', ...VERSE2, '', 'More.'].join('\n');
   assert.deepEqual(openLines(note), [], 'a note that is centred as a whole');
   assert.deepEqual(openings(note.replace('align: center', 'align: center\ndropcap-aligned: true')).map(o => [o.line, o.standing]), [[6, true]]);
