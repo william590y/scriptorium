@@ -130,6 +130,7 @@ try {
             Write-Host ($plugin.Name + ' added (from its own release on GitHub).')
         } catch {
             $diagramMissing += $plugin.Name
+            Write-Host ($plugin.Name + ' could not be added: ' + $_.Exception.Message)
         }
     }
     # ---- end of the diagram plugins ----

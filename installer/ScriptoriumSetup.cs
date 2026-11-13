@@ -3066,7 +3066,7 @@ namespace ScriptoriumSetup
     {
         readonly TextBox pathBox = new TextBox();
         readonly InkButton browse = new InkButton("Browse…", false);
-        readonly InkCheck fontsBox = new InkCheck(), obsidianBox = new InkCheck(), longformBox = new InkCheck(), openBox = new InkCheck();
+        readonly InkCheck fontsBox = new InkCheck(), obsidianBox = new InkCheck(), longformBox = new InkCheck(), diagramsBox = new InkCheck(), openBox = new InkCheck();
         readonly InkProgress bar = new InkProgress();
         readonly InkLabel title, tagline, intro, folderLabel, folderHint, status;
         readonly InkLog details = new InkLog();
@@ -3119,6 +3119,7 @@ namespace ScriptoriumSetup
             ShowInstalled(FontsOffer(), ObsidianInstalled());
             fontsBox.Name = "fonts"; obsidianBox.Name = "obsidian"; longformBox.Name = "longform"; openBox.Name = "open";
             longformBox.Text = "Download the Longform plugin from its official release"; longformBox.Checked = true;
+            diagramsBox.Name = "diagrams"; diagramsBox.Text = "Download the TikZJax and Excalidraw plugins, for diagrams"; diagramsBox.Checked = true;
             openBox.Text = OpenNew; openBox.Checked = true;
 
             installButton.Name = "install"; closeButton.Name = "close";
@@ -3127,10 +3128,10 @@ namespace ScriptoriumSetup
             closeButton.TextChanged += (s, e) => LayoutButtons();
             AcceptButton = installButton; CancelButton = closeButton;
 
-            Control[] order = { pathBox, browse, fontsBox, obsidianBox, longformBox, openBox, installButton, closeButton };
+            Control[] order = { pathBox, browse, fontsBox, obsidianBox, longformBox, diagramsBox, openBox, installButton, closeButton };
             for (int i = 0; i < order.Length; i++) order[i].TabIndex = i;
             Controls.AddRange(new Control[] { title, tagline, intro, folderLabel, pathBox, browse, folderHint,
-                                              fontsBox, obsidianBox, longformBox, openBox, bar, status, details, installButton, closeButton });
+                                              fontsBox, obsidianBox, longformBox, diagramsBox, openBox, bar, status, details, installButton, closeButton });
             LayoutPage();
             FormClosing += OnClosing;
             ResumeLayout(false);
@@ -3262,7 +3263,7 @@ namespace ScriptoriumSetup
             y += bh + 2 * s;
             Place(folderHint, PageMargin, ref y, cw, 9);
 
-            foreach (InkCheck c in new[] { fontsBox, obsidianBox, longformBox, openBox })
+            foreach (InkCheck c in new[] { fontsBox, obsidianBox, longformBox, diagramsBox, openBox })
             {
                 c.SetBounds(Ink.R(PageMargin - 1.5f), (int)Math.Round(y), c.PreferredWidth(), Ink.R(27));
                 y += 27 * s;
@@ -3424,9 +3425,9 @@ namespace ScriptoriumSetup
                 using (var ask = new ConfirmForm(dest)) if (ask.ShowDialog(this) != DialogResult.OK) return;
             }
             bool fonts = fontsBox.Checked && fontsBox.Enabled, obsidian = obsidianBox.Checked && obsidianBox.Enabled,
-                 longform = longformBox.Checked, open = openBox.Checked;
+                 longform = longformBox.Checked, diagrams = diagramsBox.Checked, open = openBox.Checked;
             Busy();
-            worker = new Thread(() => Run(dest, t, fonts, obsidian, longform, open)) { IsBackground = true };
+            worker = new Thread(() => Run(dest, t, fonts, obsidian, longform, diagrams, open)) { IsBackground = true };
             worker.SetApartmentState(ApartmentState.STA);
             worker.Start();
         }
@@ -3434,11 +3435,11 @@ namespace ScriptoriumSetup
         internal void Busy()
         {
             detect.Stop();
-            foreach (Control c in new Control[] { pathBox, browse, fontsBox, obsidianBox, longformBox, openBox, installButton }) c.Enabled = false;
+            foreach (Control c in new Control[] { pathBox, browse, fontsBox, obsidianBox, longformBox, diagramsBox, openBox, installButton }) c.Enabled = false;
             details.Clear();
         }
 
-        void Run(string dest, Vaults.Target target, bool fonts, bool obsidian, bool longform, bool open)
+        void Run(string dest, Vaults.Target target, bool fonts, bool obsidian, bool longform, bool diagrams, bool open)
         {
             string temp = Path.Combine(Path.GetTempPath(), "scriptorium-setup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(temp);
@@ -3482,7 +3483,7 @@ namespace ScriptoriumSetup
                     }
                 }
                 cancel.Token.ThrowIfCancellationRequested();
-                if (target == Vaults.Target.Vault || target == Vaults.Target.Folder) { UpdateVault(dest, temp, longform, open, exe, target == Vaults.Target.Folder); return; }
+                if (target == Vaults.Target.Vault || target == Vaults.Target.Folder) { UpdateVault(dest, temp, longform, diagrams, open, exe, target == Vaults.Target.Folder); return; }
                 Status("Creating the vault …"); Progress(0, true);
                 Installer.ExtractVault(dest, Log, target == Vaults.Target.Empty);
                 if (longform)
@@ -3501,7 +3502,7 @@ namespace ScriptoriumSetup
                     }
                 }
                 // (the vault exists now: a diagram plugin that cannot be downloaded does not fail or undo the install)
-                DiagramPlugins.Install(dest, temp, Log, (text, percent) => { Status(text); Progress(percent, false); }, cancel.Token);
+                if (diagrams) DiagramPlugins.Install(dest, temp, Log, (text, percent) => { Status(text); Progress(percent, false); }, cancel.Token);
                 Progress(100, false);
                 AutoOpen.Outcome opened = open ? OpenNewVault(dest, exe) : null;
                 Progress(100, false);
@@ -3586,7 +3587,7 @@ namespace ScriptoriumSetup
         // Update: Longform is downloaded first (if ticked), then the vault is updated in one step, backed up and undone on
         // failure (see Vaults.Update). setup: the folder is not a Scriptorium vault yet, and is set up as one (see
         // Vaults.SetUp); it is then opened like a new vault, with its plugins turned on.
-        void UpdateVault(string dest, string temp, bool longform, bool open, string exe, bool setup)
+        void UpdateVault(string dest, string temp, bool longform, bool diagrams, bool open, string exe, bool setup)
         {
             string longformFiles = null;
             if (longform)
@@ -3609,7 +3610,7 @@ namespace ScriptoriumSetup
             Vaults.Report report = setup ? Vaults.SetUp(dest, longformFiles, line => Log(line.TrimStart()))
                                          : Vaults.Update(dest, longformFiles, line => Log(line));
             // (the vault is updated, or set up, now: the diagram plugins cannot fail or undo that)
-            DiagramPlugins.Install(dest, temp, Log, (text, percent) => { Status(text); Progress(percent, false); }, cancel.Token);
+            if (diagrams) DiagramPlugins.Install(dest, temp, Log, (text, percent) => { Status(text); Progress(percent, false); }, cancel.Token);
             Progress(100, false);
             if (setup)
             {
@@ -3663,7 +3664,7 @@ namespace ScriptoriumSetup
         void ShowRecord(bool on)
         {
             finished = on;
-            foreach (InkCheck c in new[] { fontsBox, obsidianBox, longformBox, openBox }) c.Record = on;
+            foreach (InkCheck c in new[] { fontsBox, obsidianBox, longformBox, diagramsBox, openBox }) c.Record = on;
             Invalidate();
         }
 
@@ -3671,7 +3672,7 @@ namespace ScriptoriumSetup
         {
             ShowRecord(false);
             Progress(0, false);
-            foreach (Control c in new Control[] { pathBox, browse, longformBox, openBox, installButton }) c.Enabled = true;
+            foreach (Control c in new Control[] { pathBox, browse, longformBox, diagramsBox, openBox, installButton }) c.Enabled = true;
             string offer = FontsOffer();   // after an install or a repair the fonts are looked at again
             fontsBox.Text = offer ?? "EB Garamond and Cormorant Garamond are already installed";
             fontsBox.Enabled = offer != null; fontsBox.Checked = offer != null;
@@ -3722,14 +3723,12 @@ namespace ScriptoriumSetup
                 question = "Set up Scriptorium in this vault?";
                 yes.Text = "Set up";
                 says = plan.Adds + plan.Replaces == 0
-                    ? "Scriptorium is already set up here: none of its files will be changed."
+                    ? "Scriptorium is already set up here: nothing will be changed."
                     : "Your notes are not touched. In its .obsidian folder, " + plan.Adds + (plan.Adds == 1 ? " file is" : " files are") + " added and " +
                       plan.Replaces + " replaced or merged: Scriptorium's plugins, snippet and theme are added, your own plugins and " +
                       "snippets stay on, and the theme becomes Typewriter. The folder as it is now is first copied to " +
                       ".obsidian\\scriptorium-backup-….";
             }
-            if (!DiagramPlugins.Off)
-                says += " The TikZJax and Excalidraw plugins, which Lagrange draws diagrams with, are downloaded from their own releases if the vault does not have them.";
             heading = new InkLabel(question, Typefaces.Make(Typefaces.Display, 31f, FontStyle.Regular), Ink.Red, false) { Above = 0.9f, Below = 0.28f };
             body = new InkLabel(says, Typefaces.Make(Typefaces.Text, 16.5f, FontStyle.Regular), Ink.Black, false) { Leading = 1.32f };
             where = new InkLabel(vault, Typefaces.Make(Typefaces.Text, 15.5f, FontStyle.Italic), Ink.Muted, false) { MaxLines = 2 };
