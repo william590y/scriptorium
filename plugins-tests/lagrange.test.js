@@ -1182,6 +1182,154 @@ test('penLines and penPace: three lines of a long edit, fewer late in a long run
   assert.equal(L.sanitizeSettings({ penLines: 2.5 }).penLines, 3);
 });
 
+test('penLanes: edits that stand apart on the page are written at once, each by a pen; edits too near one another wait for the pen that is there', () => {
+  const LH = 24, GAP = Math.max(L.PEN_GAP_LINES * LH, L.PEN_GAP_PX);
+  const page = { top: 100, bottom: 700, lineHeight: LH, width: 600 };                 // room for three pens
+  const e = (top, para, o) => Object.assign({ top, bottom: top + LH, para, paraEnd: para, grow: 0 }, o);
+  const none = { lanes: [], count: 0 };
+  const lanes = (edits, pens, pg) => L.penLanes(edits, pg || page, { pens: pens == null ? 3 : pens });
+  // three edits in three paragraphs, well apart: a pen each, from the top of the page down
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)]), { lanes: [[0], [1], [2]], count: 3 });
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)]), { lanes: [[0], [1]], count: 2 });
+  // one pen is the pen as it always was: no lanes
+  assert.deepEqual(lanes([e(150, 3)]), none);
+  assert.deepEqual(lanes([]), none);
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)], 1), none, '“Several pens at once” is off');
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)], 0), none);
+  assert.deepEqual(L.penLanes([e(150, 3), e(320, 5)], page), none, 'no setting, no pens');
+  assert.deepEqual(L.penLanes([e(150, 3), e(320, 5)], null, { pens: 3 }), none, 'no page');
+  // “Pens at most”: the edits past the last pen's wait for the next round
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(500, 7)], 2), { lanes: [[0], [1]], count: 2 });
+  // two edits in one paragraph go to one pen, however far apart they are in it; alone, they are no lanes at all
+  assert.deepEqual(lanes([e(150, 3), e(400, 3)]), none);
+  assert.deepEqual(lanes([e(150, 3), e(400, 3), e(600, 9)]), { lanes: [[0, 1], [2]], count: 3 });
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(420, 5)]), { lanes: [[0], [1, 2]], count: 3 });
+  // an edit that runs over several paragraphs holds them all
+  assert.deepEqual(lanes([e(150, 3, { paraEnd: 5, bottom: 150 + 4 * LH }), e(400, 5), e(600, 9)]), { lanes: [[0, 1], [2]], count: 3 });
+  // different paragraphs, but fewer than PEN_GAP_LINES clear lines between them: one pen, the second after the first
+  assert.equal(L.PEN_GAP_LINES, 2.5);
+  assert.equal(L.PEN_GAP_PX, 76);
+  assert.equal(GAP, 76, 'in type as small as this the gap is the pen’s own height: more than two and a half lines');
+  const below = 150 + LH;                                                             // where the first edit ends
+  assert.deepEqual(lanes([e(150, 3), e(below + GAP - 1, 5)]), none);
+  assert.deepEqual(lanes([e(150, 3), e(below + GAP, 5)]), { lanes: [[0], [1]], count: 2 }, 'exactly that many clear lines will do');
+  assert.deepEqual(lanes([e(150, 3), e(below + LH, 4), e(500, 7)]), { lanes: [[0, 1], [2]], count: 3 }, 'the very next line: it waits for the pen above it');
+  // the distance is counted from where the lane's words end, whichever of its edits reaches lowest
+  assert.deepEqual(lanes([e(150, 3, { bottom: 150 + 5 * LH }), e(180, 3), e(150 + 5 * LH + GAP - 1, 5), e(600, 9)]), { lanes: [[0, 1, 2], [3]], count: 4 });
+  // only what is in view: the first edit that is not ends the list, and it and all after it wait
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(800, 7)]), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3), e(800, 5), e(500, 7)]), none);
+  assert.deepEqual(lanes([e(50, 3), e(320, 5), e(500, 7)]), none, 'the first is above the page');
+  assert.deepEqual(lanes([e(150, 3), e(700 - LH + 1, 5)]), none, 'the second ends below the page');
+  assert.deepEqual(lanes([e(150, 3), e(700 - LH, 5)]), { lanes: [[0], [1]], count: 2 });
+  // an edit that cannot be measured (off screen, in a table) ends the list too
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), null, e(600, 9)]), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3), null, e(600, 9)]), none);
+  assert.deepEqual(lanes([null, e(320, 5), e(600, 9)]), none);
+  // an edit pushes down what stands below it: text that would leave the page that way waits
+  assert.deepEqual(lanes([e(150, 3, { grow: 4 * LH }), e(320, 5), e(600, 9)]), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3, { grow: 2 * LH }), e(320, 5), e(600, 9)]), { lanes: [[0], [1], [2]], count: 3 });
+  assert.deepEqual(lanes([e(150, 3), e(640, 5, { grow: 3 * LH })]), none, 'nor may its own text leave the page as it grows');
+  assert.deepEqual(lanes([e(150, 3, { grow: -500 }), e(320, 5)]), { lanes: [[0], [1]], count: 2 }, 'text that shrinks pushes nothing');
+  // never more pens than one for every PEN_LANE_PX of the page, nor than PEN_MAX
+  assert.equal(L.PEN_LANE_PX, 180);
+  assert.equal(L.PEN_MAX, 4);
+  const four = [e(150, 3), e(320, 5), e(500, 7), e(660, 9), e(820, 11)];
+  const tall = { top: 100, bottom: 100 + 4 * L.PEN_LANE_PX + 100, lineHeight: LH, width: 600 };
+  assert.deepEqual(lanes(four, 4, tall), { lanes: [[0], [1], [2], [3]], count: 4 });
+  assert.deepEqual(lanes(four, 9, tall), { lanes: [[0], [1], [2], [3]], count: 4 });
+  assert.deepEqual(lanes(four, 3, tall), { lanes: [[0], [1], [2]], count: 3 }, 'four only when the setting says so');
+  assert.deepEqual(lanes(four, 4), { lanes: [[0], [1], [2]], count: 3 }, 'and only on a tall page');
+  assert.deepEqual(lanes(four, 4, { top: 100, bottom: 100 + 2 * L.PEN_LANE_PX, lineHeight: LH, width: 600 }), { lanes: [[0], [1]], count: 2 });
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)], 3, { top: 100, bottom: 100 + 2 * L.PEN_LANE_PX - 1, lineHeight: LH, width: 600 }), none, 'a short pane: one pen');
+  // when every pen has its lane, an edit near the last one still joins it; the next one apart waits
+  assert.deepEqual(lanes([e(150, 3), e(320, 5), e(340, 5), e(600, 9)], 2), { lanes: [[0], [1, 2]], count: 3 });
+  // a narrow column is written by one pen
+  assert.equal(L.PEN_MIN_WIDTH, 440);
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)], 3, Object.assign({}, page, { width: L.PEN_MIN_WIDTH - 1 })), none);
+  assert.deepEqual(lanes([e(150, 3), e(320, 5)], 3, Object.assign({}, page, { width: L.PEN_MIN_WIDTH })), { lanes: [[0], [1]], count: 2 });
+  // the gap is counted in the page's own lines
+  assert.deepEqual(lanes([e(150, 3), e(150 + LH + 2.5 * 40 - 1, 5)], 3, Object.assign({}, page, { lineHeight: 40 })), none);
+  assert.deepEqual(lanes([e(150, 3), e(150 + LH + 2.5 * 40, 5)], 3, Object.assign({}, page, { lineHeight: 40 })), { lanes: [[0], [1]], count: 2 });
+  // pure: what it is given is left as it was
+  const given = [e(150, 3), e(320, 5), e(500, 7)], copy = JSON.stringify(given);
+  lanes(given);
+  assert.equal(JSON.stringify(given), copy);
+  // every edit is in exactly one lane, in order, and the lanes go down the page
+  const many = lanes([e(150, 3), e(160, 3), e(320, 5), e(330, 6), e(520, 9), e(530, 9)]);
+  assert.deepEqual(many, { lanes: [[0, 1], [2, 3], [4, 5]], count: 6 });
+  assert.deepEqual(many.lanes.flat(), [0, 1, 2, 3, 4, 5]);
+});
+
+test('textLines: about how many lines a piece of text takes, for the pens’ planning', () => {
+  // type of 20 px: about 9 px a character
+  assert.equal(L.textLines('', 0, 460, 20), 1);
+  assert.equal(L.textLines('A short line.', 0, 460, 20), 1);
+  assert.equal(L.textLines('x'.repeat(51), 0, 460, 20), 1);
+  assert.equal(L.textLines('x'.repeat(52), 0, 460, 20), 2);
+  assert.equal(L.textLines('x'.repeat(100), 0, 460, 20), 2);
+  assert.equal(L.textLines('x'.repeat(100), 100, 460, 20), 3, 'set from part of the way into its first line');
+  assert.equal(L.textLines('one\n\nthree', 0, 460, 20), 3, 'a line of the note is a line of the page, an empty one too');
+  assert.equal(L.textLines('one\n' + 'x'.repeat(60), 400, 460, 20), 3, 'the indent is the first line’s alone');
+  assert.equal(L.textLines(null, 0, 460, 20), 1);
+  assert.equal(L.textLines('x'.repeat(100), 0, 0, 20), Math.ceil(100 / 8), 'a column with no width is taken as eight characters wide');
+});
+
+test('penRoom: how many lines the pen needs under an edit’s start (an edit low on the screen with less room than that is brought to the middle first)', () => {
+  const W = 460, F = 20;                                 // about 51 characters to a line
+  assert.equal(L.penRoom('Short sentence here.', 3, W, F), 1);
+  assert.equal(L.penRoom('x'.repeat(120), 3, W, F), 3, 'three lines of text');
+  assert.equal(L.penRoom('x'.repeat(600), 3, W, F), 3, 'a long text: only the lines the pen writes');
+  assert.equal(L.penRoom('x'.repeat(600), 5, W, F), 5);
+  assert.equal(L.penRoom('x'.repeat(600), undefined, W, F), 3);
+  assert.equal(L.penRoom('\n\n' + 'x'.repeat(600), 3, W, F), 5, 'and the empty lines it opens with');
+  const code = '\n\nThe distance, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```';
+  assert.equal(L.penRoom(code, 3, W, F), 8, 'a code block: every line of it (two empty lines, a sentence, an empty line, the fence and its code)');
+  assert.equal(L.penRoom('A span of `code` in a sentence.', 3, W, F), 1, 'a code span is in its line');
+  const long = '```js\n' + Array.from({ length: 40 }, (_, i) => `line${i}();`).join('\n') + '\n```';
+  assert.equal(L.penRoom(long, 3, W, F), 3 + 8, 'a long block: no more than the pen types of it');
+  assert.equal(L.penRoom('Force is the rate of change of momentum:\n\n$$F = \\frac{dp}{dt}$$', 3, W, F), 3);
+  assert.equal(L.penRoom('\n\n$$\n\\int_0^\\infty e^{-x^2}\\,dx\n$$\n\nwhich is the sum of all of it, and of ' + 'x'.repeat(300), 3, W, F), 8, 'a displayed equation takes room of its own');
+  assert.equal(L.penRoom('', 3, W, F), 1);
+  assert.equal(L.penRoom(null, 3, W, F), 1);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /return c\.top \+ penRoom\(text, settings && settings\.penLines, box\.width, size\) \* line <= s\.bottom;/);
+});
+
+test('Several pens at once: on by default, three pens at most, both settings; the pen says how many it has, and each pen shows its own text', () => {
+  assert.equal(L.DEFAULT_SETTINGS.severalPens, true);
+  assert.equal(L.DEFAULT_SETTINGS.maxPens, 3);
+  assert.equal(L.sanitizeSettings({ severalPens: false }).severalPens, false);
+  assert.equal(L.sanitizeSettings({ severalPens: 'no' }).severalPens, true);
+  for (const n of [2, 3, 4]) assert.equal(L.sanitizeSettings({ maxPens: n }).maxPens, n);
+  for (const n of [0, 1, 5, 2.5, '3', null]) assert.equal(L.sanitizeSettings({ maxPens: n }).maxPens, 3, String(n));
+  assert.ok(L.PEN_STAGGER_MS >= 150 && L.PEN_STAGGER_MS <= 300, 'the pens set out a moment after one another');
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /setName\('Several pens at once'\)/);
+  assert.match(js, /setName\('Pens at most'\)/);
+  assert.match(js, /const showPens = valued\(pens, s\.maxPens/, 'the slider’s value is shown beside it');
+  assert.match(js, /pens: this\.settings\.severalPens \? this\.settings\.maxPens : 1/, 'the run is told how many pens it may use');
+  assert.match(js, /pens: PEN_MAX,/, 'and the pen says how many it has');
+  assert.match(js, /opts\.pens > 1 && opts\.pen\.pens > 1 && !prefersReducedMotion\(win\)/, 'one pen with reduced motion, and with a pen that writes one edit at a time');
+  // every wait and every trail of a sheet runs from one animation frame, and the sheet is measured once in it
+  const pen = js.slice(js.indexOf('==== LAGRANGE PEN (replaceable) ===='), js.indexOf('==== END LAGRANGE PEN ===='));
+  assert.equal(pen.split('requestAnimationFrame(').length - 1, 2, 'the pen asks for a frame in one place only (runFrame, and onFrame which starts it)');
+  assert.match(pen, /if \(S\.inFrame && S\.o\) return S\.o;/);
+  // a pen's own change moves the places the other pens hold, and spoils none of them
+  assert.match(pen, /if \(p\.view === update\.view && p !== owner\) p\.map\(tr\.changes, true\)/);
+  // finish() ends every edit being written
+  assert.match(pen, /for \(const me of all\) \{ try \{ me\.finish\(\); \}/);
+  // each pen's unwritten text is its own, and shows when that pen is done
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  for (let i = 0; i < L.PEN_MAX; i++) {
+    assert.ok(css.includes(`.lagrange-pen-revealing-${i} .lagrange-pen-unwritten.lagrange-pen-of-${i}`), `pen ${i}`);
+    assert.ok(css.includes(`.cm-editor:not(.lagrange-pen-revealing-${i}) .lagrange-pen-of-${i}`), `pen ${i}: the boxes of its lines`);
+  }
+  assert.ok(!css.includes(`lagrange-pen-of-${L.PEN_MAX}`) && !css.includes(`lagrange-pen-revealing-${L.PEN_MAX}`));
+  assert.doesNotMatch(css, /\.lagrange-pen-revealing[ ,{]/, 'no rule shows every pen’s text at once');
+  assert.doesNotMatch(js, /'lagrange-pen-revealing'/);
+});
+
 test('trailBands: the newest ink is the darkest and widest, old ink is dropped, and the strokes join up', () => {
   assert.deepEqual(L.trailBands([], 1000, 500, 5), []);
   assert.deepEqual(L.trailBands([{ x: 0, y: 0, t: 990 }], 1000, 500, 5), []);
@@ -1637,7 +1785,7 @@ test('Editing while the pen writes: off by default, a setting, and a run never l
   // text the pen has yet to write is unseen, and so are the boxes around it (a code block's tint, a code span's)
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   assert.match(css, /\.cm-line\.lagrange-pen-unwritten-line \{[^}]*background-color: transparent !important/);
-  assert.match(css, /span:has\(> \.lagrange-pen-unwritten\):not\(\.lagrange-pen-unwritten\) \{[^}]*background-color: transparent !important/);
+  assert.match(css, /span:has\(> \.lagrange-pen-of-3\):not\(\.lagrange-pen-unwritten\) \{[^}]*background-color: transparent !important/);
 });
 
 test('Rewind: a turn during which the writer typed is not taken for Lagrange’s alone', () => {

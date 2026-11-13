@@ -23,5 +23,7 @@
   "penSpeed": 1,
   "penTrail": true,
   "penLines": 3,
+  "severalPens": true,
+  "maxPens": 3,
   "editWhileWriting": false
 }

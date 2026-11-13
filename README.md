@@ -226,10 +226,22 @@ the rest is set down at once. An equation is drawn symbol by symbol where the no
 it comes, and code (a fenced block, or a code span) is typed on a small typewriter that takes the pen's place. The
 edits are then listed in the chat with their reasons.
 
+**Several pens.** When a request has edits that stand well apart on the page, they are written at the same time,
+each by a pen of its own: the pens come in one after another, a moment apart, each with its own trail of ink, and
+each leaves when its work is done. That happens only where it can be watched without the pens getting in each
+other's way: the edits must be in view together (the note is scrolled once to bring them there, if they fit on one
+screen), in different paragraphs, and with about three lines of the page clear between them. Edits that are closer
+than that wait for the pen that is already there and are written one after another, as before, and so is
+everything in a text column narrower than 440 px or in a pane too short for two pens. There are three pens at most
+(**Settings → Lagrange → Pens at most**, two to four, and never more than one for about every 210 px of the
+editor's height); **Several pens at once** turns it off, and then one pen writes every edit in turn. The note comes
+out the same either way, and it is still one undo step; it only takes less time.
+
 **While the pen writes.** The handwriting is on the page itself: scroll the note, resize the pane or zoom, and it
 stays on its words. When the pen has finished, the note is where you were looking; nothing scrolls. If you click in
-the note, or press a key that would change it, the pen stops at once: the rest of its edits are set down together
-(the note is exactly as it would have been, and it is still one undo step), and then your click or key takes effect.
+the note, or press a key that would change it, the pen stops at once (every pen, if several are writing): the rest
+of the edits are set down together (the note is exactly as it would have been, and it is still one undo step), and
+then your click or key takes effect.
 If you would rather write alongside it, turn on **Settings → Lagrange → Let me edit while the pen writes**: your
 typing goes in as you type, the pen carries on, and an edit whose words you have changed in the meantime is skipped
 and listed as such in the chat. **Esc** stops the pen either way (edits not yet written are not made). The chat keeps
