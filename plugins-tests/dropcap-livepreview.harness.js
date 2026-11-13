@@ -321,9 +321,10 @@
     await theme(false);
     await plugin.updateSettings({ initials: 'yinit', fancyMode: false });
     await run('no word is split across the small-capped first line: the word Reading view keeps whole is kept whole in the editor', async out => {
-      // (a long word is moved along the first line until Reading view would break it there, and keeps it whole)
+      // (a long word is moved along the first line until Reading view would break it there, and keeps it whole; the
+      // word has hyphens of its own, so that the case does not hang on the system having a hyphenation dictionary)
       for (let k = 4; k <= 16 && !out.kept; k++) {
-        const text = `The ${'old '.repeat(k)}incomprehensibilities of the natural philosophers were at first a matter of words, and afterwards of numbers, and the numbers have not made them fewer.`;
+        const text = `The ${'old '.repeat(k)}never-to-be-forgotten-or-forgiven incomprehensibilities of the natural philosophers were at first a matter of words, and afterwards of numbers, and the numbers have not made them fewer.`;
         await open(note('', '## A chapter', text, SECOND), 'reading');
         const p = readPara('The old');
         const word = p && p.querySelector('.sc-keep');
