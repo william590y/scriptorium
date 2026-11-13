@@ -654,6 +654,8 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
 .lagrange-pen-hand :is(.lagrange-pen-math, .lagrange-pen-code).is-on,
 .lagrange-pen-hand.is-done :is(.lagrange-pen-math, .lagrange-pen-code) { visibility: visible; }
 .lagrange-pen-base { display: inline-block; width: 0; height: 0; vertical-align: baseline; }
+/* The room before a line of handwriting that starts where the note starts its line (centred or right-aligned text). */
+.lagrange-pen-lead { display: inline-block; width: 0; height: 0; text-indent: 0; vertical-align: baseline; }
 /* New text the pen has yet to write: in the note, in its place, unseen; then it shows through as the handwriting fades. */
 .lagrange-pen-unwritten { opacity: 0; }
 .lagrange-pen-revealing .lagrange-pen-unwritten { opacity: 1; transition: opacity var(--lagrange-pen-reveal, 300ms) ease; }

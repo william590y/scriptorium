@@ -1655,3 +1655,46 @@ test('Undo records: one that no longer fits the editor’s text is forgotten, no
   // the handwriting's font is waited for before the hand is measured
   assert.match(js, /doc\.fonts\.load\(font\)/);
 });
+
+
+// ---------- Centred and right-aligned text (Scriptorium's "::: center" and "::: right") ----------
+
+test('every system prompt tells the model how text is centred, to centre verse always, and to ask for no drop cap there', () => {
+  const note = { title: 'Verse' }, clip = { text: 'Some text.', clipped: false, total: 10 };
+  const prompts = {
+    'chat (with the pen)': L.chatSystemPrompt(note, clip, true), 'chat (talk only)': L.chatSystemPrompt(note, clip, false),
+    'chat (no note)': L.chatSystemPrompt(null, null, true), revise: L.REVISE_SYSTEM, proofread: L.PROOFREAD_SYSTEM,
+  };
+  for (const [name, text] of Object.entries(prompts)) assert.ok(text.includes(L.ALIGN_STYLE), name);
+  const a = L.ALIGN_STYLE;
+  assert.match(a, /"::: center"/);
+  assert.match(a, /"::: right"/);
+  assert.match(a, /":::" on a line of its own/);
+  assert.match(a, /blank line before the opening marker and after the closing one/);
+  assert.match(a, /Always centre poetry and verse/);
+  assert.match(a, /epigraph/);
+  assert.match(a, /attribution or a signature[^.]*to the right with "::: right" when the writer asks/);
+  assert.match(a, /never write "dropcap" on a marker line[^.]*unless the writer asks for a drop cap/);
+  assert.match(a, /never use HTML or a callout to align text/);
+  // the proofreader is told that the markers are syntax, before it is told what to reply with
+  assert.ok(L.PROOFREAD_SYSTEM.indexOf(L.ALIGN_STYLE) < L.PROOFREAD_SYSTEM.indexOf('Reply with only a JSON array'));
+  // and the instruction is one constant, in each prompt once
+  for (const text of Object.values(prompts)) assert.equal(text.split(L.ALIGN_STYLE).length, 2);
+});
+
+test('the pen and aligned text: a marker line is no text (the pen starts after it, and never writes one)', () => {
+  for (const line of ['::: center', ':::center', '::: right', '::: centre dropcap', '::: {.center .dropcap}', ':::', '  :::: ', '::: right :::']) assert.ok(L.ALIGN_MARK.test(line), line);
+  for (const line of ['::: note', ':: center', 'a ::: center', '::: rightly', 'Tyger Tyger', '']) assert.ok(!L.ALIGN_MARK.test(line), line);
+  assert.equal(L.inkOffset('::: center\nTyger Tyger'), 11);
+  assert.equal(L.inkOffset('\n\n::: right\n— Blake\n:::'), 12);
+  assert.equal(L.inkOffset('\n:::\n\n::: right\n— Blake\n:::'), 16, 'one block is closed and another opened');
+  assert.equal(L.inkOffset('::: center\n## A heading'), 14, 'and then what opens a block, as ever');
+  assert.equal(L.inkOffset('\n:::'), 4, 'a closing marker alone: nothing to write');
+  assert.equal(L.inkOffset('::: note\ntext'), 0, 'another kind of container is text');
+  assert.equal(L.inkOffset(':::: not a marker line'), 0);
+  const show = segs => segs.map(g => (g.type === 'math' ? `<${g.source}>` : g.text)).join('');
+  assert.equal(show(L.penScript('::: center\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::', 80)), 'Tyger Tyger, burning bright, In the forests of the night;');
+  assert.equal(show(L.penScript('Prose first.\n\n::: right\n— Blake\n:::', 80)), 'Prose first. — Blake');
+  assert.equal(show(L.penScript('a ::: b', 80)), 'a ::: b', 'colons inside a line are text');
+  assert.deepEqual(L.penScript(':::', 80), []);
+});

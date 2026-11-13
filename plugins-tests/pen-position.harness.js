@@ -2,7 +2,9 @@
 // where the first letter of the new text stands in the note (left edge and baseline, within 2 px, on every frame but
 // for a reflow of at most three frames, which is counted), start
 // each further line at the left edge of the note's own line, and draw each equation that Live Preview typesets on that
-// very equation. Since 1.2.4 it also checks, in every case, that the handwriting of a line is never seen before the pen
+// very equation. Where the note centres text or sets it to the right (Scriptorium's "::: center" and "::: right": the
+// Scriptorium plugin and its snippet must be on), each line of handwriting must start where the note starts that line,
+// within 2 px, and the marker lines are never written. Since 1.2.4 it also checks, in every case, that the handwriting of a line is never seen before the pen
 // comes to it, that no letter is cut by the box that uncovers it (ascenders, descenders and swashes included), that
 // the note does not scroll when the run ends and the last text written is in view; and, in cases of their own, that
 // the handwriting stays on its text while the note is scrolled, that a click or a key in the note ends the run with
@@ -37,6 +39,11 @@
     '> [!note] A callout\n> The text of the callout goes here.',
     '| Quantity | Symbol |\n| --- | --- |\n| mass | m |\n| speed | v |',
     'The paragraph before the filler.', filler(40), 'The far paragraph, well below the fold, mentions energy once.', filler(3), 'The last paragraph of the note.',
+  ].join('\n\n') + '\n';
+  // (verse and an attribution between Scriptorium's marker lines: centred and right-aligned text)
+  const VERSE = [
+    '# Pen position check', 'A paragraph of prose stands before the verse, long enough to wrap onto a second line of the page, so that the column is plain to see.',
+    '::: center\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::', '::: right\n— William Blake\n:::', 'The paragraph after the verse.',
   ].join('\n\n') + '\n';
   const PARA = 'Energy is never lost, only moved about: what a falling stone loses in height it gains in speed, and what it gains in speed it gives up, when it lands, as heat and sound and a dent in the ground. The books balance to the last farthing, which is why the idea has outlived every theory that was built upon it, and why a perpetual motion machine is a fraud before it is switched on. Nobody has yet caught the universe cheating.';
 
@@ -82,6 +89,20 @@
     { name: 'three edits far apart: the view at the end is the view that was watched', ops: [
       { find: 'Short line here.', replace: 'Short sentence here.' }, { find: 'mentions energy once', replace: 'speaks of energy only the one time' }, { append: 'An appended closing remark.' }] },
     { name: 'Reading view: equation', mode: 'reading', ops: [{ find: 'Momentum is conserved.', replace: 'Momentum is conserved: $p = mv$.' }], math: 1 },
+    // (aligned: each line of handwriting starts where the note starts that line; the first of them is set as said)
+    { name: 'centred verse appended (three lines, each where the note sets it)', note: VERSE, aligned: 'center', lines: 3,
+      ops: [{ append: '::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\nIn what distant deeps or skies.\n:::' }] },
+    { name: 'two centred stanzas appended (a blank line between them)', note: VERSE, aligned: 'center', lines: 3,
+      ops: [{ append: '::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\n\nIn what distant deeps or skies.\n:::' }] },
+    { name: 'a long centred line that wraps', note: VERSE, aligned: 'center', lines: 2,
+      ops: [{ append: '::: center\nWhen the stars threw down their spears and watered heaven with their tears, did he smile his work to see, did he who made the Lamb make thee?\n:::' }] },
+    { name: 'a line set to the right appended (an attribution)', note: VERSE, aligned: 'right', ops: [{ append: '::: right\n— from *Songs of Experience*, 1794\n:::' }] },
+    { name: 'a line added to a centred block', note: VERSE, aligned: 'center', ops: [{ insert_after: 'In the forests of the night;', text: '\nWhat immortal hand or eye,' }] },
+    { name: 'a line rewritten in a right-aligned block', note: VERSE, aligned: 'right', ops: [{ find: '— William Blake', replace: '— William Blake, in the year 1794' }] },
+    { name: 'prose, then centred verse, in one edit', note: VERSE, aligned: 'left', lines: 3,
+      ops: [{ append: 'A sentence of prose comes first.\n\n::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\n:::' }] },
+    { name: 'Source mode: centred verse appended (not aligned there; the markers are not written)', mode: 'source', note: VERSE,
+      ops: [{ append: '::: center\nWhat immortal hand or eye,\nCould frame thy fearful symmetry?\n:::' }] },
   ];
 
   const path = 'Pen position check.md';
@@ -121,11 +142,30 @@
     }
     return { x, baseline: base.getBoundingClientRect().bottom };
   };
-  // The left edge of each line of handwriting after the first.
+  // The left edge of each line the note sets its text in, from the character at pos on: `n` lines at most, measured
+  // from the note's own lines in the page (the lines that only mark an alignment are passed over).
+  const noteLines = (cm, pos, n) => {
+    const out = [], at = cm.domAtPos(pos);
+    let el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line'), first = true;
+    for (; el && out.length < n; el = el.nextElementSibling, first = false) {
+      if (!el.classList.contains('cm-line') || /^:{3,}/.test(el.textContent.trim()) || !el.textContent.trim()) continue;
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      if (first) r.setStart(at.node, at.offset);
+      const rects = Array.from(r.getClientRects()).filter(q => q.width >= 1).sort((a, b) => a.top - b.top || a.left - b.left);
+      let top = null;
+      for (const q of rects) {
+        if (top === null || q.top - top > q.height * 0.6) { out.push(q.left); top = q.top; }
+        else out[out.length - 1] = Math.min(out[out.length - 1], q.left);
+      }
+    }
+    return out.slice(0, n);
+  };
+  // The left edge of each line of handwriting, the first included.
   const handLines = hand => {
     const lefts = new Map();
     for (const span of hand.children) {
-      if (span.classList.contains('lagrange-pen-base')) continue;
+      if (span.classList.contains('lagrange-pen-base') || span.classList.contains('lagrange-pen-lead')) continue;
       for (const r of span.getClientRects()) {
         if (r.width < 1) continue;
         const key = Math.round((r.top + r.bottom) / 2 / 4);
@@ -156,7 +196,7 @@
       // where each edit's first written letter will be, in the document as it will be once the edits before it are made
       let shift = 0;
       const starts = located.located.map(e => { const s = e.from + shift + L.inkOffset(e.replace); shift += e.replace.length - (e.to - e.from); return s; });
-      const seen = { frames: 0, dx: 0, dy: 0, lineDx: 0, lines: 0, hands: 0, drawn: new Map(), unmatchedFrames: 0, early: 0, clipped: 0, clipWhy: '', segs: 0, scrolled: 0, tops: [], inked: new WeakSet(), cutWord: '' };
+      const seen = { frames: 0, dx: 0, dy: 0, lineDx: 0, lines: 0, hands: 0, set: '', rows: 0, markers: 0, drawn: new Map(), unmatchedFrames: 0, early: 0, clipped: 0, clipWhy: '', segs: 0, scrolled: 0, tops: [], inked: new WeakSet(), cutWord: '' };
       // The ink of one line of handwriting (a .lagrange-pen-seg), from the font's own measure of its glyphs, against
       // the box that uncovers it: a letter that reaches outside the box would be cut.
       const inkCheck = seg => {
@@ -203,7 +243,17 @@
             }
             const lefts = handLines(hand);
             seen.lines = Math.max(seen.lines, lefts.length);
-            if (lefts.length > 1) {
+            if (/:{3}/.test(hand.textContent)) seen.markers++;
+            if (c.aligned) {
+              // centred or right-aligned text: line for line where the note starts each of its own
+              const start = starts[Math.min(handNo, starts.length - 1)], at = cm.domAtPos(start);
+              const line = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
+              if (line) { const a = getComputedStyle(line).textAlign; seen.set = /center/.test(a) ? 'center' : /right|end/.test(a) ? 'right' : 'left'; }
+              const want = noteLines(cm, start, lefts.length);
+              seen.rows = Math.max(seen.rows, want.length);
+              if (want.length < lefts.length) seen.lineDx = Math.max(seen.lineDx, 999);
+              else if (ddx <= TOL && ddy <= TOL) for (let i = 1; i < lefts.length; i++) seen.lineDx = Math.max(seen.lineDx, Math.abs(lefts[i] - want[i]));
+            } else if (lefts.length > 1) {
               const at = cm.domAtPos(starts[Math.min(handNo, starts.length - 1)]);
               const line = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
               if (line) {
@@ -288,7 +338,9 @@
       if (expectText && !seen.frames && !c.loose) fail('no handwriting was seen');
       if (seen.dx > TOL) fail(`the handwriting begins ${seen.dx.toFixed(1)} px to the side of the text's first letter`);
       if (seen.dy > TOL) fail(`the handwriting's baseline is ${seen.dy.toFixed(1)} px off the text's`);
-      if (seen.lineDx > TOL) fail(`a later line of handwriting starts ${seen.lineDx.toFixed(1)} px from the note line's left edge`);
+      if (seen.lineDx > TOL) fail(c.aligned ? `a later line of handwriting starts ${seen.lineDx.toFixed(1)} px from where the note starts that line` : `a later line of handwriting starts ${seen.lineDx.toFixed(1)} px from the note line's left edge`);
+      if (c.aligned && seen.frames && seen.set !== c.aligned) fail(`the note sets this text ${seen.set || 'nowhere'}, not ${c.aligned}: are the Scriptorium plugin and its snippet on?`);
+      if (seen.markers) fail(`the handwriting wrote a marker line (in ${seen.markers} frames)`);
       if (c.lines && seen.lines < c.lines) fail(`the pen wrote ${seen.lines} line(s), not ${c.lines}`);
       if (c.math != null && !c.loose && drawn !== c.math) fail(`the pen drew on ${drawn} of the note's equations, not ${c.math}`);
       if (mdx > TOL) fail(`an equation was drawn ${mdx.toFixed(1)} px from where it rests`);

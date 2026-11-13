@@ -39,8 +39,8 @@
   hyphens: manual;
 }
 @media print {
-  .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p,
-  .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p {
+  .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p > p,
+  .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p {
     -webkit-hyphens: manual;
     hyphens: manual;
   }
@@ -61,6 +61,8 @@ body.scriptorium-initials-goudy,
   --scriptorium-initial-font: "Scriptorium Goudy", var(--manuscript-display);
   --scriptorium-initial-size: 4.43em;                     /* Goudy's letters are 0.8 em squares standing on the baseline */
   --scriptorium-initial-margin: 0.088em 0.1em -0.15em 0;
+  --scriptorium-initial-stand: 0.78;                      /* as a standing initial (centred and right-aligned text, below) */
+  --scriptorium-initial-rise: 0.48em;
 }
 body.scriptorium-initials-plain,
 .el-p.scriptorium-dropcap-plain {
@@ -68,17 +70,21 @@ body.scriptorium-initials-plain,
   --scriptorium-initial-size: 5.68em;                     /* Cormorant's capitals are 0.625 em tall */
   --scriptorium-initial-weight: 500;
   --scriptorium-initial-margin: -0.118em 0.06em -0.13em 0;
+  --scriptorium-initial-stand: 0.68;
+  --scriptorium-initial-rise: 0em;
 }
 .el-p.scriptorium-dropcap-yinit {                         /* a note that asks for Yinit where the vault's is another */
   --scriptorium-initial-font: "Scriptorium Yinit", var(--manuscript-display);
   --scriptorium-initial-size: 3.667em;
   --scriptorium-initial-weight: normal;
   --scriptorium-initial-margin: 0.18em 0.15em -0.1em 0;
+  --scriptorium-initial-stand: 1;
+  --scriptorium-initial-rise: 0.47em;
 }
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p:not(.scriptorium-dropcap) > p::first-letter,
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p::first-letter,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p:not(.scriptorium-dropcap) > p::first-letter,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p::first-letter,
 body .markdown-rendered .el-p.scriptorium-dropcap.scriptorium-dropcap-none > p::first-letter,
-.markdown-embed[data-type="footnote"] .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p::first-letter {
+.markdown-embed[data-type="footnote"] .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p > p::first-letter {
   float: none;
   font: inherit;
   color: inherit;
@@ -86,17 +92,17 @@ body .markdown-rendered .el-p.scriptorium-dropcap.scriptorium-dropcap-none > p::
   margin: 0;
   padding: 0;
 }
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p:not(.scriptorium-dropcap) > p::first-line,
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p::first-line,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p:not(.scriptorium-dropcap) > p::first-line,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p::first-line,
 body .markdown-rendered .el-p.scriptorium-dropcap.scriptorium-dropcap-none > p::first-line,
-.markdown-embed[data-type="footnote"] .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p > p::first-line {
+.markdown-embed[data-type="footnote"] .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p > p::first-line {
   font-variant-caps: normal;
   letter-spacing: normal;
 }
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p:not(.scriptorium-dropcap) > p,
-body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p,
-.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-none > p,
-.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-none > p {
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p:not(.scriptorium-dropcap) > p,
+body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p:not(.scriptorium-dropcap) > p,
+.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-none > p,
+.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-none > p {
   text-align: justify;
 }
 
@@ -107,8 +113,8 @@ body.scriptorium-initials-none .markdown-rendered :is(.mod-header, .el-h1, .el-h
    (it stays in the text, for copying and for screen readers). The plugin gives the block the image for its letter
    (--scriptorium-dropcap-light, -dark) and its shape (--scriptorium-dropcap-ratio, -ratio-dark: width over height). A set of
    one colour (.scriptorium-dropcap-mono) is drawn through a mask in the accent colour, so it follows the theme. */
-body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image > p::before,
-body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::before {
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-image > p::before,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::before {
   content: "";
   float: left;
   height: 4.15em;                                        /* three lines of 1.45, less the first line's ascent */
@@ -118,21 +124,21 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquot
   -webkit-print-color-adjust: exact;
   print-color-adjust: exact;
 }
-body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image > p::before,
-body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::before {
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-image > p::before,
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::before {
   background-image: var(--scriptorium-dropcap-dark);
   width: calc(4.15em * var(--scriptorium-dropcap-ratio-dark, var(--scriptorium-dropcap-ratio, 0.8)));
 }
-body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
-body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
-body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
-body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before {
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+body.theme-dark .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before {
   background: var(--manuscript-accent);
   -webkit-mask: var(--scriptorium-dropcap-light) left top / contain no-repeat;
   mask: var(--scriptorium-dropcap-light) left top / contain no-repeat;
 }
-body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-image > p::first-letter,
-body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::first-letter {
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-image > p::first-letter,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-image > p::first-letter {
   float: none;
   font-size: 0;                                          /* the image is the letter */
   line-height: 0;
@@ -170,20 +176,20 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquot
 }
 @media (prefers-reduced-motion: no-preference) {
   .markdown-rendered .el-p.scriptorium-dropcap-inked > p { animation: scriptorium-ink 1.7s cubic-bezier(0.3, 0, 0.3, 1) both; }
-  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-inked:not(.scriptorium-dropcap-image):not(.scriptorium-dropcap-none) > p::first-letter,
-  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-inked:not(.scriptorium-dropcap-image):not(.scriptorium-dropcap-none) > p::first-letter {
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-inked:not(.scriptorium-dropcap-image):not(.scriptorium-dropcap-none) > p::first-letter,
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-inked:not(.scriptorium-dropcap-image):not(.scriptorium-dropcap-none) > p::first-letter {
     color: color-mix(in srgb, var(--manuscript-accent) var(--scriptorium-ink), transparent);
     text-shadow: 0 0 calc(var(--scriptorium-wet) * 0.11em) color-mix(in srgb, var(--manuscript-accent) calc(var(--scriptorium-wet) * 70%), transparent);
   }
-  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image > p::before,
-  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image > p::before {
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image > p::before,
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image > p::before {
     animation: scriptorium-uncover 1.7s cubic-bezier(0.3, 0, 0.3, 1) both;
     -webkit-mask-image: linear-gradient(135deg, #000 calc(var(--scriptorium-ink) * 1.5 - 50%), transparent calc(var(--scriptorium-ink) * 1.5));
     mask-image: linear-gradient(135deg, #000 calc(var(--scriptorium-ink) * 1.5 - 50%), transparent calc(var(--scriptorium-ink) * 1.5));
   }
   /* an image of one colour is already drawn through a mask: the pen's edge is a second one, and both must hold */
-  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
-  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before {
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before,
+  body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-dropcap-inked.scriptorium-dropcap-image.scriptorium-dropcap-mono > p::before {
     -webkit-mask-image: var(--scriptorium-dropcap-light), linear-gradient(135deg, #000 calc(var(--scriptorium-ink) * 1.5 - 50%), transparent calc(var(--scriptorium-ink) * 1.5));
     mask-image: var(--scriptorium-dropcap-light), linear-gradient(135deg, #000 calc(var(--scriptorium-ink) * 1.5 - 50%), transparent calc(var(--scriptorium-ink) * 1.5));
     -webkit-mask-size: contain, 100% 100%;
@@ -195,6 +201,123 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquot
     -webkit-mask-composite: source-in;
     mask-composite: intersect;
   }
+}
+
+/* ---------- Centred and right-aligned text ----------
+   A block between the marker lines "::: center" (or "::: right") and ":::" is centred (or set to the right), and so
+   is the whole of a note with the property "align: center". The Scriptorium plugin marks what is aligned
+   (.scriptorium-align and .scriptorium-align-center or -right): each block in Reading view and PDF export, each line
+   in Live Preview. The marker lines are not shown in Reading view; in Live Preview they are small and faint. Every
+   line of the note is a line on the page, a blank line parts two stanzas, and words are not hyphenated.
+   Aligned text is not a chapter opening: it has no drop cap and no small capitals, and the first paragraph after
+   it that is not aligned has them (the plugin puts .scriptorium-opens on the last aligned block under a heading,
+   and the rules for chapter openings take that class as they take a heading). "::: center dropcap", or the note's
+   property "dropcap-aligned: true", asks for the drop cap all the same (.scriptorium-align-dropcap). It is then a
+   standing initial and not a dropped one: it stands on the first line, at that line's start, so that the initial and
+   the line are centred, or set to the right, together. */
+body .markdown-rendered .scriptorium-align-center,
+body .markdown-rendered .scriptorium-align-center :is(p, li, h1, h2, h3, h4, h5, h6) {
+  text-align: center !important;
+}
+body .markdown-rendered .scriptorium-align-right,
+body .markdown-rendered .scriptorium-align-right :is(p, li, h1, h2, h3, h4, h5, h6) {
+  text-align: right !important;
+}
+body .markdown-rendered .scriptorium-align :is(p, li),
+body .markdown-rendered :is(p, li).scriptorium-align {
+  text-indent: 0;
+  -webkit-hyphens: manual;
+  hyphens: manual;
+}
+body .markdown-rendered .scriptorium-align pre { text-align: left !important; }
+body .markdown-rendered .el-p.scriptorium-align > p {
+  margin-block: 1.45em;                                  /* a line above and below; between two stanzas the two are one */
+  text-indent: 0;
+}
+body .markdown-rendered .scriptorium-opens + .el-p > p {
+  text-indent: 0;                                        /* the chapter opens here */
+}
+.markdown-rendered .scriptorium-align-fence,
+.markdown-rendered span.scriptorium-fence {
+  display: none;
+}
+.markdown-rendered .scriptorium-align-lines > p,
+.markdown-rendered p.scriptorium-align-lines {
+  white-space: pre-line;                                 /* with "Strict line breaks" on, a line is a line here all the same */
+}
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-align-center,
+.markdown-source-view.mod-cm6.is-live-preview .cm-content.scriptorium-align-note-center > .cm-line:not(.scriptorium-align-right, .HyperMD-codeblock, .HyperMD-table-row) {
+  text-align: center;
+  -webkit-hyphens: manual;
+  hyphens: manual;
+}
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-align-right,
+.markdown-source-view.mod-cm6.is-live-preview .cm-content.scriptorium-align-note-right > .cm-line:not(.scriptorium-align-center, .HyperMD-codeblock, .HyperMD-table-row) {
+  text-align: right;
+  -webkit-hyphens: manual;
+  hyphens: manual;
+}
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-align-fence {
+  color: var(--text-faint);
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+}
+/* No drop cap, no small capitals. */
+body .markdown-rendered .el-p.scriptorium-align:not(.scriptorium-align-dropcap) > p::first-letter {
+  float: none !important;
+  font: inherit !important;
+  color: inherit !important;
+  text-transform: none !important;
+  text-shadow: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+body .markdown-rendered .el-p.scriptorium-align:not(.scriptorium-align-dropcap) > p::first-line {
+  font-variant-caps: normal !important;
+  letter-spacing: normal !important;
+}
+body .markdown-rendered .el-p.scriptorium-align:not(.scriptorium-align-dropcap) > p::before {
+  content: none !important;
+}
+/* A drop cap that was asked for: a standing initial. Its line makes room for it above (the initial's line height,
+   --scriptorium-initial-stand, is as much as leaves the second line where it was; what the letter rises above that,
+   --scriptorium-initial-rise, is made up for over the paragraph). An initial that is an image stands the same way. */
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-align-dropcap:not(.scriptorium-dropcap-none) > p::first-letter,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-align-dropcap:not(.scriptorium-dropcap-none) > p::first-letter {
+  float: none;
+  line-height: var(--scriptorium-initial-stand, 1);
+  margin: 0 0.1em 0 0;
+}
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-align-dropcap > p,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-align-dropcap > p {
+  padding-top: var(--scriptorium-initial-rise, 0.47em);
+}
+body.scriptorium-initials-none .el-p:not(.scriptorium-dropcap) > p,
+.el-p.scriptorium-dropcap-none {
+  --scriptorium-initial-rise: 0em;                       /* no initial, nothing to make room for */
+}
+.el-p.scriptorium-dropcap-font {
+  --scriptorium-initial-stand: 0.8;
+  --scriptorium-initial-rise: 0.3em;
+}
+/* An image: the first line is indented by the image's width, so that the room for it is centred, or set to the
+   right, with the line; and the image is taken out of the line and stood in that room, its foot on the baseline. */
+.el-p.scriptorium-dropcap-image {
+  --scriptorium-initial-rise: 3.08em;                    /* 4.15 em of image, less what a line has above its baseline */
+  --scriptorium-initial-room: calc(4.15em * var(--scriptorium-dropcap-ratio, 0.8) + 0.4em);
+}
+body.theme-dark .el-p.scriptorium-dropcap-image {
+  --scriptorium-initial-room: calc(4.15em * var(--scriptorium-dropcap-ratio-dark, var(--scriptorium-dropcap-ratio, 0.8)) + 0.4em);
+}
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-align-dropcap.scriptorium-dropcap-image > p,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-align-dropcap.scriptorium-dropcap-image > p {
+  text-indent: var(--scriptorium-initial-room);
+}
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-p.scriptorium-align-dropcap.scriptorium-dropcap-image > p::before,
+body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p.scriptorium-align-dropcap.scriptorium-dropcap-image > p::before {
+  float: none;
+  position: absolute;
+  margin: -3.08em 0 0 calc(-1 * var(--scriptorium-initial-room));
 }
 
 /* ---------- Superscripts (footnote references) and subscripts keep the leading even ----------
@@ -425,8 +548,9 @@ body:where(:not(.scriptorium-fancy)).theme-dark {
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h1 + .el-p > p::first-letter,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h2 + .el-p > p::first-letter,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h6 + .el-p > p::first-letter,
+:where(body:not(.scriptorium-fancy)) .markdown-rendered .scriptorium-opens + .el-p > p::first-letter,
 :where(body:not(.scriptorium-fancy)) /* ...also when an epigraph (a quote right under a heading) sits between */
-.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p::first-letter {
+.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p::first-letter {
   float: left;
   font-family: var(--scriptorium-initial-font, "Scriptorium Yinit", var(--manuscript-display));
   font-size: var(--scriptorium-initial-size, 3.667em);   /* a three-line drop: top at the first line's cap height, foot on the third baseline */
@@ -442,7 +566,8 @@ body:where(:not(.scriptorium-fancy)).theme-dark {
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h1 + .el-p > p::first-line,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h2 + .el-p > p::first-line,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h6 + .el-p > p::first-line,
-:where(body:not(.scriptorium-fancy)) .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p::first-line {
+:where(body:not(.scriptorium-fancy)) .markdown-rendered .scriptorium-opens + .el-p > p::first-line,
+:where(body:not(.scriptorium-fancy)) .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p::first-line {
   font-variant-caps: small-caps;
   letter-spacing: 0.03em;
 }
@@ -528,7 +653,8 @@ body:where(:not(.scriptorium-fancy)).theme-dark {
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h1 + .el-p > p,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h2 + .el-p > p,
 :where(body:not(.scriptorium-fancy)) .markdown-rendered .el-h6 + .el-p > p,
-:where(body:not(.scriptorium-fancy)) .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p {
+:where(body:not(.scriptorium-fancy)) .markdown-rendered .scriptorium-opens + .el-p > p,
+:where(body:not(.scriptorium-fancy)) .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p {
   text-align: left;
 }
 
@@ -686,8 +812,9 @@ body:where(.scriptorium-fancy).theme-dark {
 :where(body.scriptorium-fancy) .markdown-rendered .el-h1 + .el-p > p::first-letter,
 :where(body.scriptorium-fancy) .markdown-rendered .el-h2 + .el-p > p::first-letter,
 :where(body.scriptorium-fancy) .markdown-rendered .el-h6 + .el-p > p::first-letter,
+:where(body.scriptorium-fancy) .markdown-rendered .scriptorium-opens + .el-p > p::first-letter,
 :where(body.scriptorium-fancy) /* ...also when an epigraph (a quote right under a heading) sits between */
-.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p::first-letter {
+.markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p::first-letter {
   float: left;
   font-family: var(--scriptorium-initial-font, "Scriptorium Yinit", var(--manuscript-display));
   font-size: var(--scriptorium-initial-size, 3.667em);   /* a three-line drop: top at the first line's cap height, foot on the third baseline */
@@ -703,7 +830,8 @@ body:where(.scriptorium-fancy).theme-dark {
 :where(body.scriptorium-fancy) .markdown-rendered .el-h1 + .el-p > p::first-line,
 :where(body.scriptorium-fancy) .markdown-rendered .el-h2 + .el-p > p::first-line,
 :where(body.scriptorium-fancy) .markdown-rendered .el-h6 + .el-p > p::first-line,
-:where(body.scriptorium-fancy) .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6) + .el-blockquote + .el-p > p::first-line {
+:where(body.scriptorium-fancy) .markdown-rendered .scriptorium-opens + .el-p > p::first-line,
+:where(body.scriptorium-fancy) .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote + .el-p > p::first-line {
   font-variant-caps: small-caps;
   letter-spacing: 0.03em;
 }

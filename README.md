@@ -42,7 +42,8 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
 - **Drop cap:** the initial that opens a chapter in Reading view: **Yinit** (ornamental, the default), **Goudy
   Initialen** (floriated), a **plain capital** in Cormorant Garamond, or **none**. Each is a three-line drop in the
   accent colour, with the rest of the first line in small capitals; with none, the opening paragraph starts with an
-  ordinary letter, without small capitals, justified like the rest.
+  ordinary letter, without small capitals, justified like the rest. Centred and right-aligned text has no drop cap
+  unless you ask for one (see [Centred and right-aligned text](#centred-and-right-aligned-text)).
   **One note can have its own:** run **Scriptorium: Choose the drop cap for this note** and move through the list (the
   note shows each as you go); the choice is kept in the note's properties as `dropcap: goudy` (or `yinit`, `plain`,
   `none`, or the name of a set, below), which you can also type yourself. Choosing **The vault's drop cap** removes
@@ -134,15 +135,77 @@ Click any image in a note to see it on its own, fitted to the window, with its c
 The mouse wheel zooms and dragging pans, **←** and **→** go to the note's other images, and **Esc** or a click outside
 the image returns to the note.
 
+## Centred and right-aligned text
+
+Put a block of text between two marker lines to centre it, or to set it to the right:
+
+```markdown
+::: center
+Tyger Tyger, burning bright,
+In the forests of the night;
+
+What immortal hand or eye,
+Could frame thy fearful symmetry?
+:::
+
+::: right
+— William Blake
+:::
+```
+
+Between the markers every line of the note is a line on the page (verse needs no two spaces at a line's end), and a
+blank line parts two stanzas. Leave a blank line, or a heading, before the opening marker and after the closing one;
+a block that is not closed aligns nothing. The text is aligned in Reading view, in Live Preview (where the two
+markers stay, small and faint) and in an exported PDF; Source mode shows it as you typed it. To align a whole note,
+give it the property `align: center` or `align: right`.
+
+The markers are the fenced container of Pandoc and markdown-it (`::: {.center}` is read too), so the note stays plain
+Markdown: Pandoc centres the block as Scriptorium does, and a program that does not know the markers shows them as
+two short lines of text. A callout (`> [!center]`) would be the more usual thing in Obsidian, but Live Preview draws
+a callout as one block of its own; between the markers the text stays ordinary lines of the editor, which you edit
+in place and which Lagrange's pen can write on.
+
+**Commands** (they can be given hotkeys in **Settings → Hotkeys**):
+
+- **Scriptorium: Centre selection** and **Scriptorium: Right-align selection** put the paragraphs the selection
+  touches between markers (without a selection, the paragraph the cursor is in), or change the alignment of a block
+  that has them already.
+- **Scriptorium: Remove alignment** takes the markers out again and leaves the note exactly as it was.
+
+**Drop caps.** Centred and right-aligned text has no drop cap and no small-capped first line, whichever drop cap the
+vault or the note uses, in Reading view and in PDF. It does not use up the chapter opening either: under a heading
+(or at the top of a note) aligned blocks are passed over, and the first paragraph after them that is not aligned has
+the drop cap. A chapter can open with an epigraph in verse and the name under it, and still begin with its initial.
+(As before, one quotation may stand between the heading and that paragraph too.)
+
+If you do want a drop cap on aligned text, ask for it:
+
+- for one block, write `::: center dropcap` (or `::: right dropcap`), or run **Scriptorium: Use a drop cap on this
+  aligned paragraph** with the cursor in the block; **Scriptorium: Remove the drop cap from this aligned paragraph**
+  takes it off again;
+- for a whole note, tick **Also on centred and right-aligned text** in **Scriptorium: Choose the drop cap for this
+  note**, which writes `dropcap-aligned: true` in the note's properties.
+
+Such a block is then a paragraph like any other: it has the drop cap when it is the first paragraph under a heading,
+and the paragraph after it has none. On aligned text the drop cap is a standing initial: it stands on the first
+line, at that line's start, so that the initial and the line are centred, or set to the right, together.
+
+Lagrange knows the markers: it centres verse that it writes or quotes, sets a signature to the right when you ask,
+and does not ask for a drop cap there unless you do. Its pen writes each centred or right-aligned line where the
+note sets it.
+
 ## Writing conventions
 
 - The filename supplies the title.
 - `###### Subtitle` creates a centered italic subtitle.
 - `## Chapter heading` creates a centered small-cap chapter heading; `### Section heading` a smaller one.
 - `> Quotation` creates an italic quotation.
+- `::: center` and `:::` on lines of their own, around some lines, centre them; `::: right` sets them to the right.
+  `align: center` in a note's properties centres the whole note.
 - `---` creates an ornamental scene break.
 - `dropcap: goudy` (or `yinit`, `plain`, `none`, or a set: `kanzlei`, `de-zs`, `Dropcat`, `Gene Wolfe`, `Ninit`, or one
-  of your own) in a note's properties gives that note its own drop cap.
+  of your own) in a note's properties gives that note its own drop cap; `dropcap-aligned: true` lets its centred and
+  right-aligned text have one (as `::: center dropcap` does for one block).
 - `[^1]` with `[^1]: The note.` creates a footnote, set in the margin in Reading view when there is room.
 - `> [!margin]` followed by `> Text` creates an unnumbered marginal note beside the paragraph that follows it.
 - `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` and the other callouts create admonitions.
@@ -158,7 +221,7 @@ Lagrange talks with you about the note you have open and edits it when you ask. 
 ("fix the grammar", "tighten the second paragraph", "add the equation for kinetic energy") is carried out in the note.
 Each edit is struck through and written in by a pen, in handwriting, with a thin trail of ink behind the nib. The
 pen writes where the new text stands in the note: its first stroke is where the first letter will be, and its lines
-are the note's lines. A long edit is written for three lines (**Settings → Lagrange → Lines the pen writes**) and
+are the note's lines (centred or right-aligned text is written line for line where the note sets it). A long edit is written for three lines (**Settings → Lagrange → Lines the pen writes**) and
 the rest is set down at once. An equation is drawn symbol by symbol where the note typesets it, wherever in the edit
 it comes, and code (a fenced block, or a code span) is typed on a small typewriter that takes the pen's place. The
 edits are then listed in the chat with their reasons.
