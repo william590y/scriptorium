@@ -16,6 +16,8 @@
   "codexModel": "",
   "effort": "",
   "agenticEdits": true,
+  "lookAtPage": true,
+  "lookPictures": "auto",
   "loaderTheme": "random",
   "showPen": true,
   "penSpeed": 1,

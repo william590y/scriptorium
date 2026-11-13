@@ -13,9 +13,10 @@
  *
  * Map of this file:
  *   1. Settings and constants
- *   2. Pure helpers: SSE parsing, edit JSON parsing, locating edits, edits in a chat reply, the pen's script (with
- *      its mathematics) and trail, clipping notes, error messages, demo replies. They touch neither the DOM nor
- *      Obsidian; plugins-tests/lagrange.test.js tests them under Node.
+ *   2. Pure helpers: SSE parsing, edit JSON parsing, locating edits, edits in a chat reply, a look at the page
+ *      asked for in one (the request, the part of the page it means, its pages, and the page described in words), the
+ *      pen's script (with its mathematics) and trail, clipping notes, error messages, demo replies. They touch
+ *      neither the DOM nor Obsidian; plugins-tests/lagrange.test.js tests them under Node.
  *   3. Providers: Anthropic Messages API, OpenAI API and OpenAI-compatible chat completions, a Claude subscription
  *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline). The only requests the plugin makes
  *      are to the provider chosen in its settings, when the writer asks for something.
@@ -26,10 +27,14 @@
  *      here and in styles.css.
  *   6. Edit runs: the pen writes each edit in turn, a click or a key ends the run at once (or the writer edits
  *      alongside it), and all of a request's edits become one undo step
- *   7. The chat view (with the model and effort picker in its footer), the revise modal, the settings tab and the
- *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits). Each run
- *      of edits can be undone and redone (recordEdit, undoEdit, redoEdit), and each message is a checkpoint the
- *      conversation and the note can be rewound to (rewind, restoreNote).
+ *   7. The page as rendered: lookAtPage(app, view, spec, opts) sets the note as Reading view does, in a page of its
+ *      own that is never shown (renderPage), measures its blocks (measurePage) and takes pictures of the part asked
+ *      for (picturePage). Nothing here touches the note, the editor or the workspace.
+ *   8. The chat view (with the model and effort picker in its footer), the revise modal, the settings tab and the
+ *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits). A reply
+ *      may also ask to look at the page (its look block: the plugin's lookAtPage), and the turn goes on with what
+ *      was seen. Each run of edits can be undone and redone (recordEdit, undoEdit, redoEdit), and each message is a
+ *      checkpoint the conversation and the note can be rewound to (rewind, restoreNote).
  */
 'use strict';
 
@@ -63,6 +68,18 @@ const MAX_TOKENS_CUSTOM = 8192;    // a custom model ID may be an older model wi
 // says so. Local models often run with small context windows, hence the smaller figure.
 const NOTE_LIMIT = { anthropic: 120000, 'claude-code': 120000, 'openai-api': 120000, codex: 80000, openai: 24000, demo: 120000 };
 
+/* A look at the page (see "Looking at the page" among the pure helpers). A picture is at most LOOK_WIDTH by
+   LOOK_HEIGHT pixels: Claude's standard tier takes 1568 on the long edge, and a page of text is still easy to read at
+   that size. A look is at most LOOK_PAGES pictures, a message of the writer's at most LOOKS_PER_MESSAGE looks. */
+const LOOKS_PER_MESSAGE = 2;
+const LOOK_PAGES = 4;
+const LOOK_WIDTH = 1024, LOOK_HEIGHT = 1536;
+const LOOK_PICTURE_CHARS = 2000000;   // one picture, in base64; a PNG over this is sent as a JPEG instead
+const LOOK_DESCRIPTION_CHARS = 6000;  // the page described in words
+const LOOK_SOURCE_CHARS = 250000;     // a longer note is rendered around the part asked for only
+const LOOK_BLOCKS = 400;              // how many blocks of a page are measured
+const LOOK_PICTURES = ['auto', 'on', 'off'];
+
 const LOADER_THEMES = ['random', 'clockwork', 'alchemy', 'orbit'];
 // Reasoning effort, where the provider and model take one; '' leaves it to the provider's own default.
 const EFFORTS = ['low', 'medium', 'high'];
@@ -86,6 +103,8 @@ const DEFAULT_SETTINGS = {
   codexModel: '',
   effort: '',                         // '' (the provider's default) | 'low' | 'medium' | 'high'; see effortFor
   agenticEdits: true,                 // a chat message may edit the open note with the pen; off: the chat only talks
+  lookAtPage: true,                   // Lagrange may look at the note as rendered; off: the page is never rendered or captured
+  lookPictures: 'auto',               // 'auto' (pictures where the model takes them) | 'on' | 'off' (a description only)
   loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
@@ -110,6 +129,7 @@ function sanitizeSettings(saved) {
   if (!(s.penSpeed >= 0.5 && s.penSpeed <= 3)) s.penSpeed = DEFAULT_SETTINGS.penSpeed;
   if (!(Number.isInteger(s.penLines) && s.penLines >= 1 && s.penLines <= 8)) s.penLines = DEFAULT_SETTINGS.penLines;
   if (!EFFORTS.includes(s.effort)) s.effort = '';
+  if (!LOOK_PICTURES.includes(s.lookPictures)) s.lookPictures = DEFAULT_SETTINGS.lookPictures;
   return s;
 }
 
@@ -134,6 +154,45 @@ function effortSupported(s) {
     return OPENAI_EFFORT_RE.test(m) && !/chat/i.test(m);
   }
   return false;
+}
+
+/* Which models take pictures. Every current Claude model does (only Claude 2 and Instant did not); OpenAI's GPT-4o,
+   GPT-4.1, GPT-5 and later and the o-series do, except the small early reasoning models and the audio, realtime and
+   embedding ones. A local server's model is known by its name where the name says so (LLaVA, a "vision" or "vl"
+   model, Gemma 3 and so on); any other is taken to read text only, which the writer can overrule ("Pictures of the
+   page" in the settings). */
+const ANTHROPIC_TEXT_ONLY_RE = /^claude-(?:2|instant)/i;
+const OPENAI_PICTURES_RE = /^(?:gpt-4o|gpt-4\.[15]|gpt-4-turbo|gpt-[5-9]|chatgpt-4o|o[1-9])/i;
+const OPENAI_TEXT_ONLY_RE = /^(?:o1-mini|o1-preview|o3-mini)|audio|realtime|transcribe|tts|embedding|instruct/i;
+const LOCAL_PICTURES_RE = /vision|llava|moondream|minicpm-?v|pixtral|gemma-?3|qwen[\d.]*-?vl|qvq|internvl|molmo|smolvlm|idefics|cogvlm|paligemma|llama-?4|multimodal|gpt-4o|gpt-4\.1|gpt-[5-9]|claude|gemini/i;
+
+function picturesSupported(s) {
+  if (s.provider === 'claude-code' || s.provider === 'codex') return true;
+  if (s.provider === 'anthropic') return !ANTHROPIC_TEXT_ONLY_RE.test(anthropicModelId(s));
+  if (s.provider === 'openai-api') {
+    const m = String(s.openaiPlatformModel || '').trim();
+    return OPENAI_PICTURES_RE.test(m) && !OPENAI_TEXT_ONLY_RE.test(m);
+  }
+  if (s.provider === 'openai') return LOCAL_PICTURES_RE.test(String(s.openaiModel || ''));
+  return false;
+}
+
+/* The provider and model, as the key under which a session remembers what they would not take. */
+function providerKey(s) {
+  if (s.provider === 'anthropic') return `anthropic:${anthropicModelId(s)}`;
+  if (s.provider === 'openai-api') return `openai:${String(s.openaiPlatformModel || '').trim()}`;
+  if (s.provider === 'openai') return `openai:${String(s.openaiModel || '').trim()}`;
+  if (s.provider === 'codex') return `codex:${String(s.codexModel || '').trim()}`;
+  return s.provider;
+}
+
+/* Whether a look sends pictures of the page, or only its description in words: pictures on a computer (they are
+   taken there only), when the provider and model take them or the writer says they do, and unless this session has
+   seen them refused. The demo has no model to show anything to. */
+function lookSendsPictures(s, desktop, session) {
+  if (!desktop || s.provider === 'demo' || s.lookPictures === 'off') return false;
+  if (session && session.noPictures && session.noPictures[providerKey(s)]) return false;
+  return s.lookPictures === 'on' || picturesSupported(s);
 }
 
 /* The effort to send with a request: the chosen one where it is supported, otherwise '' (send nothing). */
@@ -474,29 +533,34 @@ function cleanRevision(reply, original) {
    (or the same JSON between <lagrange-edits> and </lagrange-edits>). It is plain text, so every provider can write
    it. The chat shows the prose; the block goes to the pen. A reply without a block is an answer and changes nothing. */
 
-const EDITS_OPEN_RE = /(?:^|\n)[ \t]*(?:(`{3,}|~{3,})[ \t]*lagrange-edits\b[^\n]*(?:\n|$)|<lagrange-edits>)/i;
-
-/* Splits a chat reply into the prose to show and the edit blocks: {text, blocks: [string], open}. `open` is true when
-   the last block has no closing line, as while the reply is still streaming, or when it was cut off; everything from
-   its opening line on is then left out of the text. */
-function splitAgentReply(reply) {
+/* Splits a chat reply at its blocks of one name (lagrange-edits, lagrange-look): {text, blocks: [string], open}. text
+   is the reply without them. `open` is true when the last block has no closing line, as while the reply is still
+   streaming, or when it was cut off; everything from its opening line on is then left out of the text. */
+function splitBlocks(reply, name) {
+  const opening = new RegExp(`(?:^|\\n)[ \\t]*(?:(\`{3,}|~{3,})[ \\t]*${name}\\b[^\\n]*(?:\\n|$)|<${name}>)`, 'i');
   let rest = String(reply == null ? '' : reply);
   let text = '';
   const blocks = [];
   let open = false;
   for (;;) {
-    const m = EDITS_OPEN_RE.exec(rest);
+    const m = opening.exec(rest);
     if (!m) { text += rest; break; }
     text += rest.slice(0, m.index) + '\n';
     const body = rest.slice(m.index + m[0].length);
     const close = m[1]
       ? new RegExp(`(?:^|\\n)[ \\t]*${m[1][0]}{${m[1].length},}[ \\t]*(?=\\n|$)`).exec(body)
-      : /<\/lagrange-edits>/i.exec(body);
+      : new RegExp(`</${name}>`, 'i').exec(body);
     if (!close) { blocks.push(body); open = true; break; }
     blocks.push(body.slice(0, close.index));
     rest = body.slice(close.index + close[0].length);
   }
   return { text: text.replace(/\n{3,}/g, '\n\n').trim(), blocks, open };
+}
+
+/* Splits a chat reply into the prose to show and the edit blocks: {text, blocks: [string], open}, as splitBlocks
+   describes. */
+function splitAgentReply(reply) {
+  return splitBlocks(reply, 'lagrange-edits');
 }
 
 /* One item of an edits block, as an operation: {op: 'replace', find, replace, reason}, {op: 'insert', after | before,
@@ -565,6 +629,408 @@ function locateOps(doc, ops) {
   }
   located.sort((a, b) => a.from - b.from || a.to - b.to);
   return { located, skipped };
+}
+
+/* ---- Looking at the page ----
+   The model reads the note's Markdown; the writer reads the page Scriptorium sets from it. A chat reply may therefore
+   ask to look at the page: after its prose, one block
+       ```lagrange-look
+       {"target": "note"}
+       ```
+   (or the same between <lagrange-look> and </lagrange-look>). The target is the whole note, "view" (what the writer
+   has on screen), a section by its heading, a passage by words from it, or a range of source lines. The plugin sets
+   the note as Reading view does, in a page that is never shown, measures its blocks and takes pictures of the part
+   asked for (section 7), and the model's turn goes on with them in a new message. A reply may hold an edits block
+   too: the pen writes first, and the look shows the page as it then stands. At most LOOKS_PER_MESSAGE looks follow
+   one message of the writer's, and with "Let Lagrange look at the rendered page" off there are none. */
+
+/* What a look block asks for: {target: 'note'}, {target: 'view'}, {target: 'section', heading}, {target: 'passage',
+   near} or {target: 'lines', from, to}; and {target: 'auto'} (the whole note if it is short, else what is on screen)
+   when the block says nothing that can be read, since a model that asks to look should be shown something.
+   Forgiving about the shape: {"heading": "…"}, {"lines": [12, 40]}, {"lines": "12-40"}, a list of one request, and
+   the bare words note, view, "section: …" and "lines 12-40" are understood too. */
+function normalizeLook(value) {
+  const auto = { target: 'auto' };
+  if (Array.isArray(value)) return value.length ? normalizeLook(value[0]) : auto;
+  if (typeof value === 'string') {
+    const t = value.replace(/\s+/g, ' ').trim().replace(/^["'“‘]+|["'”’.]+$/g, '').trim();
+    let m;
+    if (/^(?:the )?(?:whole |entire |full )?(?:note|page|document|all|everything)$/i.test(t)) return { target: 'note' };
+    if (/^(?:the )?(?:current |visible )?(?:view|viewport|screen|window|visible)$/i.test(t)) return { target: 'view' };
+    if ((m = /^(?:section|heading)\s*[:=]?\s*(.+)$/i.exec(t))) return normalizeLook({ heading: m[1] });
+    if ((m = /^lines?\s*[:=]?\s*(\d+)(?:\s*(?:-|–|—|to|,|\.\.)\s*(\d+))?$/i.exec(t))) return normalizeLook({ from: m[1], to: m[2] === undefined ? m[1] : m[2] });
+    if ((m = /^(?:passage|near|find)\s*[:=]\s*(.+)$/i.exec(t))) return normalizeLook({ near: m[1] });
+    return auto;
+  }
+  if (!value || typeof value !== 'object') return auto;
+  const str = keys => { for (const k of keys) if (typeof value[k] === 'string' && value[k].trim()) return value[k].trim(); return ''; };
+  const target = str(['target', 'look', 'at', 'region', 'what']).toLowerCase();
+  const named = target ? normalizeLook(target) : auto;
+  if (named.target === 'note' || named.target === 'view') return named;
+  const heading = str(['heading', 'section']).replace(/^#+\s*/, '');
+  const near = str(['near', 'passage', 'find', 'quote', 'text']);
+  let from = value.from, to = value.to;
+  const lines = value.lines !== undefined ? value.lines : value.range;
+  if (Array.isArray(lines)) [from, to] = lines;
+  else if (typeof lines === 'number') from = to = lines;
+  else if (typeof lines === 'string') { const m = /(\d+)(?:\D+(\d+))?/.exec(lines); if (m) { from = m[1]; to = m[2] === undefined ? m[1] : m[2]; } }
+  if (to === undefined || to === null || to === '') to = from;
+  from = Math.floor(Number(from)); to = Math.floor(Number(to));
+  const ranged = Number.isFinite(from) && Number.isFinite(to) && from >= 1 && to >= 1;
+  const range = { target: 'lines', from: Math.min(from, to), to: Math.max(from, to) };
+  // what the target names, if what it needs is there; otherwise whatever is there
+  if (heading && /^(?:section|heading)/.test(target)) return { target: 'section', heading };
+  if (near && /^(?:passage|near)/.test(target)) return { target: 'passage', near };
+  if (ranged && /^line/.test(target)) return range;
+  if (heading) return { target: 'section', heading };
+  if (near) return { target: 'passage', near };
+  if (ranged) return range;
+  return named;
+}
+
+/* A chat reply's look: {text, look, open}. text is the reply without its look blocks (its edits block is still in
+   it, for parseAgentReply); look is what the first of them asks for, or null if there is none; open is true while a
+   look block has no closing line (as while the reply streams). */
+function parseLookReply(reply) {
+  const { text, blocks, open } = splitBlocks(reply, 'lagrange-look');
+  if (!blocks.length) return { text, look: null, open: false };
+  let look = null;
+  for (const value of jsonValuesIn(blocks[0])) { look = normalizeLook(value); break; }
+  return { text, look: look || normalizeLook(blocks[0]), open };
+}
+
+/* What a look is of, in words for the chat and for the model. */
+function lookLabel(spec) {
+  const s = spec || {};
+  if (s.target === 'note') return 'the whole note';
+  if (s.target === 'view') return 'what is on screen';
+  if (s.target === 'section') return `the section “${excerpt(s.heading, 60)}”`;
+  if (s.target === 'passage') return `the passage near “${excerpt(s.near, 60)}”`;
+  if (s.target === 'lines') return s.from === s.to ? `line ${s.from}` : `lines ${s.from} to ${s.to}`;
+  return 'the page';
+}
+
+/* Which source lines each rendered block comes from. Obsidian's parser gives the note's sections ({type, from, to},
+   lines counted from 0) and its renderer one element for each, in the same order, except that a footnote's
+   definition, a link's definition and a comment render nothing where they stand, and the footnotes come as one
+   <section> at the foot. tags are the elements' tag names. Returns [{from, to} | null], one for each element (lines
+   counted from 1), or null when the two do not go together (an HTML block with blank lines in it is one element but
+   several sections), and then nothing is said about lines. */
+const SECTION_TAGS = { heading: /^h[1-6]$/, paragraph: /^p$/, blockquote: /^blockquote$/, list: /^[uo]l$/, table: /^table$/, thematicBreak: /^hr$/, yaml: /^pre$/ };
+const SECTION_SILENT = new Set(['footnoteDefinition', 'definition', 'comment', 'text', 'element']);
+function alignSections(sections, tags) {
+  const list = Array.isArray(sections) ? sections : [];
+  const out = [];
+  let k = 0;
+  for (const tag of tags) {
+    if (tag === 'section') { out.push(null); continue; }
+    while (k < list.length && SECTION_SILENT.has(list[k].type)) k++;
+    const s = list[k++];
+    if (!s) return null;
+    const want = SECTION_TAGS[s.type];
+    if (want && !want.test(tag)) return null;
+    out.push({ from: s.from + 1, to: s.to + 1 });
+  }
+  for (; k < list.length; k++) if (!SECTION_SILENT.has(list[k].type)) return null;
+  return out;
+}
+
+/* The source to render for a look. A note of ordinary length is rendered whole, so that everything that depends on
+   what comes before (which paragraph opens a chapter, the numbering of footnotes) comes out as in Reading view. A
+   note longer than limit characters would take too long: then only the part around `line` (counted from 1) is
+   rendered, cut where a blank line stands, after the note's front matter. Returns {text, shift, cut}: a line of the
+   part after its front matter is that line number plus shift in the note, and cut says whether anything was left
+   out. */
+function lookSource(text, line, limit) {
+  text = String(text == null ? '' : text);
+  if (text.length <= limit) return { text, shift: 0, cut: false };
+  const front = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  const head = front ? front[0] : '';
+  const starts = [0];
+  for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) starts.push(i + 1);
+  const at = starts[Math.max(0, Math.min(starts.length - 1, (Number(line) || 1) - 1))];
+  let from = Math.max(head.length, Math.min(text.length - limit, Math.round(at - limit / 3)));
+  let to = Math.min(text.length, from + limit);
+  if (from > head.length) { const gap = text.indexOf('\n\n', from); from = gap >= 0 && gap < to - 2 ? gap + 2 : from; }
+  if (to < text.length) { const gap = text.lastIndexOf('\n\n', to); if (gap > from) to = gap + 1; }
+  let first = 0;
+  while (first + 1 < starts.length && starts[first + 1] <= from) first++;
+  const headLines = head ? head.split('\n').length - 1 : 0;
+  return { text: head + text.slice(from, to), shift: first - headLines, cut: true };
+}
+
+/* The blocks of the page a look is of: {first, last, remark}, indices into blocks (measurePage's records: {kind,
+   level, text, from, to, …}), or null when the page has no blocks. remark says, for the model, why it is shown
+   something other than it asked for (a heading that is not there, lines that cannot be told), or is ''. ctx: {seen:
+   {from, to} | {firstText, lastText} | null, what the writer has on screen; near: {from, to} | null, the lines
+   holding the words of a passage}. A passage is shown with the block before it and the block after. 'auto' is the
+   whole note here; lookAtPage turns it into what is on screen when the note is too long for one look. */
+function lookRange(spec, blocks, ctx) {
+  const n = blocks.length;
+  if (!n) return null;
+  const whole = remark => ({ first: 0, last: n - 1, remark: remark || '' });
+  const byLines = (from, to) => {
+    let first = -1, last = -1;
+    for (let i = 0; i < n; i++) {
+      const b = blocks[i];
+      if (!(b.from >= 1) || b.to < from || b.from > to) continue;
+      if (first < 0) first = i;
+      last = i;
+    }
+    if (first >= 0) return { first, last };
+    // no block holds those lines (they are blank, or between blocks): the block that follows them, or the last
+    let next = blocks.findIndex(b => b.from >= 1 && b.from > to);
+    if (next < 0) { for (let i = n - 1; i >= 0; i--) if (blocks[i].from >= 1) { next = i; break; } }
+    return next < 0 ? null : { first: next, last: next };
+  };
+  const norm = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const s = spec || {};
+  if (s.target === 'section') {
+    const want = norm(String(s.heading || '').replace(/^#+\s*/, ''));
+    const heads = blocks.map((b, i) => ({ b, i })).filter(x => x.b.kind === 'heading' || x.b.kind === 'title');
+    const hit = heads.find(x => norm(x.b.text) === want) || heads.find(x => want && norm(x.b.text).includes(want));
+    if (!hit) return whole(`No heading reads “${excerpt(s.heading, 80)}”, so this is the whole note.`);
+    if (hit.b.kind === 'title') return whole('');
+    let last = n - 1;
+    for (let i = hit.i + 1; i < n; i++) if (blocks[i].kind === 'heading' && blocks[i].level <= hit.b.level) { last = i - 1; break; }
+    return { first: hit.i, last, remark: '' };
+  }
+  if (s.target === 'lines' || s.target === 'passage') {
+    const lines = s.target === 'lines' ? { from: s.from, to: s.to } : ctx && ctx.near;
+    if (!lines) return whole(`Those words were not found in the note${s.target === 'passage' ? ' (or are there more than once)' : ''}, so this is the whole note.`);
+    const r = byLines(lines.from, lines.to);
+    if (!r) return whole('The page’s blocks could not be matched to the note’s lines, so this is the whole note.');
+    if (s.target === 'passage') { r.first = Math.max(0, r.first - 1); r.last = Math.min(n - 1, r.last + 1); }
+    return { first: r.first, last: r.last, remark: '' };
+  }
+  if (s.target === 'view') {
+    const seen = ctx && ctx.seen;
+    let r = null;
+    if (seen && seen.from >= 1) r = byLines(seen.from, seen.to);
+    else if (seen && seen.firstText) {
+      const first = blocks.findIndex(b => norm(b.text) === norm(seen.firstText));
+      let last = -1;
+      for (let i = n - 1; i >= Math.max(first, 0); i--) if (norm(blocks[i].text) === norm(seen.lastText)) { last = i; break; }
+      if (first >= 0) r = { first, last: Math.max(first, last) };
+    }
+    if (r) return { first: r.first, last: r.last, remark: '' };
+    return whole('What is on screen could not be told, so this is the note from its beginning.');
+  }
+  return whole('');
+}
+
+/* How much a page of the given width (in CSS pixels) is scaled for its pictures: never enlarged, and no wider than
+   LOOK_WIDTH pixels. */
+function lookScale(width) {
+  return width > LOOK_WIDTH ? LOOK_WIDTH / width : 1;
+}
+
+/* Cuts the stretch of the page from top to bottom (CSS pixels) into pictures no taller than height: [{top, bottom}],
+   at most max of them, and `more`, how many further pictures the rest would have taken. A picture ends where a block
+   ends (breaks: the tops of the blocks) if that leaves it at least half full; a block taller than a picture is cut
+   through, and the next picture then begins a little earlier (overlap), so that the line cut through is whole in it. */
+function lookPages(top, bottom, breaks, height, max, overlap) {
+  const pages = [];
+  let more = 0, y = top;
+  const cuts = (breaks || []).slice().sort((a, b) => a - b);
+  for (let guard = 0; y < bottom - 1 && guard < 10000; guard++) {
+    let end = Math.min(bottom, y + height), next = end;
+    if (end < bottom) {
+      let cut = null;
+      for (const c of cuts) { if (c > end) break; if (c >= y + height / 2) cut = c; }
+      if (cut !== null) end = next = cut;
+      else next = Math.max(y + 1, end - (overlap || 0));
+    }
+    if (pages.length < max) pages.push({ top: y, bottom: end }); else more++;
+    y = next;
+  }
+  return { pages, more };
+}
+
+/* The page of a look in words, for a model that takes no pictures and beside the pictures for one that does (what
+   is measured is exact where an eye judges): a line about the page, then one line for each block. look: {title,
+   label, page: {width, column: {left, width}, theme, font, size, margin, cut}, blocks, pictures: [{top, bottom}],
+   more, remarks}. A block: {kind, level, text, from, to, top, bottom, align, font, size, italic, smallCaps, lines,
+   dropcap: {letter, font, size, image}, firstLineCaps, overflow, notes: [{label, where}], math: [source], images:
+   [{alt, width, height, broken}], items, rows, cols, language, callout, inMargin}. No more than limit characters:
+   the blocks that do not fit are counted. */
+function describeLook(look, limit) {
+  const px = v => `${Math.round(v * 10) / 10} px`;
+  const page = look.page || {};
+  const head = [`“${look.title}”, set as in Reading view (${page.theme === 'dark' ? 'dark' : 'light'} theme)`];
+  if (page.width) head.push(`pane ${Math.round(page.width)} px wide`);
+  if (page.column && page.column.width) head.push(`text column ${Math.round(page.column.width)} px wide, ${Math.round(page.column.left)} px from the left`);
+  if (page.font) head.push(`body text ${page.font}${page.size ? ` ${px(page.size)}` : ''}`);
+  const lines = [`The page: ${head.join('; ')}.`];
+  if (page.margin) lines.push('Footnotes and margin notes are set in the right margin, beside the lines they belong to.');
+  const pictures = look.pictures || [];
+  const pictureOf = b => {
+    for (let i = 0; i < pictures.length; i++) if (b.top < pictures[i].bottom - 1 && b.bottom > pictures[i].top) return i + 1;
+    return 0;
+  };
+  const ALIGN = { left: 'flush left', right: 'flush right', center: 'centred', justify: 'justified', full: 'the full width of the column' };
+  const one = (b, k) => {
+    const parts = [];
+    const where = b.from >= 1 ? (b.from === b.to ? `line ${b.from}` : `lines ${b.from}–${b.to}`) : '';
+    let name = b.kind === 'heading' ? `heading ${b.level}` : b.kind;
+    if (b.kind === 'callout') name = b.inMargin ? 'margin note' : `callout (${b.callout || 'note'})`;
+    if (b.kind === 'code' && b.language) name = `code (${b.language})`;
+    if (b.kind === 'list') name = `list of ${b.items} item${b.items === 1 ? '' : 's'}`;
+    if (b.kind === 'table') name = `table, ${b.rows} row${b.rows === 1 ? '' : 's'} by ${b.cols}`;
+    parts.push(`${k}. ${name}${where ? `, ${where}` : ''}${b.text ? `: “${excerpt(b.text, 56)}”` : ''}`);
+    if (b.inMargin) parts.push('set in the margin');
+    else if (b.align && b.kind !== 'rule') parts.push(ALIGN[b.align] || b.align);
+    if (b.dropcap) {
+      parts.push(`drop cap “${b.dropcap.letter}” (${b.dropcap.image ? 'a picture' : b.dropcap.font || 'a large initial'}` +
+        `${b.dropcap.size ? `, ${px(b.dropcap.size)}` : ''}${b.dropcap.deep ? `, ${b.dropcap.deep} lines deep` : ''})`);
+    }
+    if (b.firstLineCaps) parts.push('first line in small capitals');
+    if (b.font) parts.push(`${b.font} ${px(b.size)}${b.italic ? ' italic' : ''}${b.smallCaps ? ' small capitals' : ''}`);
+    if (b.lines) parts.push(`${b.lines} line${b.lines === 1 ? '' : 's'}`);
+    for (const m of (b.math || []).slice(0, 4)) parts.push(`math $${excerpt(m, 90)}$`);
+    if (b.math && b.math.length > 4) parts.push(`${b.math.length - 4} more formulas`);
+    for (const im of (b.images || []).slice(0, 3)) {
+      parts.push(`picture${im.alt ? ` “${excerpt(im.alt, 40)}”` : ''} ${Math.round(im.width)}×${Math.round(im.height)} px` +
+        `${im.broken ? ' (did not load)' : ''}${im.remote ? ' (from the web: a grey box in the picture of the page)' : ''}`);
+    }
+    for (const note of (b.notes || []).slice(0, 6)) parts.push(`footnote ${note.label} ${note.where === 'margin' ? 'in the margin' : 'at the foot'}`);
+    if (b.overflow > 1) parts.push(`${Math.round(b.overflow)} px too wide for its column${b.scrolls ? ' (it scrolls)' : ''}`);
+    const p = pictureOf(b);
+    if (p && pictures.length > 1) parts.push(`picture ${p}`);
+    return parts.join(' | ');
+  };
+  const blocks = look.blocks || [];
+  let used = lines.join('\n').length, shown = 0;
+  for (; shown < blocks.length; shown++) {
+    const line = one(blocks[shown], shown + 1);
+    if (used + line.length + 1 > limit - 80 && shown > 0) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (shown < blocks.length) lines.push(`… and ${blocks.length - shown} more block${blocks.length - shown === 1 ? '' : 's'}, not described.`);
+  return lines.join('\n');
+}
+
+/* The message that carries a look to the model: {content, alt, kept}. content is the message as it is sent: a list
+   of parts when there are pictures ([{type: 'image', mediaType, data}, …, {type: 'text', text}]), else text. alt is
+   the same in words alone, for a provider that turns the pictures down; kept is what stays in the conversation
+   afterwards (the pictures are sent once and not kept). opts: {left, how many looks remain for this message; by:
+   'writer' when the writer showed the page with the command, with text, their message; failed, a sentence, when the
+   page could not be looked at}. */
+function lookMessage(look, opts) {
+  const o = opts || {};
+  const carry = o.by === 'writer'
+    ? `The writer has shown you the page as it is rendered, above. Their message:\n\n${o.text || ''}`
+    : 'That is your look at the page. ' + (o.left > 0
+      ? `You may look ${o.left === 1 ? 'once more' : `${o.left} more times`} for this message, if you need another part of it. `
+      : 'You cannot look again for this message. ') + 'Now carry on with your reply to the writer.';
+  if (o.failed) {
+    const text = `<rendered_page>\nThe page could not be looked at: ${o.failed}\n</rendered_page>\n\n` +
+      (o.by === 'writer' ? o.text || '' : 'Carry on with your reply to the writer from the note’s source, and say that you could not look at the page.');
+    return { content: text, alt: text, kept: text };
+  }
+  const pictures = look.pictures || [];
+  const n = pictures.length, total = n + (look.more || 0);
+  const part = `The page of “${look.title}” as Reading view renders it: ${look.label}` +
+    `${look.page && look.page.cut ? ' (the note is very long, so only the part around it was rendered)' : ''}. ` +
+    'The note’s properties are left out.';
+  const remarks = (look.remarks || []).map(r => `\n${r}`).join('');
+  const rest = look.more ? ` They are the first ${n} of ${total} pages of it: look at a section, a passage or a range of lines to see further on.` : '';
+  const text = how => `<rendered_page>\n${part} ${how}${remarks}\n\n${look.description}\n</rendered_page>\n\n${carry}`;
+  const measured = ' What follows was measured on the page.';
+  const seen = `${n === 1 ? 'One picture of it is' : `${n} pictures of it are`} attached${n > 1 ? ', in reading order' : ''}.${rest}${measured}`;
+  const told = (look.problem ? `No picture of it could be taken (${look.problem}), so` : 'There is no picture of it:') +
+    ' here it is in words, as measured on the page.';
+  const was = `${n === 1 ? 'One picture of it was' : `${n} pictures of it were`} shown to you at this point; ` +
+    `${n === 1 ? 'it is' : 'they are'} not kept in the conversation.${rest}${measured}`;
+  if (!n) return { content: text(told), alt: text(told), kept: text(told) };
+  const content = pictures.map(p => ({ type: 'image', mediaType: p.mediaType, data: p.data })).concat([{ type: 'text', text: text(seen) }]);
+  return { content, alt: text('It could not be shown to you as a picture: here it is in words, as measured on the page.'), kept: text(was) };
+}
+
+/* A look in a line, for the chat: what it was of, and how it was shown. */
+function lookCaption(look) {
+  const n = (look.pictures || []).length;
+  const label = look.label.charAt(0).toUpperCase() + look.label.slice(1);
+  if (!n) return `${label}, in words${look.problem ? ' (no picture could be taken)' : ''}`;
+  return `${label}, in ${n === 1 ? 'one picture' : `${n} pictures`}${look.more ? ` (the first ${n} of ${n + look.more} pages)` : ''} and its measurements`;
+}
+
+/* Who a look goes to, for the writer. */
+function lookRecipient(s) {
+  if (s.provider === 'demo') return 'Demo mode: nothing is sent anywhere.';
+  const who = { anthropic: 'Anthropic', 'claude-code': 'Anthropic, through Claude Code', 'openai-api': 'OpenAI', codex: 'OpenAI, through Codex',
+    openai: `your server at ${String(s.openaiBaseUrl || '').trim() || 'the address in the settings'}` }[s.provider] || 'the provider chosen in the settings';
+  return `It goes to ${who} (${modelLabel(s)}) with the conversation, and to no one else.`;
+}
+
+/* A message's words, whatever shape its content has: the text of its parts, with a line where each picture was. */
+function messageText(m) {
+  if (!m) return '';
+  if (typeof m.content === 'string') return m.content;
+  if (!Array.isArray(m.content)) return '';
+  let k = 0;
+  return m.content.map(p => (p && p.type === 'image' ? `[Picture ${++k} of the page is attached.]` : (p && typeof p.text === 'string' ? p.text : ''))).filter(Boolean).join('\n\n');
+}
+
+/* The pictures in a list of messages, in order: [{mediaType, data}]. */
+function messagePictures(messages) {
+  const out = [];
+  for (const m of messages || []) if (m && Array.isArray(m.content)) for (const p of m.content) if (p && p.type === 'image' && p.data) out.push(p);
+  return out;
+}
+
+/* The messages in words alone: each message with pictures becomes its alt (see lookMessage), or its text. */
+function withoutPictures(messages) {
+  return (messages || []).map(m => (m && Array.isArray(m.content) ? { role: m.role, content: typeof m.alt === 'string' ? m.alt : messageText(m) } : { role: m.role, content: m.content }));
+}
+
+/* The messages as the Messages API takes them: text as it is, a picture as an image block with its bytes in base64
+   (pictures first, then the words about them, which is the order Claude reads best). */
+function anthropicMessages(messages) {
+  return (messages || []).map(m => ({
+    role: m.role,
+    content: !Array.isArray(m.content) ? m.content : m.content.map(p => (p.type === 'image'
+      ? { type: 'image', source: { type: 'base64', media_type: p.mediaType || 'image/png', data: p.data } }
+      : { type: 'text', text: p.text })),
+  }));
+}
+
+/* The messages as chat completions take them: a picture is an image_url part holding a data URL. */
+function openaiMessages(messages) {
+  return (messages || []).map(m => ({
+    role: m.role,
+    content: !Array.isArray(m.content) ? m.content : m.content.map(p => (p.type === 'image'
+      ? { type: 'image_url', image_url: { url: `data:${p.mediaType || 'image/png'};base64,${p.data}` } }
+      : { type: 'text', text: p.text })),
+  }));
+}
+
+/* Text that an XML parser takes: the characters XML 1.0 has no place for (control characters, lone surrogates) are
+   left out. A page is drawn from its markup as XML (picturePage), and one such character would spoil all of it. */
+function xmlSafe(text) {
+  return String(text == null ? '' : text).replace(/[^\x09\x0A\x0D\x20-퟿-�\u{10000}-\u{10FFFF}]/gu, '');
+}
+
+/* The page of a note as the picture a browser can draw: its markup (XHTML) inside an SVG of the page's size. The
+   root's font size is the document's, so that rem lengths come out the same. */
+function pageSvg(xhtml, width, height, rootFontSize) {
+  const w = Math.ceil(width), h = Math.ceil(height);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"` +
+    `${rootFontSize ? ` style="font-size:${String(rootFontSize).replace(/[^0-9a-z.%]/gi, '')}"` : ''}>` +
+    `<foreignObject x="0" y="0" width="${w}" height="${h}">${xmlSafe(xhtml)}</foreignObject></svg>`;
+}
+
+/* The addresses in a style rule's text that are not data already: [{whole, url}], whole being the url(…) as written. */
+function cssUrls(text) {
+  const out = [];
+  const re = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]+))\s*\)/g;
+  let m;
+  while ((m = re.exec(String(text || '')))) {
+    const url = m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
+    if (url && !/^(?:data:|#)/i.test(url) && !out.some(o => o.whole === m[0])) out.push({ whole: m[0], url });
+  }
+  return out;
 }
 
 /* ---- Rewinding a conversation ----
@@ -1250,9 +1716,15 @@ function demoChatEdits(question, note) {
   return ops && ops.length ? '```lagrange-edits\n' + JSON.stringify(ops, null, 2) + '\n```' : '';
 }
 
-function demoChatReply(question, note, agentic) {
+/* The demo looks at the page when the message is about how it looks. */
+const DEMO_LOOK_RE = /\b(?:looks?|rendered|renders?|the page|drop ?caps?|cent(?:re|er)(?:ed|d)?|align(?:ed|ment)?|margins?|layout|typeset)\b/i;
+
+function demoChatReply(question, note, agentic, look) {
   const parts = ['*Demo mode: a canned reply, written without a model. Choose a Claude or ChatGPT subscription, an ' +
     'API key or an OpenAI-compatible server in Settings → Lagrange for real answers.*'];
+  if (look && note && DEMO_LOOK_RE.test(String(question || ''))) {
+    return parts.concat(`Let me look at the page of **${note.title}** as it is rendered.`, '```lagrange-look\n{"target": "note"}\n```').join('\n\n');
+  }
   if (agentic && note) {
     const block = demoChatEdits(question, note);
     if (block) return parts.concat(`Here is what the pen will set down in **${note.title}**.`, block).join('\n\n');
@@ -1277,6 +1749,28 @@ function demoChatReply(question, note, agentic) {
   return parts.join('\n\n');
 }
 
+/* The demo's reply after a look: what was measured on the page, in a few sentences (no model has seen anything). */
+function demoLookReply(look) {
+  if (!look) return '*Demo mode.* The page could not be looked at.';
+  const blocks = look.blocks || [];
+  const pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const count = kind => blocks.filter(b => b.kind === kind).length;
+  const ALIGN = { left: 'flush left', right: 'flush right', center: 'centred', justify: 'justified' };
+  const parts = [`*Demo mode: this is what was measured on the page, not a model’s reading of it.* I looked at the page of **${look.title}** (${look.label}): ` +
+    `${pl(blocks.length, 'block')}, among them ${pl(count('heading'), 'heading')} and ${pl(count('paragraph'), 'paragraph')}` +
+    (look.page && look.page.column && look.page.column.width ? `, in a column ${Math.round(look.page.column.width)} px wide.` : '.')];
+  const head = blocks.find(b => b.kind === 'heading' || b.kind === 'title');
+  if (head) parts.push(`The ${head.kind === 'title' ? 'title' : 'first heading'}, “${excerpt(head.text, 60)}”, is ${ALIGN[head.align] || head.align || 'set'}.`);
+  const caps = blocks.filter(b => b.dropcap);
+  parts.push(caps.length
+    ? `${caps.length === 1 ? 'One paragraph opens' : `${caps.length} paragraphs open`} with a drop cap: ${caps.slice(0, 6).map(b => `“${b.dropcap.letter}”`).join(', ')}.`
+    : 'No paragraph opens with a drop cap.');
+  const wide = blocks.filter(b => b.overflow > 1);
+  if (wide.length) parts.push(`${pl(wide.length, 'block')} ${wide.length === 1 ? 'is' : 'are'} too wide for the column (${wide.map(b => b.kind).slice(0, 4).join(', ')}).`);
+  if (look.page && look.page.margin) parts.push('The footnotes are set in the margin.');
+  return parts.join('\n\n');
+}
+
 
 /* ---------------------------------------------------------------------------------------------------------------
  * 3. Providers
@@ -1284,9 +1778,15 @@ function demoChatReply(question, note, agentic) {
  * complete(settings, req, hooks, session) -> Promise<{text, stopReason, stopDetails, model, fallbackTo}>
  *   req:     {purpose: 'chat'|'proofread'|'revise', system, messages: [{role, content}], cache, demo: () => string}
  *   hooks:   {signal, onText(delta, fullText), onRetry(status, ms), fetch, retryDelays}
- *   session: {noFallback, noEffort: {}}, what this run of Obsidian has learnt a provider won't take
+ *   session: {noFallback, noEffort: {}, noPictures: {}}, what this run of Obsidian has learnt a provider won't take
  * The reasoning effort (settings.effort) goes out only where the provider and model take one (effortFor); if a
  * provider still rejects it, the request is sent again without it and the session remembers.
+ * A message's content is text, or, when it carries a look at the page, a list of parts: pictures ({type: 'image',
+ * mediaType, data: base64}) and text, with the same in words alone as the message's alt (lookMessage). Each provider
+ * is handed the pictures in its own way: image blocks (Anthropic), image_url parts (OpenAI and compatible servers),
+ * image blocks on stdin (Claude Code), files in a temporary folder that is deleted afterwards (Codex). If a provider
+ * turns them down, the request goes again with the words alone, the reply says so (picturesRefused) and the session
+ * remembers.
  * Throws LagrangeError with a sentence for the writer, or an AbortError when stopped.
  * ------------------------------------------------------------------------------------------------------------- */
 
@@ -1401,6 +1901,13 @@ function forgetEffort(session, key) {
   if (!session) return;
   if (!session.noEffort) session.noEffort = {};
   session.noEffort[key] = true;
+}
+
+/* This provider and model (providerKey) would not take pictures: looks describe the page in words from now on. */
+function forgetPictures(session, key) {
+  if (!session) return;
+  if (!session.noPictures) session.noPictures = {};
+  session.noPictures[key] = true;
 }
 
 function sleep(ms, signal) {
@@ -1523,7 +2030,7 @@ async function streamAnthropic(s, req, hooks, session) {
     max_tokens: preset ? MAX_TOKENS : MAX_TOKENS_CUSTOM,
     stream: true,
     system: req.system,
-    messages: req.messages,
+    messages: anthropicMessages(req.messages),
   };
   if (req.cache) body.cache_control = { type: 'ephemeral' };   // reuses the note across turns of one conversation
   const headers = {
@@ -1603,11 +2110,12 @@ async function streamOpenAI(s, req, hooks, session) {
   const key = String(s.openaiApiKey || '').trim();
   if (key) headers.authorization = `Bearer ${key}`;
   const url = `${base}/chat/completions`;
-  const body = { model, stream: true, messages: [{ role: 'system', content: req.system }].concat(req.messages) };
+  let messages = req.messages, picturesRefused = false;
   // Only OpenAI's own reasoning models are sent an effort (effortSupported); a local server never is.
   let effort = sessionEffort(s, session, `openai:${model}`);
   let res;
   for (;;) {
+    const body = { model, stream: true, messages: [{ role: 'system', content: req.system }].concat(openaiMessages(messages)) };
     const b = effort ? Object.assign({ reasoning_effort: effort }, body) : body;
     res = await fetchWithRetry('openai', url, { method: 'POST', headers, body: JSON.stringify(b), signal: hooks.signal }, hooks);
     if (res.ok) break;
@@ -1615,6 +2123,14 @@ async function streamOpenAI(s, req, hooks, session) {
     if (effort && res.status === 400 && /reasoning|effort/i.test(parseErrorBody(text).message || text)) {
       forgetEffort(session, `openai:${model}`);
       effort = '';
+      continue;
+    }
+    // A model that reads text only turns a request with pictures down (400, 415 or 422, in as many wordings as
+    // there are servers): the page goes again in words.
+    if (!picturesRefused && [400, 415, 422].includes(res.status) && messagePictures(messages).length) {
+      forgetPictures(session, `openai:${model}`);
+      messages = withoutPictures(messages);
+      picturesRefused = true;
       continue;
     }
     throw httpError('openai', res, text, model);
@@ -1627,7 +2143,7 @@ async function streamOpenAI(s, req, hooks, session) {
   const type = (res.headers && res.headers.get('content-type')) || '';
   if (/application\/json/i.test(type)) onEvent({ data: await res.text() });   // a server that ignored "stream"
   else await readSSE(res, onEvent);
-  return { text: st.text, stopReason: st.stopReason, stopDetails: null, model, fallbackTo: null };
+  return { text: st.text, stopReason: st.stopReason, stopDetails: null, model, fallbackTo: null, picturesRefused };
 }
 
 /* ---- Subscriptions: Claude through Claude Code, ChatGPT through Codex (desktop only) ----
@@ -1680,7 +2196,8 @@ function findCli(name, custom) {
 
 /* One prompt from the conversation: the tools take a single message, so earlier turns become a short transcript. */
 function transcriptPrompt(messages) {
-  const msgs = (messages || []).filter(m => m && typeof m.content === 'string');
+  const msgs = (messages || []).filter(m => m && (typeof m.content === 'string' || Array.isArray(m.content)))
+    .map(m => ({ role: m.role, content: messageText(m) }));   // a picture leaves a line saying that it is attached
   if (msgs.length <= 1) return msgs.length ? msgs[0].content : '';
   const last = msgs[msgs.length - 1];
   const earlier = msgs.slice(0, -1).map(m => `${m.role === 'assistant' ? 'Lagrange' : 'Writer'}: ${m.content}`).join('\n\n');
@@ -1811,19 +2328,31 @@ async function streamClaudeCode(s, req, hooks, session) {
   const model = String(s.claudeCodeModel || '').trim();
   if (model) args.push('--model', quote(model));
   let effort = sessionEffort(s, session, 'claude-code');
+  // Pictures of the page go in on stdin with the prompt, as one message in Claude Code's stream-json form (image
+  // blocks, then the words). No tool is turned on for them, and nothing is written to disk.
+  let pictures = messagePictures(req.messages), picturesRefused = false;
   let st;
   try {
     for (;;) {
       st = { text: '', streamed: false, stopReason: null, model: null, error: null, done: false };
-      const { code, stderr } = await runCli('claude', exe, effort ? args.concat('--effort', quote(effort)) : args,
-        transcriptPrompt(req.messages), line => {
-          const delta = applyClaudeCodeLine(st, line);
-          if (delta && hooks.onText) hooks.onText(delta, st.text);
-        }, hooks);
+      const run = (effort ? args.concat('--effort', quote(effort)) : args).concat(pictures.length ? ['--input-format', 'stream-json'] : []);
+      const input = pictures.length ? claudeCodeInput(req.messages, pictures) : transcriptPrompt(picturesRefused ? withoutPictures(req.messages) : req.messages);
+      const { code, stderr } = await runCli('claude', exe, run, input, line => {
+        const delta = applyClaudeCodeLine(st, line);
+        if (delta && hooks.onText) hooks.onText(delta, st.text);
+      }, hooks);
+      const said = `${st.error || ''} ${stderr}`;
       // A Claude Code from before `--effort` stops at once, naming the option: run it again without.
-      if (effort && !st.text && /effort/i.test(`${st.error || ''} ${stderr}`) && /unknown|unrecogni[sz]ed|invalid|unexpected|not supported/i.test(`${st.error || ''} ${stderr}`)) {
+      if (effort && !st.text && /effort/i.test(said) && /unknown|unrecogni[sz]ed|invalid|unexpected|not supported/i.test(said)) {
         forgetEffort(session, 'claude-code');
         effort = '';
+        continue;
+      }
+      // One that will not take the pictures (it does not know the input format, or says so): the page goes in words.
+      if (pictures.length && !st.text && /input-format|stream-json|image|unknown option|unrecogni[sz]ed|unexpected/i.test(said)) {
+        forgetPictures(session, 'claude-code');
+        pictures = [];
+        picturesRefused = true;
         continue;
       }
       if (st.error) throw new LagrangeError(cliErrorMessage('claude', st.error), { kind: 'stream' });
@@ -1833,38 +2362,72 @@ async function streamClaudeCode(s, req, hooks, session) {
   } finally {
     try { fs.unlinkSync(sysFile); } catch (e) { /* already gone */ }
   }
-  return { text: st.text, stopReason: st.stopReason || 'end_turn', stopDetails: null, model: st.model || model || 'Claude Code', fallbackTo: null };
+  return { text: st.text, stopReason: st.stopReason || 'end_turn', stopDetails: null, model: st.model || model || 'Claude Code', fallbackTo: null, picturesRefused };
+}
+
+/* What Claude Code reads on stdin with `--input-format stream-json` when there are pictures: one line, a user
+   message whose content is the pictures and then the prompt. */
+function claudeCodeInput(messages, pictures) {
+  const content = pictures.map(p => ({ type: 'image', source: { type: 'base64', media_type: p.mediaType || 'image/png', data: p.data } }));
+  content.push({ type: 'text', text: transcriptPrompt(messages) });
+  return JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
 }
 
 async function streamCodex(s, req, hooks, session) {
   const exe = findCli('codex', s.codexPath);
   if (!exe) throw new LagrangeError(`Codex wasn’t found${s.codexPath ? ` at ${s.codexPath}` : ''}. ${CLI.codex.install}`, { kind: 'setup' });
-  const os = nodeModule('os');
-  const args = ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-C', os.tmpdir()];
+  const fs = nodeModule('fs'), os = nodeModule('os'), path = nodeModule('path');
   const model = String(s.codexModel || '').trim();
-  if (model) args.push('-m', model);
-  const input = '<instructions>\n' + (req.system || '') + '\n\nAnswer in text only: do not run commands, and do not ' +
-    'read or write files. Everything you need is in this message.\n</instructions>\n\n' + transcriptPrompt(req.messages);
+  const instructions = '<instructions>\n' + (req.system || '') + '\n\nAnswer in text only: do not run commands, and do not ' +
+    'read or write files. Everything you need is in this message.\n</instructions>\n\n';
   let effort = sessionEffort(s, session, `codex:${model}`);
-  let st;
-  for (;;) {
-    st = { text: '', error: null, done: false };
-    // `-c key=value` overrides Codex's config for this run; a bare word is taken as a string.
-    const { code, stderr } = await runCli('codex', exe, args.concat(effort ? ['-c', `model_reasoning_effort=${effort}`] : [], '-'), input, line => {
-      const delta = applyCodexLine(st, line);
-      if (delta && hooks.onText) hooks.onText(delta, st.text);
-    }, hooks);
-    // A model or a Codex that won't take this effort says so: run it again without.
-    if (effort && !st.text && /reasoning|effort/i.test(`${st.error || ''} ${stderr}`)) {
-      forgetEffort(session, `codex:${model}`);
-      effort = '';
-      continue;
+  // Pictures of the page are attached with `-i`, which takes files: they are written to a folder of their own in the
+  // temporary folder (which only this user can read), and the folder is deleted when Codex has finished.
+  let pictures = messagePictures(req.messages), picturesRefused = false;
+  const quote = a => (process.platform === 'win32' && /\.cmd$/i.test(exe) ? `"${String(a).replace(/"/g, '""')}"` : a);
+  let dir = null, st;
+  try {
+    for (;;) {
+      const args = ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only'];
+      if (pictures.length) {
+        if (!dir) dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lagrange-look-'));
+        pictures.forEach((p, i) => {
+          const file = path.join(dir, `page-${i + 1}.${p.mediaType === 'image/jpeg' ? 'jpg' : 'png'}`);
+          fs.writeFileSync(file, Buffer.from(p.data, 'base64'));
+          args.push('-i', quote(file));
+        });
+      }
+      args.push('-C', os.tmpdir());
+      if (model) args.push('-m', model);
+      const input = instructions + transcriptPrompt(picturesRefused ? withoutPictures(req.messages) : req.messages);
+      st = { text: '', error: null, done: false };
+      // `-c key=value` overrides Codex's config for this run; a bare word is taken as a string.
+      const { code, stderr } = await runCli('codex', exe, args.concat(effort ? ['-c', `model_reasoning_effort=${effort}`] : [], '-'), input, line => {
+        const delta = applyCodexLine(st, line);
+        if (delta && hooks.onText) hooks.onText(delta, st.text);
+      }, hooks);
+      const said = `${st.error || ''} ${stderr}`;
+      // A model or a Codex that won't take this effort says so: run it again without.
+      if (effort && !st.text && /reasoning|effort/i.test(said)) {
+        forgetEffort(session, `codex:${model}`);
+        effort = '';
+        continue;
+      }
+      // One that will not take the pictures: the page goes in words.
+      if (pictures.length && !st.text && /image|unexpected argument|unrecogni[sz]ed|unknown/i.test(said)) {
+        forgetPictures(session, `codex:${model}`);
+        pictures = [];
+        picturesRefused = true;
+        continue;
+      }
+      if (st.error) throw new LagrangeError(cliErrorMessage('codex', st.error), { kind: 'stream' });
+      if (!st.text) throw new LagrangeError(cliErrorMessage('codex', stderr || `exit code ${code}`), { kind: 'stream' });
+      break;
     }
-    if (st.error) throw new LagrangeError(cliErrorMessage('codex', st.error), { kind: 'stream' });
-    if (!st.text) throw new LagrangeError(cliErrorMessage('codex', stderr || `exit code ${code}`), { kind: 'stream' });
-    break;
+  } finally {
+    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* left in the temporary folder */ } }
   }
-  return { text: st.text, stopReason: 'end_turn', stopDetails: null, model: model || 'Codex', fallbackTo: null };
+  return { text: st.text, stopReason: 'end_turn', stopDetails: null, model: model || 'Codex', fallbackTo: null, picturesRefused };
 }
 
 /* Settings → "Check": runs `<tool> --version`. Resolves with a sentence for the settings page. */
@@ -2060,8 +2623,40 @@ const CHAT_AGENTIC =
   'itself changed, answer in prose with no block; you may offer to make the change. Never write a lagrange-edits ' +
   'block for any other purpose, and never more than one in a reply. If no note is open there is nothing to edit.';
 
-function chatSystemPrompt(note, clip, agentic) {
-  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) + '\n\n' +
+// The contract for a look at the page in a chat reply (see "Looking at the page" among the pure helpers). It stands
+// by itself, after whichever of the two paragraphs above applies, and is left out when looking is turned off.
+const CHAT_LOOK =
+  'You can also look at the page. What you are given is the note’s Markdown source; the writer reads the page that ' +
+  'Scriptorium sets from it (drop caps, small capitals, centred headings, notes in the margin, mathematics, callouts, ' +
+  'pictures), and how that comes out depends on their theme, fonts and the width of their window, none of which the ' +
+  'source shows. When your answer depends on how the page actually looks (alignment, spacing, where a line breaks, ' +
+  'whether a drop cap, an equation, a table or a picture came out right, what is in the margin), or the writer asks ' +
+  'how something looks, do not guess: say in a few words what you are checking, and end your reply with one block ' +
+  'in exactly this form:\n\n' +
+  '```lagrange-look\n' +
+  '{"target": "note"}\n' +
+  '```\n\n' +
+  'The block holds one JSON object, and the target is one of:\n' +
+  '- {"target": "note"}: the whole note, from its beginning;\n' +
+  '- {"target": "view"}: the part the writer has on screen now;\n' +
+  '- {"target": "section", "heading": "the heading’s text"}: one section;\n' +
+  '- {"target": "passage", "near": "exact words from the note"}: the paragraph holding those words, and its neighbours;\n' +
+  '- {"target": "lines", "from": 12, "to": 40}: a range of the source’s lines.\n' +
+  'Stop after the block. The page as Reading view renders it is then shown to you, in pictures where the model you ' +
+  'run on takes them, and always with what was measured on it (each block’s alignment, font, lines, drop cap, ' +
+  'footnotes, and whether it is too wide for its column), and you carry on with your reply to the writer. The writer ' +
+  'sees that you looked, and can open what you were shown. You may look at most twice for one message of the ' +
+  'writer’s, and a long note takes more than one look, so choose the target with care; do not look when the source ' +
+  'already answers the question.';
+
+// With the pen as well: the two blocks in one reply.
+const CHAT_LOOK_AFTER_EDITS =
+  ' A reply may hold an edits block and a look block: your pen writes the edits first, and the look then shows the ' +
+  'page as it stands after them, which is how to check a change you have made.';
+
+function chatSystemPrompt(note, clip, agentic, look) {
+  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) +
+    (look && note ? '\n\n' + CHAT_LOOK + (agentic ? CHAT_LOOK_AFTER_EDITS : '') : '') + '\n\n' +
     (note ? noteBlock(note, clip) : 'No note is open at the moment; talk with the writer about their writing in general.');
 }
 
@@ -3750,7 +4345,588 @@ async function runEdits(view, located, opts) {
 
 
 /* ---------------------------------------------------------------------------------------------------------------
- * 7. The chat view, the revise modal, the settings tab and the plugin
+ * 7. The page as rendered
+ *
+ * lookAtPage(app, view, spec, opts) -> Promise<look>
+ *   view: the note's Markdown view; spec: what to look at (normalizeLook); opts: {pictures, signal}
+ *   look: {spec, label, title, path, page, blocks, pictures: [{mediaType, data, width, height, top, bottom}], more,
+ *          remarks, problem, description}
+ * The note is set as Reading view sets it, but in a page of its own, far off the screen (renderPage): the view, the
+ * editor and the workspace are not touched, and the page is thrown away when the look is over. Its blocks are
+ * measured where they lie (measurePage), which is what a model without eyes is told and what one with eyes is told
+ * as well. Its pictures are drawn by the browser from the page's own markup and styles (picturePage), so they need
+ * nothing of Electron or Node, though they are taken on a computer only. Nothing here sends anything anywhere.
+ * ------------------------------------------------------------------------------------------------------------- */
+
+/* The width of the pane a note is shown in, which is the width its page is set to. */
+function paneWidth(view) {
+  const w = Math.round((view.contentEl && view.contentEl.clientWidth) || (view.containerEl && view.containerEl.clientWidth) || 0);
+  return Math.max(320, Math.min(2400, w || 800));
+}
+
+/* What the writer has on screen in a note's view: in the editor, {from, to}, lines counted from 1; in Reading view,
+   {firstText, lastText}, the words of the first and the last block in sight (Reading view keeps no line numbers a
+   plugin may read); null if it cannot be told. */
+function visibleLines(view) {
+  const tidy = t => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  try {
+    if (view.getMode() === 'source') {
+      const cm = view.editor && view.editor.cm;
+      if (!cm) return null;
+      const box = cm.scrollDOM.getBoundingClientRect();
+      if (!box.height) return null;
+      const a = cm.lineBlockAtHeight(box.top - cm.documentTop), b = cm.lineBlockAtHeight(box.bottom - cm.documentTop);
+      return { from: cm.state.doc.lineAt(a.from).number, to: cm.state.doc.lineAt(b.to).number };
+    }
+    const pane = view.containerEl.querySelector('.markdown-reading-view > .markdown-preview-view');
+    const sizer = pane && pane.querySelector(':scope > .markdown-preview-sizer');
+    if (!sizer) return null;
+    const box = pane.getBoundingClientRect();
+    const inSight = Array.from(sizer.children).filter(el => {
+      if (!/(?:^|\s)el-/.test(el.className)) return false;
+      const r = el.getBoundingClientRect();
+      return r.height > 0 && r.bottom > box.top && r.top < box.bottom;
+    });
+    if (!inSight.length) return null;
+    return { firstText: tidy(inSight[0].textContent), lastText: tidy(inSight[inSight.length - 1].textContent) };
+  } catch (e) {
+    return null;
+  }
+}
+
+/* The lines (counted from 1) that hold `near`, words from the note: {from, to}, or null if they are not in it. Found
+   as an edit's "find" is, exactly or loosely; where they stand more than once, the first place is taken. */
+function passageLines(text, near) {
+  let hits = findAll(text, String(near || ''));
+  if (!hits.length) hits = looseFindAll(text, String(near || ''));
+  if (!hits.length) return null;
+  const line = offset => text.slice(0, offset).split('\n').length;
+  return { from: line(hits[0][0]), to: line(Math.max(hits[0][0], hits[0][1] - 1)) };
+}
+
+/* The line (counted from 1) of the heading that reads `heading`, or 0. */
+function headingLine(text, heading) {
+  const norm = t => String(t || '').replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const want = norm(String(heading || '').replace(/^#+\s*/, ''));
+  if (!want) return 0;
+  const lines = String(text || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^#{1,6}\s+(.*?)\s*#*\s*$/.exec(lines[i]);
+    if (m && norm(m[1]) === want) return i + 1;
+  }
+  return 0;
+}
+
+/* The note's sections, as Obsidian's own parser cuts them, and its front matter: {sections: [{type, from, to}] |
+   null, frontmatter}. The parser is asked about the text as it stands in the editor (the saved file's metadata may
+   be a moment behind); where this Obsidian has no such call, nothing is said about lines. */
+async function noteSections(app, text) {
+  try {
+    const cache = app.metadataCache;
+    if (!cache || typeof cache.computeMetadataAsync !== 'function') return { sections: null, frontmatter: null };
+    const meta = await cache.computeMetadataAsync(new TextEncoder().encode(text).buffer);
+    return {
+      sections: ((meta && meta.sections) || []).map(s => ({ type: s.type, from: s.position.start.line, to: s.position.end.line })),
+      frontmatter: (meta && meta.frontmatter) || null,
+    };
+  } catch (e) {
+    return { sections: null, frontmatter: null };
+  }
+}
+
+/* Sets a note as Reading view does, in a page of its own that is never shown. Obsidian's renderer writes the note's
+   blocks (so every plugin's post-processors run, and mathematics, callouts and embeds are made as usual); the page
+   around them is built as Reading view builds it, because the vault's theme and snippets look for it: the pane's
+   own classes, the title above the text, and each block in a <div> marked el-p, el-h2 and so on (Scriptorium finds
+   a chapter's opening paragraph by those marks). The page is as wide as the note's pane, and as tall as its text.
+   If Scriptorium is on, it then gives the note its own drop cap, and lays the footnotes out in the margin as it
+   does in a view (dressLikeScriptorium). Returns {host, pane, sizer, destroy()}. */
+async function renderPage(app, view, text, width, frontmatter) {
+  const doc = document, file = view.file;
+  const host = doc.body.createDiv({ cls: 'lagrange-look-page', attr: { 'aria-hidden': 'true', inert: '' } });
+  host.style.cssText = `position:fixed;left:-100000px;top:0;width:${width}px;pointer-events:none;`;
+  const component = new Component();
+  component.load();
+  const page = { host, pane: null, sizer: null, margin: null, destroy() {
+    if (page.margin) { try { page.margin.destroy(); } catch (e) { /* Scriptorium's own */ } }
+    try { component.unload(); } catch (e) { /* nothing to unload */ }
+    host.remove();
+  } };
+  try {
+    const real = view.containerEl.querySelector('.markdown-reading-view > .markdown-preview-view');
+    const classes = (real ? Array.from(real.classList) : ['markdown-preview-view', 'markdown-rendered', 'node-insert-event',
+      'is-readable-line-width', 'allow-fold-headings', 'allow-fold-lists', 'show-indentation-guide', 'show-properties']
+      .concat([].concat((frontmatter && (frontmatter.cssclasses || frontmatter.cssclass)) || []).map(String)))
+      .filter(c => c && c !== 'scriptorium-margin');
+    const leaf = host.createDiv({ cls: 'workspace-leaf-content', attr: { 'data-type': 'markdown', 'data-mode': 'preview' } });
+    const content = leaf.createDiv({ cls: 'view-content' });
+    const reading = content.createDiv({ cls: 'markdown-reading-view' });
+    reading.style.width = '100%';
+    const pane = page.pane = reading.createDiv({ cls: classes.join(' ') });
+    const sizer = page.sizer = pane.createDiv({ cls: 'markdown-preview-sizer markdown-preview-section' });
+    sizer.createDiv({ cls: 'markdown-preview-pusher' }).style.cssText = 'width:1px;height:0.1px;margin-bottom:0px;';
+    sizer.createDiv({ cls: 'mod-header mod-ui' }).createDiv({ cls: 'inline-title', text: file.basename });
+    const written = sizer.createDiv();
+    await renderMarkdown(app, text, written, file.path, component);
+    for (const el of Array.from(written.children)) {
+      const block = doc.createElement('div');
+      block.className = `el-${el.tagName.toLowerCase()}`;
+      if (el.matches('pre.frontmatter')) block.classList.add('mod-frontmatter', 'mod-ui');
+      sizer.insertBefore(block, written);
+      block.appendChild(el);
+    }
+    written.remove();
+    sizer.createDiv({ cls: 'mod-footer mod-ui' });
+    page.margin = dressLikeScriptorium(app, { file, host, content, text, frontmatter });
+    return page;
+  } catch (e) {
+    page.destroy();
+    throw e;
+  }
+}
+
+/* What Scriptorium does to a Reading view beyond its post-processor, done to the page: the note's own drop cap (its
+   "dropcap" property), and the footnotes and margin notes in the margin where the pane is wide enough. Scriptorium
+   does both for the Markdown views in the workspace, so the page stands in for one: an object that says it is a
+   view of this note in Reading mode, handed to Scriptorium's own previewDropcap and to its own marginalia.refresh
+   (called with a list of views that holds only the page). If Scriptorium is off, or is a version that does these
+   otherwise, the page keeps the vault's drop cap and its footnotes at the foot. Returns the margin's layout (it has
+   layout() and destroy()), or null. */
+function dressLikeScriptorium(app, at) {
+  const sc = app.plugins && app.plugins.plugins && app.plugins.plugins.scriptorium;
+  if (!sc) return null;
+  let standIn;
+  try {
+    standIn = Object.create(MarkdownView.prototype, {
+      file: { value: at.file }, contentEl: { value: at.content }, containerEl: { value: at.host }, data: { value: at.text },
+      getMode: { value: () => 'preview' }, getViewData: { value: () => at.text },
+    });
+  } catch (e) {
+    return null;
+  }
+  try {
+    if (typeof sc.previewDropcap === 'function') {
+      const own = sc.constructor && typeof sc.constructor.noteDropcap === 'function' && at.frontmatter ? sc.constructor.noteDropcap(at.frontmatter) : undefined;
+      sc.previewDropcap(standIn, own, true);
+    }
+  } catch (e) { /* the vault's drop cap stays */ }
+  try {
+    const m = sc.marginalia;
+    if (!m || typeof m.refresh !== 'function' || !(sc.settings && sc.settings.marginalia)) return null;
+    const workspace = Object.create(app.workspace, { iterateAllLeaves: { value: each => each({ view: standIn }) } });
+    const only = Object.create(m, { states: { value: new Map() }, app: { value: Object.create(app, { workspace: { value: workspace } }) } });
+    m.refresh.call(only);
+    const state = only.states.get(standIn);
+    return state && typeof state.destroy === 'function' ? state : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* Waits until the page has come together: fonts, pictures, mathematics, embedded notes, and what plugins do once
+   the blocks are in (Scriptorium measures each opening line, and lays the margin out a moment later). The page is
+   ready when nothing in it has changed for a moment; at most a few seconds are waited. Timers are used, not frames:
+   a window that is hidden draws no frames. */
+async function settlePage(page, signal) {
+  const host = page.host, doc = host.ownerDocument, win = doc.defaultView || window;
+  const deadline = Date.now() + 5000;
+  let changed = Date.now();
+  const watch = new win.MutationObserver(() => { changed = Date.now(); });
+  watch.observe(host, { subtree: true, childList: true, attributes: true, characterData: true });
+  const relay = () => { if (page.margin && typeof page.margin.layout === 'function') { try { page.margin.layout(); } catch (e) { /* Scriptorium's own */ } } };
+  try {
+    try { if (typeof obsidian.finishRenderMath === 'function') await obsidian.finishRenderMath(); } catch (e) { /* no mathematics */ }
+    for (const img of Array.from(host.querySelectorAll('img'))) if (img.loading === 'lazy') img.loading = 'eager';
+    if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(2000, signal)]);
+    for (let laid = false; ;) {
+      await sleep(50, signal);
+      const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)');
+      const late = Date.now() > deadline;
+      if (!late && (waiting || Date.now() - changed < 160)) continue;
+      if (laid || late) break;
+      relay();              // the margin once more, now that everything has its size; then one more quiet moment
+      laid = true;
+    }
+    if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(1500, signal)]);
+  } finally {
+    watch.disconnect();
+  }
+}
+
+/* Measures the page: {page, blocks}. page: {width, height, column: {left, width}, theme, font, size, margin,
+   background}; blocks: one record for each block that takes room on the page, as describeLook lists them, with its
+   place (top, bottom, in CSS pixels from the top of the page) and the source lines it comes from (info.sections, by
+   alignSections; info.shift is added to them). */
+function measurePage(page, info) {
+  const { host, pane, sizer } = page;
+  const doc = host.ownerDocument, win = doc.defaultView || window;
+  const origin = host.getBoundingClientRect(), column = sizer.getBoundingClientRect();
+  const style = (el, pseudo) => win.getComputedStyle(el, pseudo || null);
+  // the font an element is set in: the first of its families that is there to be used (one that a style sheet
+  // declares but the browser has not loaded is passed over, and so is "??", which Obsidian writes where no font has
+  // been chosen; one that no sheet declares is taken to be installed)
+  const declared = new Map();
+  if (doc.fonts) doc.fonts.forEach(f => { const name = String(f.family).replace(/^["']|["']$/g, ''); declared.set(name, Boolean(declared.get(name)) || f.status === 'loaded'); });
+  const family = cs => {
+    const names = String(cs.fontFamily || '').split(',').map(n => n.trim().replace(/^["']|["']$/g, '')).filter(n => /[\p{L}\p{N}]/u.test(n));
+    return names.find(n => !declared.has(n) || declared.get(n)) || names[0] || '';
+  };
+  const round = v => Math.round(parseFloat(v) * 10) / 10 || 0;
+  const tidy = t => String(t || '').replace(/\s+/g, ' ').trim();
+  const alignOf = el => {
+    const cs = style(el), rtl = cs.direction === 'rtl';
+    const a = String(cs.textAlign || '').replace('-webkit-', '');
+    if (a === 'center' || a === 'justify' || a === 'left' || a === 'right') return a;
+    return (a === 'end') !== rtl ? 'right' : 'left';
+  };
+  // where a box stands in the column: against its left edge, its right edge, or in the middle
+  const placed = box => {
+    const l = box.left - column.left, r = column.right - box.right;
+    if (Math.abs(l - r) <= 2) return l <= 2 ? 'full' : 'center';
+    return l < r ? 'left' : 'right';
+  };
+  // the lines of text in an element: its boxes of text, counted by where they stand (a floated initial is taller
+  // than a line and is not one)
+  const linesOf = el => {
+    const range = doc.createRange();
+    range.selectNodeContents(el);
+    const max = 2 * (parseFloat(style(el).fontSize) || 16);
+    const boxes = Array.from(range.getClientRects()).filter(r => r.width > 0.5 && r.height > 2 && r.height < max).sort((a, b) => a.top - b.top);
+    let n = 0, bottom = -Infinity;
+    for (const r of boxes) {
+      if ((r.top + r.bottom) / 2 > bottom) { n++; bottom = r.bottom; } else bottom = Math.max(bottom, r.bottom);
+    }
+    return n;
+  };
+  const dropcapOf = p => {
+    const ps = style(p), base = parseFloat(ps.fontSize) || 16, line = parseFloat(ps.lineHeight) || base * 1.5;
+    const letter = (/[\p{L}\p{N}]/u.exec(p.textContent || '') || [''])[0];
+    if (!letter) return null;
+    // a picture in the letter's place (Scriptorium's sets of drop caps): a floated box before the text
+    const before = style(p, '::before');
+    if (before.content !== 'none' && before.float !== 'none' && /url\(/.test(`${before.backgroundImage} ${before.maskImage} ${before.webkitMaskImage}`)) {
+      const h = parseFloat(before.height) || 0;
+      return { letter, image: true, size: round(h), deep: h ? Math.max(1, Math.round(h / line)) : 0 };
+    }
+    const first = style(p, '::first-letter'), size = parseFloat(first.fontSize) || 0;
+    if (first.float === 'none' && size < base * 1.8) return null;
+    // how deep it sinks: the letter's own box against the lines
+    let deep = 0;
+    try {
+      const walker = doc.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const i = node.data.indexOf(letter);
+        if (i < 0) continue;
+        const r = doc.createRange();
+        r.setStart(node, i); r.setEnd(node, i + letter.length);
+        const box = r.getBoundingClientRect();
+        if (box.height) deep = Math.max(1, Math.round(box.height / line));
+        break;
+      }
+    } catch (e) { /* the size says enough */ }
+    return { letter, font: family(first), size: round(size), deep };
+  };
+
+  const text = sizer.querySelector('.el-p > p');
+  const paper = el => {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const c = style(n).backgroundColor;
+      if (c && c !== 'transparent' && !/rgba\([^)]*,\s*0\s*\)$/.test(c)) return c;
+    }
+    return '#ffffff';
+  };
+  const meta = {
+    width: origin.width, height: Math.max(host.offsetHeight, host.scrollHeight),
+    column: { left: column.left - origin.left, width: column.width },
+    theme: doc.body.classList.contains('theme-dark') ? 'dark' : 'light',
+    font: text ? family(style(text)) : family(style(pane)), size: round(style(text || pane).fontSize),
+    margin: Boolean(pane.querySelector('.scriptorium-sidenote')),
+    background: paper(pane),
+  };
+
+  // the formulas, in the order they stand: MathJax keeps each one's source on it; where it does not, the note's
+  // own formulas are told off against them, if there are as many
+  const formulas = Array.from(sizer.querySelectorAll('.math'));
+  let sources = formulas.map(f => { const m = f.querySelector('mjx-math[data-latex]'); return m ? m.getAttribute('data-latex') : null; });
+  if (sources.some(v => v === null)) {
+    const written = Array.isArray(info.math) ? info.math : [];
+    sources = written.length === formulas.length ? written : sources.map(v => v || '');
+  }
+
+  const rendered = Array.from(sizer.children).filter(w => /(?:^|\s)el-/.test(w.className) && w.firstElementChild);
+  const where = info.sections ? alignSections(info.sections, rendered.map(w => w.firstElementChild.tagName.toLowerCase())) : null;
+  const blocks = [];
+  const add = (w, el, lines) => {
+    const box = w.getBoundingClientRect();
+    const cls = el.classList, tag = el.tagName.toLowerCase();
+    const inMargin = cls.contains('callout') && cls.contains('scriptorium-in-margin');
+    if (box.height < 0.5 && !inMargin) return;      // the front matter, a comment: nothing on the page
+    const b = { kind: tag, text: tidy(el.textContent).slice(0, 200), top: box.top - origin.top, bottom: box.bottom - origin.top };
+    if (lines) { b.from = lines.from + (info.shift || 0); b.to = lines.to + (info.shift || 0); }
+    let inner = el;
+    if (cls.contains('inline-title')) b.kind = 'title';
+    else if (/^h[1-6]$/.test(tag)) { b.kind = 'heading'; b.level = Number(tag[1]); }
+    else if (tag === 'p') b.kind = el.querySelector('img') && !b.text ? 'picture' : 'paragraph';
+    else if (tag === 'blockquote') { b.kind = 'blockquote'; inner = el.querySelector('p') || el; }
+    else if (cls.contains('callout')) {
+      b.kind = 'callout';
+      b.callout = el.getAttribute('data-callout') || 'note';
+      b.inMargin = inMargin;
+      inner = el.querySelector('.callout-content p, .callout-content') || el;
+    } else if (tag === 'ul' || tag === 'ol') { b.kind = 'list'; b.items = el.querySelectorAll('li').length; inner = el.querySelector('li') || el; }
+    else if (tag === 'table') {
+      b.kind = 'table';
+      b.rows = el.rows.length;
+      b.cols = el.rows.length ? el.rows[0].cells.length : 0;
+      inner = el.querySelector('td, th') || el;
+    } else if (tag === 'pre') {
+      b.kind = 'code';
+      const lang = /(?:^|\s)language-([\w+#.-]+)/.exec(`${el.className} ${el.firstElementChild ? el.firstElementChild.className : ''}`);
+      if (lang) b.language = lang[1];
+      inner = el.querySelector('code') || el;
+    } else if (cls.contains('math')) b.kind = 'math';
+    else if (tag === 'hr') b.kind = 'rule';
+    else if (tag === 'section' && cls.contains('footnotes')) { b.kind = 'footnotes'; b.items = el.querySelectorAll('li').length; inner = el.querySelector('li') || el; }
+
+    if (b.kind === 'picture') { const img = el.querySelector('img'); b.align = placed(img.getBoundingClientRect()); }
+    else if (b.kind === 'math') { const m = el.querySelector('mjx-math') || el; b.align = placed(m.getBoundingClientRect()); b.text = ''; }
+    else if (b.kind !== 'rule') b.align = alignOf(inner);
+    if (!['picture', 'math', 'rule'].includes(b.kind)) {
+      const cs = style(inner);
+      b.font = family(cs);
+      b.size = round(cs.fontSize);
+      b.italic = /italic|oblique/.test(cs.fontStyle);
+      b.smallCaps = /small-caps/.test(`${cs.fontVariantCaps} ${cs.fontVariant}`);
+      if (b.kind !== 'table') b.lines = linesOf(el);
+    }
+    if (b.kind === 'paragraph') {
+      b.dropcap = dropcapOf(el);
+      b.firstLineCaps = /small-caps/.test(`${style(el, '::first-line').fontVariantCaps}`) && !b.smallCaps;
+    }
+    b.math = Array.from(el.querySelectorAll('.math')).concat(cls.contains('math') ? [el] : []).map(f => sources[formulas.indexOf(f)]).filter(Boolean);
+    b.images = Array.from(el.querySelectorAll('img')).slice(0, 8).map(img => {
+      const r = img.getBoundingClientRect();
+      return { alt: img.alt || '', width: r.width, height: r.height, broken: img.complete && !img.naturalWidth, remote: /^https?:/i.test(img.currentSrc || img.src || '') };
+    });
+    b.notes = Array.from(el.querySelectorAll('sup.footnote-ref a[data-footref]')).slice(0, 12).map(a => {
+      const id = a.getAttribute('data-footref');
+      const side = Array.from(pane.querySelectorAll('.scriptorium-sidenote[data-footref]')).some(n => n.getAttribute('data-footref') === id);
+      return { label: tidy(a.textContent).replace(/^\[|\]$/g, ''), where: side ? 'margin' : 'foot' };
+    });
+    // too wide: something in it scrolls sideways, or reaches past the right edge of the column
+    b.overflow = 0;
+    for (const x of [el].concat(Array.from(el.querySelectorAll('pre, code, table, mjx-container, img')).slice(0, 40))) {
+      const scrolled = x.scrollWidth - x.clientWidth;
+      if (x.clientWidth && scrolled > 1 && style(x).overflowX !== 'visible') { b.overflow = Math.max(b.overflow, scrolled); b.scrolls = true; }
+      const past = x.getBoundingClientRect().right - column.right;
+      if (past > 1 && !inMargin) b.overflow = Math.max(b.overflow, past);
+    }
+    blocks.push(b);
+  };
+  const title = sizer.querySelector(':scope > .mod-header > .inline-title');
+  if (title && title.getBoundingClientRect().height >= 0.5) add(title.parentElement, title, null);
+  rendered.slice(0, LOOK_BLOCKS).forEach((w, i) => add(w, w.firstElementChild, where ? where[i] : null));
+  return { page: meta, blocks };
+}
+
+/* The page's markup and styles, as one XHTML text the browser can draw by itself, with nothing to fetch: the page
+   (a copy of it) inside copies of <html> and <body>, which carry the classes the theme's rules look for; every style
+   rule of the document; the fonts in use, and the note's own pictures, as data. A picture from the web is not read
+   again (Lagrange makes no request of its own for one): a grey box of its size stands in its place. */
+async function pageMarkup(page, signal) {
+  const host = page.host, doc = host.ownerDocument, win = doc.defaultView || window;
+  const asData = async url => {
+    const res = await win.fetch(url, { signal });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const blob = await res.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new win.FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error || new Error('unreadable'));
+      reader.readAsDataURL(blob);
+    });
+  };
+  // a file of the vault or of Obsidian itself (the app's own address), never the network
+  const local = url => /^(?:app|capacitor|file|blob):/i.test(url) || (/^https?:/i.test(url) && new URL(url).origin === win.location.origin);
+  const inline = async (text, base) => {
+    for (const u of cssUrls(text)) {
+      try {
+        const url = new URL(u.url, base).href;
+        if (local(url)) text = text.split(u.whole).join(`url("${await asData(url)}")`);
+      } catch (e) { /* left as it is: it will not load, and the rest is drawn */ }
+    }
+    return text;
+  };
+
+  // the fonts in use (the browser has loaded them), and every other rule as it stands
+  const inUse = new Set();
+  if (doc.fonts) doc.fonts.forEach(f => { if (f.status === 'loaded') inUse.add(String(f.family).replace(/^["']|["']$/g, '')); });
+  let fonts = '', rules = '';
+  const read = async (sheet, depth) => {
+    let list;
+    try { list = sheet.cssRules; } catch (e) { return; }   // a sheet from elsewhere, closed to scripts
+    const base = sheet.href || doc.baseURI;
+    for (const rule of Array.from(list)) {
+      if (rule.type === 5) {                                // @font-face
+        const name = String(rule.style.getPropertyValue('font-family') || '').replace(/^["']|["']$/g, '');
+        if (inUse.has(name)) fonts += `${await inline(rule.cssText, base)}\n`;
+      } else if (rule.type === 3) {                         // @import: its rules, in its place
+        if (rule.styleSheet && depth < 4) await read(rule.styleSheet, depth + 1);
+      } else {
+        rules += `${rule.cssText}\n`;
+      }
+    }
+  };
+  for (const sheet of Array.from(doc.styleSheets)) await read(sheet, 0);
+  if (signal && signal.aborted) throw abortError();
+
+  const html = doc.createElement('html'), body = doc.createElement('body'), sheet = doc.createElement('style');
+  for (const [from, to] of [[doc.documentElement, html], [doc.body, body]]) {
+    for (const a of Array.from(from.attributes)) if (/^(?:class|style|lang|dir|data-)/.test(a.name)) to.setAttribute(a.name, a.value);
+  }
+  const width = host.offsetWidth, height = Math.max(host.offsetHeight, host.scrollHeight);
+  body.setAttribute('style', `${body.getAttribute('style') || ''};margin:0;padding:0;width:${width}px;height:${height}px;overflow:hidden;`);
+  // nothing moves in a picture: an animation would be caught at its first frame
+  sheet.textContent = `${fonts}${rules}*, *::before, *::after { animation: none !important; transition: none !important; }\n`;
+  html.appendChild(sheet);
+  html.appendChild(body);
+  const copy = host.cloneNode(true);
+  copy.setAttribute('style', `position:static;width:${width}px;`);
+  copy.removeAttribute('inert');
+  body.appendChild(copy);
+
+  const live = Array.from(host.querySelectorAll('*')), copies = Array.from(copy.querySelectorAll('*'));
+  const box = (el, c) => { const r = el.getBoundingClientRect(); c.setAttribute('width', String(Math.round(r.width))); c.setAttribute('height', String(Math.round(r.height))); return r; };
+  const blank = (w, h) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.max(1, Math.round(w))}" height="${Math.max(1, Math.round(h))}"><rect width="100%" height="100%" fill="#888" fill-opacity="0.25"/></svg>`)}`;
+  let budget = 12000000;                                    // characters of pictures, as data, in one page
+  for (let i = 0; i < live.length && i < copies.length; i++) {
+    const el = live[i], c = copies[i], tag = el.tagName.toLowerCase();
+    if (tag === 'img') {
+      const r = box(el, c), src = el.currentSrc || el.src || '';
+      c.removeAttribute('srcset');
+      c.removeAttribute('loading');
+      if (/^data:/i.test(src)) continue;
+      let data = '';
+      try { if (local(src) && budget > 0) data = await asData(src); } catch (e) { /* a grey box */ }
+      budget -= data.length;
+      c.setAttribute('src', data || blank(r.width, r.height));
+    } else if (tag === 'canvas') {
+      const img = doc.createElement('img');
+      const r = box(el, img);
+      try { img.setAttribute('src', el.toDataURL('image/png')); } catch (e) { img.setAttribute('src', blank(r.width, r.height)); }
+      c.replaceWith(img);
+    } else if (['iframe', 'video', 'audio', 'object', 'embed', 'webview', 'script'].includes(tag)) {
+      const stand = doc.createElement('div');
+      const r = el.getBoundingClientRect();
+      stand.setAttribute('style', `display:inline-block;width:${Math.round(r.width)}px;height:${Math.round(r.height)}px;background:rgba(136,136,136,0.25);`);
+      c.replaceWith(stand);
+    } else if (tag === 'input') {
+      if (el.checked) c.setAttribute('checked', ''); else c.removeAttribute('checked');
+      if (el.type !== 'checkbox' && el.type !== 'radio') c.setAttribute('value', el.value);
+    }
+    // a picture named in an element's own style (Scriptorium's drop caps of a set are)
+    const own = c.getAttribute && c.getAttribute('style');
+    if (own && /url\(/.test(own)) c.setAttribute('style', await inline(own, doc.baseURI));
+  }
+  if (signal && signal.aborted) throw abortError();
+  return { xhtml: new win.XMLSerializer().serializeToString(html), width, height, rootFontSize: win.getComputedStyle(doc.documentElement).fontSize };
+}
+
+/* Takes the pictures of a page: one for each of `pages` ([{top, bottom}], CSS pixels), scaled by `scale`, as
+   [{mediaType, data (base64), width, height, top, bottom}]. The browser draws the page's markup as an SVG picture
+   (which must hold everything it needs: pageMarkup) and each page is cut from it on a canvas. A PNG, unless that
+   is too large (a page of photographs): then a JPEG. */
+async function picturePage(page, pages, scale, background, signal) {
+  const host = page.host, doc = host.ownerDocument, win = doc.defaultView || window;
+  const m = await pageMarkup(page, signal);
+  const img = new win.Image();
+  await new Promise((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('the page could not be drawn'));
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(pageSvg(m.xhtml, m.width, m.height, m.rootFontSize))}`;
+  });
+  try { if (img.decode) await img.decode(); } catch (e) { /* drawn as it is */ }
+  const out = [];
+  for (const p of pages) {
+    if (signal && signal.aborted) throw abortError();
+    const top = Math.max(0, Math.floor(p.top)), bottom = Math.min(m.height, Math.ceil(p.bottom));
+    if (bottom - top < 1) continue;
+    const canvas = doc.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(m.width * scale));
+    canvas.height = Math.max(1, Math.round((bottom - top) * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = background || '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, top, m.width, bottom - top, 0, 0, canvas.width, canvas.height);
+    let mediaType = 'image/png', url = canvas.toDataURL('image/png');
+    if (url.length > LOOK_PICTURE_CHARS) { mediaType = 'image/jpeg'; url = canvas.toDataURL('image/jpeg', 0.85); }
+    out.push({ mediaType, data: url.slice(url.indexOf(',') + 1), width: canvas.width, height: canvas.height, top, bottom });
+  }
+  if (!out.length) throw new Error('the page is empty');
+  return out;
+}
+
+/* A look at a note's page (see the head of this section). */
+async function lookAtPage(app, view, spec, opts) {
+  const o = opts || {}, signal = o.signal;
+  const file = view.file, full = view.getViewData();
+  let want = spec && spec.target ? spec : { target: 'auto' };
+  const seen = visibleLines(view);
+  const near = want.target === 'passage' ? passageLines(full, want.near) : null;
+  const focus = want.target === 'lines' ? want.from : near ? near.from
+    : want.target === 'section' ? headingLine(full, want.heading) : want.target !== 'note' && seen && seen.from ? seen.from : 1;
+  const source = lookSource(full, focus || 1, LOOK_SOURCE_CHARS);
+  const info = await noteSections(app, source.text);
+  if (signal && signal.aborted) throw abortError();
+  const width = paneWidth(view);
+  const page = await renderPage(app, view, source.text, width, info.frontmatter);
+  try {
+    await settlePage(page, signal);
+    const measured = measurePage(page, { sections: info.sections, shift: source.shift, math: mathSegments(source.text).filter(g => g.type === 'math' && typeof g.open !== 'string').map(g => g.source) });
+    measured.page.cut = source.cut;
+    const blocks = measured.blocks;
+    let range = lookRange(want, blocks, { seen, near });
+    if (!range) throw new LagrangeError('There is nothing on the page of this note yet.');
+    const scale = lookScale(width);
+    const line = (measured.page.size || 16) * 1.6;
+    const plan = r => {
+      const top = r.first === 0 ? 0 : Math.max(0, blocks[r.first].top - line / 2);
+      const bottom = r.last === blocks.length - 1 ? measured.page.height : Math.min(measured.page.height, blocks[r.last].bottom + line / 2);
+      const cuts = blocks.slice(r.first + 1, r.last + 1).map(b => b.top - 2);
+      return lookPages(top, Math.max(bottom, top + 1), cuts, LOOK_HEIGHT / scale, LOOK_PAGES, line * 1.5);
+    };
+    let pages = plan(range);
+    if (want.target === 'auto') {
+      // the whole note if one look holds it; else what is on screen, if that can be told
+      const onScreen = pages.more && seen ? lookRange({ target: 'view' }, blocks, { seen }) : null;
+      if (onScreen && !onScreen.remark) { want = { target: 'view' }; range = onScreen; pages = plan(range); } else want = { target: 'note' };
+    }
+    const remarks = [];
+    if (range.remark) remarks.push(range.remark);
+    let pictures = [], problem = '';
+    if (o.pictures) {
+      try {
+        pictures = await picturePage(page, pages.pages, scale, measured.page.background, signal);
+      } catch (e) {
+        if (isAbort(e) || (signal && signal.aborted)) throw abortError();
+        problem = String((e && e.message) || e).slice(0, 160);
+      }
+    }
+    const look = {
+      spec: want, label: range.remark ? 'the whole note' : lookLabel(want), title: file.basename, path: file.path, page: measured.page,
+      blocks: blocks.slice(range.first, range.last + 1), pictures, more: pictures.length ? pages.more : 0, remarks, problem, description: '',
+    };
+    look.description = describeLook(look, LOOK_DESCRIPTION_CHARS);
+    return look;
+  } finally {
+    page.destroy();
+  }
+}
+
+
+/* ---------------------------------------------------------------------------------------------------------------
+ * 8. The chat view, the revise modal, the settings tab and the plugin
  * ------------------------------------------------------------------------------------------------------------- */
 
 function renderMarkdown(app, markdown, el, sourcePath, component) {
@@ -3768,6 +4944,7 @@ class LagrangeChatView extends ItemView {
     this.pending = null;         // {controller} while a chat reply is streaming
     this.clipNoted = new Set();  // notes whose clipping the writer has been told about
     this.checkpoints = [];       // one per message sent, for "Rewind to here" (see rewindTo)
+    this.shown = null;           // {look, el, hint}: a page the writer has shown Lagrange, to go with the next message
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -4063,6 +5240,7 @@ class LagrangeChatView extends ItemView {
     this.stop();
     this.history = [];
     this.checkpoints = [];
+    this.shown = null;
     this.clipNoted.clear();
     this.logEl.empty();
     this.showEmpty();
@@ -4212,6 +5390,80 @@ class LagrangeChatView extends ItemView {
     };
   }
 
+  /* A look in the log: "Lagrange looked at the page", with a small picture of what it was shown; a click opens all
+     of it (LookModal). Until the page is set it says that it is looking. by: 'writer' when the writer shows the page
+     with the command. done() returns the element its words are in. */
+  addLook(by) {
+    this.clearEmpty();
+    const el = this.logEl.createDiv({ cls: 'lagrange-look is-pending' });
+    const line = el.createDiv({ cls: 'lagrange-look-detail', text: by === 'writer' ? 'Setting the page…' : 'Lagrange is looking at the page…' });
+    this.scrollDown();
+    return {
+      el,
+      remove: () => el.remove(),
+      fail: why => {
+        el.removeClass('is-pending');
+        el.addClass('is-failed');
+        line.setText(`${by === 'writer' ? 'The page could not be shown' : 'Lagrange could not look at the page'}: ${why}`);
+        this.scrollDown();
+      },
+      done: look => {
+        el.removeClass('is-pending');
+        el.empty();
+        const open = () => new LookModal(this.app, look, lookRecipient(this.plugin.settings)).open();
+        if (look.pictures.length) {
+          // (the label is for assistive technology: nothing in the panel shows a bubble on hover)
+          const thumb = el.createEl('button', { cls: 'lagrange-look-thumb', attr: { type: 'button', 'aria-label': 'Open what Lagrange was shown' } });
+          thumb.createEl('img', { attr: { src: `data:${look.pictures[0].mediaType};base64,${look.pictures[0].data}`, alt: '' } });
+          thumb.addEventListener('click', open);
+        }
+        const words = el.createDiv({ cls: 'lagrange-look-words' });
+        words.createDiv({ cls: 'lagrange-look-title', text: by === 'writer' ? 'You showed Lagrange the page' : 'Lagrange looked at the page' });
+        words.createDiv({ cls: 'lagrange-look-detail', text: lookCaption(look) });
+        const more = words.createEl('button', { cls: 'lagrange-look-open', text: 'What it was shown', attr: { type: 'button' } });
+        more.addEventListener('click', open);
+        this.scrollDown();
+        return words;
+      },
+    };
+  }
+
+  /* "Show Lagrange the rendered page": the page of a note is set and kept here, in the log, to go with the writer's
+     next message (takeShown); nothing is sent until then, and the writer can take it back. */
+  async showPage(view) {
+    if (this.pending) { new Notice('Lagrange is still at work: stop it, or wait, then show it the page.'); return; }
+    this.dropShown();
+    this.stick = true;
+    const entry = this.addLook('writer');
+    try {
+      const look = await this.plugin.lookAtPage(view, { target: 'auto' }, {});
+      const words = entry.done(look);
+      const hint = words.createDiv({ cls: 'lagrange-look-detail' });
+      hint.appendText('It goes with your next message. ');
+      const back = hint.createEl('button', { cls: 'lagrange-look-open', text: 'Take it back', attr: { type: 'button' } });
+      back.addEventListener('click', () => this.dropShown());
+      this.shown = { look, el: entry.el, hint };
+      this.scrollDown();
+    } catch (err) {
+      entry.fail(err.message || String(err));
+    }
+  }
+
+  dropShown() {
+    if (this.shown) this.shown.el.remove();
+    this.shown = null;
+  }
+
+  /* The page the writer has shown, if it is of the note a message is about: it goes with that message. */
+  takeShown(note) {
+    const s = this.shown;
+    this.shown = null;
+    if (!s) return null;
+    if (!note || s.look.path !== note.path) { s.el.remove(); return null; }
+    s.hint.remove();
+    return s.look;
+  }
+
   addError(err, el) {
     const box = (el || this.logEl).createDiv({ cls: 'lagrange-error' });
     box.createSpan({ text: err.message || String(err) });
@@ -4233,9 +5485,9 @@ class LagrangeChatView extends ItemView {
     this.stick = true;
 
     const target = this.plugin.targetMarkdownView();
-    const note = this.plugin.noteFrom(target);
+    let note = this.plugin.noteFrom(target);
     const limit = NOTE_LIMIT[this.plugin.settings.provider] || NOTE_LIMIT.anthropic;
-    const clip = note ? clipText(note.text, limit, note.cursor) : null;
+    let clip = note ? clipText(note.text, limit, note.cursor) : null;
 
     // The checkpoint for "Rewind to here": where the conversation stands, and the note as it is now.
     const checkpoint = {
@@ -4249,76 +5501,142 @@ class LagrangeChatView extends ItemView {
       this.addAside(`“${note.title}” is long (${clip.total.toLocaleString()} characters), so Lagrange reads the ` +
         `${(clip.end - clip.start).toLocaleString()} characters around your cursor.`);
     }
-    this.history.push({ role: 'user', content: text });
-    const reply = this.addReply(note && note.path);
-    this.scrollDown(true);       // the loader has just come in under the message: it is in view
-    const controller = new AbortController();
-    this.setPending({ controller });
     const settings = this.plugin.settings;
-    // With "Edit with the pen" on, the reply may end with edits to the note (parseAgentReply): the chat shows only its
+    // With "Edit with the pen" on, a reply may end with edits to the note (parseAgentReply): the chat shows only its
     // prose, and the edits go to the pen once the reply is complete.
     const agentic = Boolean(settings.agenticEdits);
-    const prose = full => {
-      if (!agentic) return full;
-      const part = splitAgentReply(full);
-      if (part.blocks.length) reply.status('Taking up the pen…');
-      return part.text;
-    };
-    let partial = '', raw = '', ran = null;
+    // With "Let Lagrange look at the rendered page" on, a reply may ask to look at the page (parseLookReply): it is
+    // then shown the page, and replies again. One message of the writer's is thus a turn of up to LOOKS_PER_MESSAGE
+    // + 1 replies. A page the writer has shown with the command goes with the message itself, and is no such look.
+    const canLook = Boolean(settings.lookAtPage && note);
+    const shown = this.takeShown(note);
+    // What this turn adds to the conversation (kept), and the same as the model is sent it now (sent): the pictures
+    // of a look are sent once and are not kept. The conversation takes the turn in when it is over.
+    const first = shown ? lookMessage(shown, { by: 'writer', text }) : null;
+    const kept = [{ role: 'user', content: first ? first.kept : text }];
+    const sent = [first ? { role: 'user', content: first.content, alt: first.alt } : kept[0]];
+    const controller = new AbortController();
+    this.setPending({ controller });
+    let reply = null, partial = '', raw = '', streaming = false, failed = false, ran = null, typed = false;
+    let looksLeft = canLook ? LOOKS_PER_MESSAGE : 0, lastLook = shown;
     try {
-      const res = await complete(settings, {
-        purpose: 'chat',
-        system: chatSystemPrompt(note, clip, agentic),
-        messages: this.history.slice(),
-        cache: true,
-        demo: () => demoChatReply(text, note, agentic),
-      }, {
-        signal: controller.signal,
-        onText: (d, full) => { raw = full; partial = prose(full); reply.update(partial); },
-        onRetry: (status, ms) => reply.note(`Busy (${status}); trying again in ${Math.round(ms / 1000)} s…`, 'is-quiet'),
-      }, this.plugin.session);
-      const parsed = agentic ? parseAgentReply(res.text) : { text: res.text, ops: [], dropped: 0, error: null, open: false };
-      const editing = parsed.ops.length > 0 && res.stopReason !== 'refusal';
-      reply.finish(parsed.text, editing || Boolean(parsed.error));
-      if (res.text && res.stopReason !== 'refusal') this.history.push({ role: 'assistant', content: res.text });
-      else this.history.pop();
-      if (editing) {
-        ran = await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
-      } else if (parsed.error) {
-        reply.note(`Lagrange meant to edit the note, but its edits could not be read. ${parsed.error}` +
-          `${res.stopReason === 'max_tokens' ? ' (The reply reached its length limit.)' : ''} Nothing was changed; ask again.`, 'is-warn');
+      for (let round = 0; ; round++) {
+        const answer = reply = this.addReply(note && note.path);
+        if (!round) this.scrollDown(true);       // the loader has just come in under the message: it is in view
+        partial = '';
+        raw = '';
+        const prose = full => {
+          const look = canLook ? parseLookReply(full) : { text: full, look: null };
+          const part = agentic ? splitAgentReply(look.text) : { text: look.text, blocks: [] };
+          if (part.blocks.length) answer.status('Taking up the pen…');
+          else if (look.look) answer.status('Turning to the page…');
+          return part.text;
+        };
+        streaming = true;
+        const res = await complete(settings, {
+          purpose: 'chat',
+          system: chatSystemPrompt(note, clip, agentic, canLook),
+          messages: this.history.concat(sent),
+          cache: true,
+          demo: () => (round || lastLook ? demoLookReply(lastLook) : demoChatReply(text, note, agentic, canLook)),
+        }, {
+          signal: controller.signal,
+          onText: (d, full) => { raw = full; partial = prose(full); answer.update(partial); },
+          onRetry: (status, ms) => answer.note(`Busy (${status}); trying again in ${Math.round(ms / 1000)} s…`, 'is-quiet'),
+        }, this.plugin.session);
+        streaming = false;
+        const asked = canLook ? parseLookReply(res.text) : { text: res.text, look: null };
+        const parsed = agentic ? parseAgentReply(asked.text) : { text: asked.text, ops: [], dropped: 0, error: null, open: false };
+        const refused = res.stopReason === 'refusal';
+        const editing = parsed.ops.length > 0 && !refused;
+        const looking = Boolean(asked.look) && !refused;
+        reply.finish(parsed.text, editing || looking || Boolean(parsed.error));
+        if (res.text && !refused) {
+          const said = { role: 'assistant', content: res.text };
+          kept.push(said);
+          sent.push(said);
+        }
+        if (res.picturesRefused) {
+          // The provider turned the pictures down and was sent the words: that is what this turn holds from now on.
+          sent.forEach((m, i) => { if (Array.isArray(m.content)) { m.content = m.alt; kept[i].content = m.alt; } });
+          reply.note('This model would not take pictures of the page, so Lagrange was given the page in words instead.', 'is-quiet');
+        }
+        if (editing) {
+          const run = await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
+          if (run) { ran = run; typed = typed || Boolean(run.touched); }
+        } else if (parsed.error) {
+          reply.note(`Lagrange meant to edit the note, but its edits could not be read. ${parsed.error}` +
+            `${res.stopReason === 'max_tokens' ? ' (The reply reached its length limit.)' : ''} Nothing was changed; ask again.`, 'is-warn');
+        }
+        if (refused) {
+          const cat = res.stopDetails && res.stopDetails.category;
+          reply.note(`Claude declined to continue${cat ? ` (${cat})` : ''}. Try rephrasing the question.`, 'is-warn');
+        } else if (res.stopReason === 'max_tokens') {
+          reply.note('The reply reached its length limit.', 'is-quiet');
+        }
+        if (res.fallbackTo) reply.note(`Answered by ${res.fallbackTo} after a refusal.`, 'is-quiet');
+        if (!looking || controller.signal.aborted) break;
+        if (looksLeft <= 0) {
+          reply.note(`Lagrange asked to look at the page again, but ${LOOKS_PER_MESSAGE} looks for one message is the limit.`, 'is-quiet');
+          break;
+        }
+        // The look: the page is set and shown to the model in a message of its own, and the turn goes on. If it
+        // cannot be set, the model is told so, and answers from the source.
+        looksLeft--;
+        const entry = this.addLook();
+        let look = null, problem = '';
+        try {
+          look = await this.plugin.lookAtPage(target, asked.look, { signal: controller.signal });
+          entry.done(look);
+          lastLook = look;
+        } catch (err) {
+          if (isAbort(err)) { entry.remove(); throw err; }
+          if (!(err instanceof LagrangeError)) console.error('Lagrange', err);
+          problem = err.message || String(err);
+          entry.fail(problem);
+        }
+        const carried = lookMessage(look, { left: looksLeft, failed: problem });
+        kept.push({ role: 'user', content: carried.kept });
+        sent.push({ role: 'user', content: carried.content, alt: carried.alt });
+        // (the pen may have written since the note was read: the next reply is given it as it stands)
+        if (editing) {
+          note = this.plugin.noteFrom(target) || note;
+          clip = clipText(note.text, limit, note.cursor);
+        }
       }
-      if (res.stopReason === 'refusal') {
-        const cat = res.stopDetails && res.stopDetails.category;
-        reply.note(`Claude declined to continue${cat ? ` (${cat})` : ''}. Try rephrasing the question.`, 'is-warn');
-      } else if (res.stopReason === 'max_tokens') {
-        reply.note('The reply reached its length limit.', 'is-quiet');
-      }
-      if (res.fallbackTo) reply.note(`Answered by ${res.fallbackTo} after a refusal.`, 'is-quiet');
     } catch (err) {
       if (isAbort(err)) {
         // Stopped mid-reply: what was said stays; edits that had not finished arriving are not made.
-        reply.finish(partial);
-        reply.note(raw !== partial && splitAgentReply(raw).blocks.length ? 'Stopped before any edit was made.' : 'Stopped.', 'is-quiet');
-        if (partial) this.history.push({ role: 'assistant', content: partial });
-        else this.history.pop();
+        if (streaming) {
+          reply.finish(partial);
+          if (partial) kept.push({ role: 'assistant', content: partial });
+        }
+        reply.note(streaming && raw !== partial && splitAgentReply(raw).blocks.length ? 'Stopped before any edit was made.' : 'Stopped.', 'is-quiet');
       } else {
-        reply.finish(partial);
-        this.history.pop();
-        if (!partial) reply.el.remove();
+        failed = true;
+        if (streaming) {
+          reply.finish(partial);
+          if (!partial) reply.el.remove();
+        }
         this.addError(err);
         if (!this.inputEl.value) { this.inputEl.value = text; this.fitInput(); }
       }
     } finally {
       this.setPending(null);
+      // The conversation takes in the turn up to Lagrange's last words. A turn that failed is left out (the message
+      // is back in the box, to be sent again) unless the pen has written; so is one that was cleared away meanwhile.
+      if (this.checkpoints.includes(checkpoint) && !(failed && !ran)) {
+        while (kept.length && kept[kept.length - 1].role !== 'assistant') kept.pop();
+        this.history.push(...kept);
+      }
       // What the turn left in the note, so a later rewind can tell Lagrange's changes from the writer's; then the
       // oldest checkpoints give up their copies of the note.
       if (checkpoint.path && this.checkpoints.includes(checkpoint)) {
         try {
-          // (what the run itself left, if there was one: a key that ended the run has changed the note since)
+          // (what the last run itself left, if there was one: a key that ended the run has changed the note since)
           const now = ran && ran.docAfter ? ran.docAfter.toString() : await this.plugin.noteText(checkpoint.path);
           checkpoint.after = now === null || now === checkpoint.before ? null : now;
-          checkpoint.userTyped = Boolean(ran && ran.touched);
+          checkpoint.userTyped = typed;
         } catch (e) { /* the note is gone: nothing to remember */ }
       }
       for (const cp of pruneCheckpoints(this.checkpoints, CHECKPOINTS_KEPT, CHECKPOINT_CHARS)) this.labelRewind(cp);
@@ -4427,6 +5745,36 @@ class RewindModal extends Modal {
   onClose() {
     this.contentEl.empty();
     if (this.resolve) { this.resolve(this.choice || null); this.resolve = null; }
+  }
+}
+
+/* What Lagrange was shown in a look: the pictures as they were sent, and the page in words. */
+class LookModal extends Modal {
+  constructor(app, look, recipient) {
+    super(app);
+    this.look = look;
+    this.recipient = recipient;
+  }
+
+  onOpen() {
+    this.modalEl.addClass('lagrange-modal', 'lagrange-look-modal');
+    this.titleEl.setText('What Lagrange was shown');
+    const { contentEl, look } = this;
+    contentEl.createEl('p', {
+      cls: 'lagrange-modal-note',
+      text: `${lookCaption(look)}: “${look.title}”, as Reading view renders it, without the note’s properties. ${this.recipient}`,
+    });
+    look.pictures.forEach((p, i) => {
+      contentEl.createEl('img', { cls: 'lagrange-look-picture', attr: { src: `data:${p.mediaType};base64,${p.data}`, alt: `The page, picture ${i + 1} of ${look.pictures.length}` } });
+    });
+    const words = contentEl.createEl('details', { cls: 'lagrange-look-told' });
+    if (!look.pictures.length) words.setAttribute('open', '');
+    words.createEl('summary', { text: 'The page in words, as Lagrange was told it' });
+    words.createEl('pre', { text: look.description });
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -4549,8 +5897,9 @@ class LagrangeSettingTab extends PluginSettingTab {
 
     containerEl.createEl('p', {
       cls: 'setting-item-description',
-      text: 'Lagrange sends the open note and your messages to the provider chosen here, and only when you ask it ' +
-        'something or run one of its commands. It makes no other network requests and collects nothing.',
+      text: 'Lagrange sends the open note and your messages (and, when it looks at the page, pictures of the note as ' +
+        'it is rendered) to the provider chosen here, and only when you ask it something or run one of its commands. ' +
+        'It makes no other network requests and collects nothing.',
     });
 
     new Setting(containerEl)
@@ -4714,6 +6063,30 @@ class LagrangeSettingTab extends PluginSettingTab {
         'it back). Off: the chat only talks, and edits come from the Revise selection and Proofread note commands.')
       .addToggle(t => t.setValue(s.agenticEdits).onChange(async v => { s.agenticEdits = v; await save(); }));
 
+    new Setting(containerEl).setName('Looking at the page').setHeading();
+    new Setting(containerEl)
+      .setName('Let Lagrange look at the rendered page')
+      .setDesc('Lagrange reads your note’s Markdown, not the page that is set from it. With this on, it can ask to look ' +
+        'when a question turns on how the page looks (a drop cap, what is centred, the margin, an equation, a picture), ' +
+        'and you can show it the page yourself with the command “Show Lagrange the rendered page”. The plugin then sets ' +
+        'the note as Reading view would, out of sight, and sends pictures of the part asked for and nothing else (at ' +
+        `most ${LOOK_PAGES} pictures a look and ${LOOKS_PER_MESSAGE} looks a message), with its measurements, to the provider chosen above ` +
+        'and to no one else. It does so only while Lagrange is answering a message of yours; the chat shows every ' +
+        'look, and you can open what was sent. Off: the page is never rendered or captured.')
+      .addToggle(t => t.setValue(s.lookAtPage).onChange(async v => { s.lookAtPage = v; await save(true); }));
+    const desktop = !(obsidian.Platform && obsidian.Platform.isDesktopApp === false);
+    new Setting(containerEl)
+      .setName('Pictures of the page')
+      .setDesc((!desktop ? 'On a phone or tablet no picture is taken: Lagrange is told about the page in words.'
+        : s.provider === 'demo' ? 'The demo has no model to show a picture to: it reports what was measured on the page.'
+          : picturesSupported(s) ? 'The model chosen takes pictures.'
+            : 'The model chosen is not known to take pictures, so Lagrange is told about the page in words (each block’s ' +
+              'alignment, font, lines, drop cap, footnotes, and what is too wide). If it does take them, choose “Always”.') +
+        ' A model that turns pictures down is sent the words instead.')
+      .addDropdown(d => d.addOption('auto', 'Where the model takes them').addOption('on', 'Always').addOption('off', 'Never: words only')
+        .setValue(s.lookPictures).onChange(async v => { s.lookPictures = v; await save(); }))
+      .setDisabled(!s.lookAtPage || !desktop);
+
     new Setting(containerEl).setName('Appearance').setHeading();
     new Setting(containerEl)
       .setName('Loading animation')
@@ -4765,7 +6138,7 @@ class LagrangePlugin extends Plugin {
   async onload() {
     // One settings object for the plugin's lifetime: the pen keeps a reference to it.
     this.settings = sanitizeSettings(await this.loadData());
-    this.session = { noFallback: false, noEffort: {} };
+    this.session = { noFallback: false, noEffort: {}, noPictures: {} };
     this.editing = false;
     this.edits = [];       // Lagrange's runs of edits, oldest first (see recordEdit); at most EDIT_RECORDS
     this.editClock = 0;    // counts the runs, so a rewind knows which came after a checkpoint
@@ -4806,6 +6179,16 @@ class LagrangePlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view || !view.file) return false;
         if (!checking) void this.askDropcap(view);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'show-page',
+      name: 'Show Lagrange the rendered page',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) void this.showPage(view);
         return true;
       },
     });
@@ -5140,6 +6523,37 @@ class LagrangePlugin extends Plugin {
     return leaf && leaf.view instanceof LagrangeChatView ? leaf.view : null;
   }
 
+  /* Looks at a note's page for the chat (lookAtPage, section 7), with pictures where they can be taken and the
+     provider takes them (lookSendsPictures). Nothing is rendered or captured with "Let Lagrange look at the rendered
+     page" off. Rejects with a reason, worded to follow "could not look at the page:". */
+  async lookAtPage(view, spec, opts) {
+    if (!this.settings.lookAtPage) throw new LagrangeError('looking at the page is turned off in Settings → Lagrange.', { kind: 'setup' });
+    if (!view || !view.file || !view.containerEl.isConnected) throw new LagrangeError('the note is no longer open.');
+    if (this.looking) throw new LagrangeError('another look at the page is under way.');
+    this.looking = true;
+    try {
+      const desktop = !(obsidian.Platform && obsidian.Platform.isDesktopApp === false);
+      return await lookAtPage(this.app, view, spec, {
+        signal: opts && opts.signal,
+        pictures: lookSendsPictures(this.settings, desktop, this.session),
+      });
+    } finally {
+      this.looking = false;
+    }
+  }
+
+  /* "Show Lagrange the rendered page": the open note's page, kept in the chat to go with the next message. */
+  async showPage(view) {
+    if (!this.settings.lookAtPage) {
+      new Notice('Looking at the page is turned off: Settings → Lagrange → “Let Lagrange look at the rendered page”.', 8000);
+      return;
+    }
+    const chat = await this.activateView(false);
+    if (!chat) return;
+    await chat.showPage(view);
+    if (chat.inputEl) chat.inputEl.focus();
+  }
+
   async proofread(view) {
     if (this.editing) { new Notice('Lagrange is already editing.'); return; }
     const note = this.noteFrom(view);
@@ -5343,6 +6757,10 @@ LagrangePlugin.internals = {
   applyAnthropicEvent, applyOpenAIEvent, streamAnthropic, streamOpenAI, streamDemo, complete, fetchWithRetry,
   chatSystemPrompt, proofreadUserMessage, reviseUserMessage, runEdits, LagrangeError,
   transcriptPrompt, applyClaudeCodeLine, applyCodexLine, cliErrorMessage, findCli, runCli, runCliTakesEnv: true, streamClaudeCode, streamCodex, checkCli,
+  LOOKS_PER_MESSAGE, LOOK_PAGES, LOOK_WIDTH, LOOK_HEIGHT, LOOK_DESCRIPTION_CHARS, LOOK_SOURCE_CHARS, LOOK_PICTURES, picturesSupported, providerKey, lookSendsPictures,
+  splitBlocks, normalizeLook, parseLookReply, lookLabel, alignSections, lookSource, lookRange, lookScale, lookPages, describeLook, lookMessage, lookCaption, lookRecipient,
+  messageText, messagePictures, withoutPictures, anthropicMessages, openaiMessages, claudeCodeInput, xmlSafe, pageSvg, cssUrls, demoLookReply, CHAT_LOOK,
+  passageLines, headingLine, lookAtPage,
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
