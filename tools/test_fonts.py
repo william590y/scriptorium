@@ -77,6 +77,7 @@ def run_exe(exe, *args, env=None):
     else:
         mono = os.environ.get("MONO")
         cmd = [os.path.join(mono, "bin", "mono") if mono else "mono", str(exe), *args]
+    env = dict(os.environ if env is None else env, SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1")   # they have a test of their own (test_diagram_plugins.py)
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
     for line in (r.stdout + r.stderr).splitlines():
         print("      | " + line)

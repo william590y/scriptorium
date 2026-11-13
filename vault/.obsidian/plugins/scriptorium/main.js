@@ -10,13 +10,13 @@ const INITIALS = [
   ['plain', 'Plain capital (Cormorant Garamond)'],
   ['none', 'None']
 ];
-const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', marginalia: true, imageFocus: true };
+const DEFAULT_SETTINGS = { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true };
 
 /* Saved settings with every known key checked and defaulted; keys this version does not know are kept. */
 function normalizeSettings(saved) {
   const settings = Object.assign({}, saved && typeof saved === 'object' ? saved : {}, DEFAULT_SETTINGS);
   if (saved && typeof saved === 'object') {
-    for (const key of ['fancyMode', 'marginalia', 'imageFocus']) {
+    for (const key of ['fancyMode', 'liveDropcaps', 'marginalia', 'imageFocus']) {
       if (typeof saved[key] === 'boolean') settings[key] = saved[key];
     }
     // one of the four built in, or a set of drop caps by name ("set:Dropcat", "set:My initials"; see "Sets of drop caps")
@@ -73,40 +73,61 @@ function shownText(p) {
   return text.replace(/^\s+/, '');
 }
 
-/* Marks (or unmarks) one rendered block with a drop cap: which is one of the four built in, or `set` is a set of
-   drop caps (see "Sets of drop caps"). A set of images marks the block only if it has an image for the letter the
-   block's paragraph begins with; otherwise the block keeps the vault's drop cap. Where a set has several images of a
-   letter, `key` (the note's path) and the paragraph's opening words choose one, the same one each time the note is
-   drawn. Returns the image chosen ({light, dark}), or null. */
-function markDropcap(el, which, set, key) {
-  for (const c of Array.from(el.classList)) if (c.startsWith('scriptorium-dropcap') && c !== 'scriptorium-dropcap-inked') el.classList.remove(c);
-  if (el.style && el.style.removeProperty) for (const v of DROPCAP_VARS) el.style.removeProperty(v);
+/* The marks of a drop cap, apart from any element: which is one of the four built in, or `set` is a set of drop
+   caps (see "Sets of drop caps"); text is the paragraph as it is shown, key the note's path. → {classes, vars,
+   image}: the classes and the custom properties that say so (the snippet reads them), and the image chosen
+   ({light, dark}) or null. A set of images gives marks only if it has an image for the letter the paragraph begins
+   with. Where a set has several images of a letter, key and the paragraph's opening words choose one, the same one
+   each time the note is drawn. Pure. */
+function dropcapMarks(which, set, text, key) {
+  const none = { classes: [], vars: {}, image: null };
   if (set) {
     if (set.kind === 'font') {
-      el.classList.add('scriptorium-dropcap', 'scriptorium-dropcap-font');
-      el.style.setProperty('--scriptorium-initial-font', `"${set.family}", var(--manuscript-display)`);
-      el.style.setProperty('--scriptorium-initial-size', `${set.size || 4.2}em`);
-      el.style.setProperty('--scriptorium-initial-margin', set.margin || '0.1em 0.1em -0.12em 0');
-      el.style.setProperty('--scriptorium-initial-weight', 'normal');
-      return null;
+      return {
+        classes: ['scriptorium-dropcap', 'scriptorium-dropcap-font'],
+        vars: {
+          '--scriptorium-initial-font': `"${set.family}", var(--manuscript-display)`,
+          '--scriptorium-initial-size': `${set.size || 4.2}em`,
+          '--scriptorium-initial-margin': set.margin || '0.1em 0.1em -0.12em 0',
+          '--scriptorium-initial-weight': 'normal',
+        },
+        image: null,
+      };
     }
-    const p = el.querySelector ? el.querySelector(':scope > p') : null;
-    const text = p ? shownText(p) : '';
-    const slot = p && set.letters[openingLetter(text)];
-    if (!slot) return null;
+    text = String(text || '');
+    const slot = set.letters[openingLetter(text)];
+    if (!slot) return none;
     const seed = seedOf(`${key || ''}\n${text.slice(0, 48)}`);
     const one = v => (Array.isArray(v) ? v[seed % v.length] : v) || '';
     const image = { light: one(slot.light) || one(slot.dark), dark: one(slot.dark) || one(slot.light) };
-    if (!image.light) return null;
-    el.classList.add('scriptorium-dropcap', 'scriptorium-dropcap-image');
-    if (set.mono) el.classList.add('scriptorium-dropcap-mono');
+    if (!image.light) return none;
     const url = u => `url("${String(u).replace(/["\\\n]/g, encodeURIComponent)}")`;
-    el.style.setProperty('--scriptorium-dropcap-light', url(image.light));
-    el.style.setProperty('--scriptorium-dropcap-dark', url(image.dark));
-    return image;
+    return {
+      classes: ['scriptorium-dropcap', 'scriptorium-dropcap-image'].concat(set.mono ? ['scriptorium-dropcap-mono'] : []),
+      vars: { '--scriptorium-dropcap-light': url(image.light), '--scriptorium-dropcap-dark': url(image.dark) },
+      image,
+    };
   }
-  if (which && !which.startsWith('set:')) el.classList.add('scriptorium-dropcap', `scriptorium-dropcap-${which}`);
-  return null;
+  if (which && !which.startsWith('set:')) return { classes: ['scriptorium-dropcap', `scriptorium-dropcap-${which}`], vars: {}, image: null };
+  return none;
+}
+
+/* Marks (or unmarks) one rendered block with a drop cap (dropcapMarks): a set of images marks the block only if it
+   has an image for the letter the block's paragraph begins with; otherwise the block keeps the vault's drop cap.
+   Returns the image chosen ({light, dark}), or null. */
+function markDropcap(el, which, set, key) {
+  for (const c of Array.from(el.classList)) if (c.startsWith('scriptorium-dropcap') && c !== 'scriptorium-dropcap-inked') el.classList.remove(c);
+  if (el.style && el.style.removeProperty) for (const v of DROPCAP_VARS) el.style.removeProperty(v);
+  let text = '';
+  if (set && set.kind !== 'font') {
+    const p = el.querySelector ? el.querySelector(':scope > p') : null;
+    if (!p) return null;
+    text = shownText(p);
+  }
+  const marks = dropcapMarks(which, set, text, key);
+  if (marks.classes.length) el.classList.add(...marks.classes);
+  for (const [name, value] of Object.entries(marks.vars)) el.style.setProperty(name, value);
+  return marks.image;
 }
 
 /* The choices of the command: the vault's, then each drop cap built in, then each set, then the sets Scriptorium
@@ -844,9 +865,7 @@ function alignExtension() {
   const deco = cls => { if (!made.has(cls)) made.set(cls, Decoration.line({ class: cls })); return made.get(cls); };
   const nothing = { deco: Decoration.none, note: null };
   const build = state => {
-    const lines = [];
-    for (const line of state.doc.iterLines()) lines.push(line);
-    const plan = alignPlan(lines);
+    const plan = docPlan(state.doc).plan;
     if (!plan.ranges.length && !plan.note.align) return nothing;
     const builder = new RangeSetBuilder();
     for (const r of plan.ranges) {
@@ -865,6 +884,361 @@ function alignExtension() {
       EditorView.contentAttributes.from(field, value => (value.note ? { class: `scriptorium-align-note-${value.note}` } : {})),
     ],
   });
+}
+
+/* ==========================================================
+   Drop caps in Live Preview
+   ==========================================================
+   The editor shows the drop caps that Reading view shows, so that what is written looks as it will read. Nothing in
+   the note is changed and nothing is put into the line: the first line of each paragraph that opens a chapter gets
+   a class (scriptorium-opening, with the drop cap's own classes and custom properties, the ones markDropcap gives a
+   block of Reading view), and the snippet sets its first letter and its first line with the very rules it has for
+   Reading view. The letter stays the note's own text: the cursor goes before and after it, it is selected, copied,
+   found and spell-checked like any other, and when it is deleted the next letter is the initial. Source mode has
+   the classes too, but the snippet's rules are for Live Preview only.
+
+   Which paragraphs open a chapter is read from the note's lines as Reading view has it from its blocks: the first
+   block after a heading of level 1, 2 or 6 (or at the top of a note without properties), if it is a paragraph; or
+   the paragraph after one quotation there (an epigraph); with centred and right-aligned text passed over, or given
+   a standing initial where it asks for one (see "Centred and right-aligned text": alignPlan, sectionMarks).
+
+   The drop cap stays while its paragraph is edited (a paragraph does not change its shape because the cursor is in
+   it). One exception: where the paragraph begins with marks that Live Preview shows only while the cursor is by
+   them ("**Bold** beginning", "[[A link]] first"), the line is plain while the cursor is on it, since the initial
+   would otherwise be the marks.
+
+   No word is split across the end of the small-capped first line there either (see "No word split across the
+   small-capped opening line"): the editor cannot have a span put into its text, so the word is marked with a
+   decoration, found by measuring where the line would break without it. */
+
+/* The blocks of a note, from its lines, as Reading view draws them one after another: [{type, from, to, level}],
+   type 'p' (a paragraph), 'heading' (level 1 to 6), 'quote' (a quotation that is no callout) or 'other' (a list, a
+   table, code, a rule, a callout, mathematics, HTML, a comment, a footnote's text). body is the first line after
+   the properties. Only what tells a paragraph that opens a chapter is read closely. Pure. */
+const BLOCK = {
+  fence: /^ {0,3}(`{3,}|~{3,})/,
+  quote: /^ {0,3}>/,
+  callout: /^ {0,3}>[ \t]*\[!/,
+  list: /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)/,
+  interrupts: /^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/,   // a list that can begin right under a paragraph's line
+  rule: /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/,
+  starRule: /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/,
+  setext: /^ {0,3}(=+|-+)[ \t]*$/,
+  math: /^ {0,3}\$\$/,
+  comment: /^ {0,3}%%/,
+  footnote: /^ {0,3}\[\^[^\]\s]+\]:/,
+  indented: /^(?: {4}|\t)/,
+  html: /^ {0,3}<(?:!--|\/?(?:address|article|aside|blockquote|center|details|dialog|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|iframe|li|main|nav|ol|p|pre|script|section|style|summary|table|tbody|td|textarea|tfoot|th|thead|tr|ul)(?=[\s/>]|$))/i,
+  tableRule: /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/,
+};
+
+function noteBlocks(lines, body) {
+  const n = lines.length, blocks = [], blank = i => !/\S/.test(lines[i]);
+  const table = i => i + 1 < n && lines[i].includes('|') && lines[i + 1].includes('|') && BLOCK.tableRule.test(lines[i + 1]);
+  // (a line that begins a block of another kind right under a paragraph's line, or under a quotation's)
+  const breaks = i => headingLevel(lines[i]) > 0 || BLOCK.fence.test(lines[i]) || BLOCK.starRule.test(lines[i]) || BLOCK.html.test(lines[i]) || BLOCK.math.test(lines[i]);
+  let k = body || 0;
+  while (k < n) {
+    if (blank(k)) { k++; continue; }
+    const line = lines[k];
+    let to = k, type = 'other', level = 0;
+    const until = test => { while (to + 1 < n && !test(to + 1)) to++; if (to + 1 < n) to++; };
+    const fence = BLOCK.fence.exec(line);
+    if (fence) {
+      const close = new RegExp(`^ {0,3}\\${fence[1][0]}{${fence[1].length},}[ \\t]*$`);
+      until(i => close.test(lines[i]));
+    } else if (BLOCK.math.test(line)) {
+      if (!/\$\$/.test(line.replace(BLOCK.math, ''))) until(i => lines[i].includes('$$'));
+    } else if (BLOCK.comment.test(line) && !/%%/.test(line.replace(BLOCK.comment, ''))) {
+      until(i => lines[i].includes('%%'));
+    } else if ((level = headingLevel(line))) {
+      type = 'heading';
+    } else if (BLOCK.rule.test(line)) {
+      // a rule (a scene break)
+    } else if (BLOCK.quote.test(line)) {
+      type = BLOCK.callout.test(line) ? 'other' : 'quote';
+      while (to + 1 < n && !blank(to + 1) && !(breaks(to + 1) && !BLOCK.quote.test(lines[to + 1]))) to++;
+    } else if (BLOCK.list.test(line) || BLOCK.footnote.test(line)) {
+      // to the blank line after which the text is neither set in nor another item
+      for (;;) {
+        while (to + 1 < n && !blank(to + 1) && !headingLevel(lines[to + 1]) && !BLOCK.fence.test(lines[to + 1])) to++;
+        let next = to + 1;
+        while (next < n && blank(next)) next++;
+        if (next < n && next > to + 1 && (/^(?: {2,}|\t)/.test(lines[next]) || (BLOCK.list.test(line) && BLOCK.list.test(lines[next]) && !BLOCK.rule.test(lines[next])))) to = next;
+        else break;
+      }
+    } else if (BLOCK.html.test(line)) {
+      if (/^ {0,3}<!--/.test(line)) { if (!line.includes('-->')) until(i => lines[i].includes('-->')); }
+      else while (to + 1 < n && !blank(to + 1)) to++;
+    } else if (BLOCK.indented.test(line)) {
+      for (;;) {
+        while (to + 1 < n && BLOCK.indented.test(lines[to + 1])) to++;
+        let next = to + 1;
+        while (next < n && blank(next)) next++;
+        if (next < n && next > to + 1 && BLOCK.indented.test(lines[next])) to = next; else break;
+      }
+    } else if (table(k)) {
+      while (to + 1 < n && !blank(to + 1)) to++;
+    } else {
+      type = 'p';
+      for (; to + 1 < n && !blank(to + 1); to++) {
+        const next = lines[to + 1], under = BLOCK.setext.exec(next);
+        if (under) { type = 'heading'; level = under[1][0] === '=' ? 1 : 2; to++; break; }   // a heading underlined
+        if (breaks(to + 1) || BLOCK.quote.test(next) || BLOCK.interrupts.test(next) || table(to + 1)) break;
+      }
+    }
+    blocks.push({ type, from: k, to, level });
+    k = to + 1;
+  }
+  return blocks;
+}
+
+/* A line of a note as Live Preview and Reading view show it, near enough: without the marks of emphasis, with a
+   link's words in place of the link, without comments and embedded files. Used for the paragraph's opening words
+   (which letter a drop cap image shows, and which of a letter's images). Pure. */
+function shownLine(source) {
+  return String(source == null ? '' : source)
+    .replace(/\\([\\`*_{}\[\]()#+\-.!|<>~=$%^])/g, (m, c) => String.fromCharCode(0xE000 + c.charCodeAt(0)))   // (a mark that is escaped is a character)
+    .replace(/%%.*?%%/g, '')
+    .replace(/!\[\[[^\]\n]*\]\]|!\[[^\]\n]*\]\([^)\n]*\)/g, '')
+    .replace(/\[\[[^\]|\n]*\|([^\]\n]*)\]\]/g, '$1')
+    .replace(/\[\[([^\]\n]*)\]\]/g, '$1')
+    .replace(/\[\^[^\]\s]+\]/g, '')
+    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
+    .replace(/<\/?[A-Za-z][^>\n]*>/g, '')
+    .replace(/\*+|~~|==|`+/g, '')
+    .replace(/(^|[^\p{L}\p{N}])_+(?=\S)|(\S)_+(?![\p{L}\p{N}])/gu, (m, a, b) => (a || '') + (b || ''))
+    .replace(/[-]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE000));
+}
+
+/* The drop cap a note's properties ask for, read from its lines (the editor has the lines, and has them before
+   Obsidian has read the properties again): what noteDropcap says of them. Pure. */
+function linesDropcap(lines, body) {
+  const said = {};
+  for (let j = 1; j < (body || 0) - 1; j++) {
+    const m = /^(dropcap|drop-cap|dropCap|drop cap)[ \t]*:[ \t]*(.*?)[ \t]*$/.exec(lines[j]);
+    if (!m || m[1] in said) continue;
+    let v = m[2];
+    const quoted = /^(["'])(.*)\1$/.exec(v);
+    if (quoted) v = quoted[2]; else v = v.replace(/[ \t]+#.*$/, '');
+    said[m[1]] = !quoted && /^(?:false|no|off)$/i.test(v) ? false : !quoted && /^(?:true|yes|on|null|~|)$/i.test(v) ? null : v;
+  }
+  return noteDropcap(said);
+}
+
+/* The paragraphs of a note that open a chapter, from its lines: [{line, text, standing, led, gap}], line being the
+   line of the note the paragraph's first letter is on (the line after the marker, in aligned text); text, the
+   paragraph as it is shown; standing, whether it is aligned text that asked for its drop cap (a standing initial);
+   led, whether the line begins with marks that Live Preview shows only by the cursor; gap, where the first word is
+   the initial alone ("A body at rest", "I remember"), the space after it as [from, to] in the line: beside a
+   dropped initial Reading view sets no space at the head of the line. A paragraph that opens a chapter
+   but has no initial is left out: aligned text that did not ask for one, and a paragraph that begins with an
+   embedded file, mathematics, a comment or an HTML tag. plan is alignPlan(lines). Pure. */
+function openingPlan(lines, plan) {
+  plan = plan || alignPlan(lines);
+  const out = [];
+  let prev = plan.body === 0 ? 'opens' : 'other', before = 'other';   // the title's block stands first where there are no properties
+  for (const b of noteBlocks(lines, plan.body)) {
+    const marks = sectionMarks(plan, b.from, b.to);
+    if (b.type === 'p' && (prev === 'opens' || (prev === 'quote' && before === 'opens')) && !(marks && (marks.fence || !marks.dropcap))) {
+      const first = marks && marks.first ? b.from + 1 : b.from, last = marks && marks.last ? b.to - 1 : b.to;
+      if (first <= last && !/^\s*(?:!\[|\$|%%|<)/.test(lines[first])) {
+        const text = lines.slice(first, last + 1).map(l => shownLine(l).replace(/\s+$/, '')).join('\n').replace(/^\s+/, '');
+        const lone = /^(\s*\p{P}*[\p{L}\p{N}]\p{P}*)([ \t]+)\S/u.exec(lines[first]);
+        out.push({ line: first, text, standing: Boolean(marks), led: /^\s*[*_~=\[`\\]/.test(lines[first]), gap: lone && !marks ? [lone[1].length, lone[1].length + lone[2].length] : null });
+      }
+    }
+    before = prev;
+    prev = (b.type === 'heading' && (b.level <= 2 || b.level === 6)) || (marks && marks.opens) ? 'opens' : b.type === 'quote' ? 'quote' : 'other';
+  }
+  return out;
+}
+
+/* What the editor's opening line is given: {classes, style} from the note's choice (which: 'yinit' | 'goudy' |
+   'plain' | 'none' | 'set:<name>' as resolved, or null for the vault's; set, the set of drop caps if it is one),
+   the vault's own drop cap (vault), the opening (openingPlan) and the note's path; ratio(url) gives an image's shape
+   if it is known. null where the paragraph has no initial (None). Pure. */
+function openingLine(opening, which, set, vault, path, ratio, inked) {
+  if (which === 'none') return null;
+  const marks = dropcapMarks(which, set, opening.text, path);
+  if (!marks.classes.length && vault === 'none') return null;
+  const classes = ['scriptorium-opening'].concat(marks.classes);
+  if (opening.standing) classes.push('scriptorium-align-dropcap');
+  if (inked) classes.push('scriptorium-dropcap-inked');
+  const vars = Object.assign({}, marks.vars);
+  if (marks.image && ratio) {
+    const light = ratio(marks.image.light), dark = ratio(marks.image.dark);
+    if (light) vars['--scriptorium-dropcap-ratio'] = String(light);
+    if (dark) vars['--scriptorium-dropcap-ratio-dark'] = String(dark);
+  }
+  return { classes: classes.join(' '), style: Object.entries(vars).map(([name, value]) => `${name}: ${value}`).join('; ') };
+}
+
+/* A note's lines and its alignment, kept for the document they were read from (the two extensions below both ask,
+   at every change). */
+const docPlans = new WeakMap();
+function docPlan(doc) {
+  let hit = docPlans.get(doc);
+  if (!hit) {
+    const lines = [];
+    for (const line of doc.iterLines()) lines.push(line);
+    hit = { lines, plan: alignPlan(lines) };
+    docPlans.set(doc, hit);
+  }
+  return hit;
+}
+
+/* The CodeMirror extension (made when the plugin loads) and what the plugin needs of it: {extension, refresh,
+   preview, ink}. refresh is an effect that has every opening line set again (the vault's drop cap, the sets or a
+   font changed); preview one that shows a drop cap without saving it ({which}: as previewDropcap takes it;
+   undefined for what the note says) and inks it in ({ink: true}); ink switches the inking off again. */
+function dropcapExtension(plugin) {
+  const { StateField, StateEffect, RangeSetBuilder, Prec } = require('@codemirror/state');
+  const { Decoration, EditorView, ViewPlugin } = require('@codemirror/view');
+  const obsidian = require('obsidian');
+  const refresh = StateEffect.define(), preview = StateEffect.define(), ink = StateEffect.define(), keep = StateEffect.define();
+  const pathOf = state => {
+    try { const info = obsidian.editorInfoField ? state.field(obsidian.editorInfoField, false) : null; return info && info.file ? info.file.path : ''; } catch (e) { return ''; }
+  };
+  const live = state => {
+    try { return obsidian.editorLivePreviewField ? state.field(obsidian.editorLivePreviewField, false) !== false : true; } catch (e) { return true; }
+  };
+  const read = state => {
+    const { lines, plan } = docPlan(state.doc);
+    return { said: linesDropcap(lines, plan.body), openings: openingPlan(lines, plan) };
+  };
+  const gap = Decoration.mark({ class: 'scriptorium-opening-gap' });   // the space after an initial that is a word by itself
+  const decorate = (state, value) => {
+    const builder = new RangeSetBuilder(), froms = [];
+    if (value.openings.length) {
+      const choice = plugin.dropcapChoice(value.shown ? value.shown.which : value.said), path = pathOf(state);
+      for (const o of value.openings) {
+        if (o.line >= state.doc.lines) continue;
+        const line = state.doc.line(o.line + 1);
+        if (o.led && state.selection.ranges.some(r => r.to >= line.from && r.from <= line.to)) continue;   // its marks are showing
+        const made = openingLine(o, choice.which, choice.set, plugin.settings.initials, path, url => plugin.ratioKnown(url), value.inked);
+        if (!made) continue;
+        builder.add(line.from, line.from, Decoration.line(made.style ? { class: made.classes, attributes: { style: made.style } } : { class: made.classes }));
+        if (o.gap && line.from + o.gap[1] <= line.to) builder.add(line.from + o.gap[0], line.from + o.gap[1], gap);
+        froms.push(line.from);
+      }
+    }
+    return Object.assign({}, value, { deco: builder.finish(), froms });
+  };
+  const field = StateField.define({
+    create: state => decorate(state, Object.assign({ shown: null, inked: false }, read(state))),
+    update(value, tr) {
+      let next = value, again = false;
+      if (tr.docChanged) {
+        next = Object.assign({}, next, read(tr.state));
+        if (next.shown && next.shown.said !== next.said) next.shown = null;   // the note says something else now
+        again = true;
+      }
+      for (const e of tr.effects) {
+        if (e.is(refresh)) again = true;
+        else if (e.is(preview)) { next = Object.assign({}, next, { shown: e.value.which === undefined ? null : { which: e.value.which, said: next.said }, inked: Boolean(e.value.ink) }); again = true; }
+        else if (e.is(ink)) { next = Object.assign({}, next, { inked: Boolean(e.value) }); again = true; }
+      }
+      if (!again && tr.selection && value.openings.some(o => o.led)) again = true;
+      return again ? decorate(tr.state, next) : value;
+    },
+    provide: f => EditorView.decorations.from(f, value => value.deco),
+  });
+
+  // The word kept whole on the small-capped first line.
+  const kept = Decoration.mark({ class: 'sc-keep' });
+  const keepField = StateField.define({
+    create: () => Decoration.none,
+    update(value, tr) {
+      for (const e of tr.effects) if (e.is(keep)) return e.value.length ? Decoration.set(e.value.map(([from, to]) => kept.range(from, to)), true) : Decoration.none;
+      return tr.docChanged ? value.map(tr.changes) : value;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  const keeper = ViewPlugin.fromClass(class {
+    constructor(view) { this.ask(view); }
+    update(u) {
+      if (u.docChanged || u.geometryChanged || u.viewportChanged || u.startState.field(field) !== u.state.field(field) ||
+        u.transactions.some(tr => tr.effects.some(e => e.is(refresh)))) this.ask(u.view);
+    }
+    ask(view) {
+      view.requestMeasure({ key: this, read: v => this.read(v), write: (found, v) => this.write(found, v) });
+    }
+    /* Where the first line of each opening paragraph in view would break inside a word: [[from, to]] of the words. */
+    read(view) {
+      const state = view.state, froms = state.field(field).froms, found = [];
+      if (!froms.length || !live(state)) return { state, found };
+      const had = state.field(keepField).size > 0;
+      if (had) view.dom.classList.add('scriptorium-keep-off');
+      try {
+        for (const from of froms) {
+          if (from < view.viewport.from || from > view.viewport.to) continue;
+          const at = view.domAtPos(from);
+          const el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
+          if (!el || !el.classList.contains('scriptorium-opening')) continue;
+          const cs = getComputedStyle(el, '::first-line');
+          if (cs.fontVariantCaps !== 'small-caps') continue;   // (Source mode, or a snippet without the rules)
+          const nodes = [], walker = el.ownerDocument.createTreeWalker(el, 4);   // 4: text nodes
+          for (let n = walker.nextNode(); n; n = walker.nextNode()) if (!n.parentElement.closest('[contenteditable="false"], .cm-widgetBuffer, mjx-container, .math, .cm-inline-code')) nodes.push(n);
+          const split = firstLineSplit(nodes, parseFloat(getComputedStyle(el).fontSize));
+          if (!split) continue;
+          const [s, e] = wordBounds(nodes, split[0], split[1]);
+          const a = view.posAtDOM(nodes[s[0]], s[1]), b = view.posAtDOM(nodes[e[0]], e[1] + 1), line = state.doc.lineAt(from);
+          if (a >= line.from && b <= line.to && b > a) found.push([a, b]);
+        }
+      } catch (e) { /* never break the editor: the line is as it is */ }
+      finally { if (had) view.dom.classList.remove('scriptorium-keep-off'); }
+      return { state, found };
+    }
+    write({ state, found }, view) {
+      const now = [];
+      for (const it = state.field(keepField).iter(); it.value; it.next()) now.push([it.from, it.to]);
+      if (now.length === found.length && now.every((r, i) => r[0] === found[i][0] && r[1] === found[i][1])) return;
+      Promise.resolve().then(() => { if (view.state === state) try { view.dispatch({ effects: keep.of(found) }); } catch (e) { /* the view is gone */ } });
+    }
+  });
+  /* A click on the initial puts the cursor at the letter: before it or after it, whichever is nearer (a double
+     click takes the word, a triple click the line of the note). Left to itself, the browser has no place for a
+     click on a letter that is floated out of its line, and puts the cursor at the end of the first line. */
+  const clicks = Prec.highest(EditorView.domEventHandlers({
+    mousedown(event, view) {
+      try {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || !live(view.state)) return false;
+        const el = event.target && event.target.closest ? event.target.closest('.cm-line.scriptorium-opening') : null;
+        if (!el) return false;
+        const line = view.state.doc.lineAt(view.posAtDOM(el, 0)), cs = getComputedStyle(el), tall = (parseFloat(cs.lineHeight) || 24) * 1.8;
+        const inside = b => event.clientX >= b.left && event.clientX <= b.right && event.clientY >= b.top && event.clientY <= b.bottom;
+        let first = -1, last = -1, box = null;
+        for (let p = line.from; p < Math.min(line.to, line.from + 8); p++) {
+          const c = view.coordsAtPos(p, 1), d = view.coordsAtPos(p + 1, -1);   // the letter's left edge, and its right one
+          if (!c || c.bottom - c.top <= tall) { if (first >= 0) break; continue; }
+          if (first < 0) first = p;
+          last = p;
+          const right = d && d.bottom - d.top > tall ? Math.max(c.right, d.right) : c.right;
+          box = box ? { left: Math.min(box.left, c.left), right: Math.max(box.right, right), top: Math.min(box.top, c.top), bottom: Math.max(box.bottom, c.bottom) } : { left: c.left, right, top: c.top, bottom: c.bottom };
+        }
+        let at = -1;
+        if (box && inside(box)) at = event.clientX < (box.left + box.right) / 2 ? first : last + 1;
+        else if (!box) {
+          // a picture stands for the letter: a click on it is a click before the paragraph's first letter
+          const picture = getComputedStyle(el, '::before'), px = v => parseFloat(v) || 0, r = el.getBoundingClientRect();
+          if (picture.content === 'none' || picture.content === 'normal' || picture.float !== 'left') return false;
+          const left = r.left + px(cs.paddingLeft) + px(picture.marginLeft), top = r.top + px(cs.paddingTop) + px(picture.marginTop);
+          if (inside({ left, right: left + px(picture.width), top, bottom: top + px(picture.height) })) at = line.from + Math.max(0, line.text.search(/\S/));
+        }
+        if (at < 0) return false;
+        const word = /^[\p{L}\p{N}\p{M}'’-]*/u.exec(view.state.doc.sliceString(at, line.to))[0].length;
+        const selection = event.shiftKey ? { anchor: view.state.selection.main.anchor, head: at }
+          : event.detail >= 3 ? { anchor: line.from, head: line.to }
+            : event.detail === 2 ? { anchor: Math.min(at, first < 0 ? at : first), head: Math.max(at, at + word) } : { anchor: at };
+        event.preventDefault();
+        view.dispatch({ selection, userEvent: 'select.pointer' });
+        view.focus();
+        return true;
+      } catch (e) { return false; }
+    },
+  }));
+  return { extension: [field, keepField, keeper, clicks], refresh, preview, ink, field, keepField };
 }
 
 /* ==========================================================
@@ -964,7 +1338,7 @@ class DropcapModal extends Modal {
     box.addEventListener('change', () => void this.plugin.setNoteDropcapAligned(file, box.checked));
     this.contentEl.createEl('p', {
       cls: 'scriptorium-dropcap-hint',
-      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view, where drop caps are drawn. A set ' +
+      text: 'Saved in the note’s properties as “dropcap”. It shows in Reading view (and while editing, if “Show drop caps while editing” is on in the settings). A set ' +
         'of images shows where it has the paragraph’s first letter. Centred and right-aligned text has no drop cap ' +
         'unless the box is ticked (“dropcap-aligned” in the properties) or its own marker line asks for one (“::: center dropcap”).',
     });
@@ -1008,6 +1382,12 @@ class ScriptoriumSettings extends PluginSettingTab {
         }
         dropdown.setValue(settings.initials).onChange(value => this.plugin.updateSettings({ initials: value }));
       });
+    new Setting(el)
+      .setName('Show drop caps while editing (Live Preview)')
+      .setDesc('Off by default: the editor shows the opening paragraph as plain text, and drop caps are drawn in Reading view and in an exported PDF only. On: Live Preview shows the same drop cap on the same paragraph, in the same place, with the first line in small capitals, so the text does not move between the two views. The initial is still the letter you typed (the cursor goes before and after it; it is selected, copied, found and spell-checked as any other); nothing is added to the note. Source mode stays plain.')
+      .addToggle(toggle => toggle
+        .setValue(settings.liveDropcaps)
+        .onChange(value => this.plugin.updateSettings({ liveDropcaps: value })));
     new Setting(el)
       .setName('Marginalia')
       .setDesc('In Reading view, set footnotes beside their references in the right margin, as sidenotes, when the pane is wide enough; otherwise they stay at the foot of the note. A callout of type margin (> [!margin]) becomes an unnumbered note in the margin.')
@@ -1093,7 +1473,8 @@ function unwrapKept(p) {
   p.normalize();
 }
 
-function wrapWord(nodes, a, b) {
+/* The whole word that the characters a and b ([node, offset] in the text nodes `nodes`) are in: [start, end]. */
+function wordBounds(nodes, a, b) {
   let s = a.slice(), e = b.slice(), m, j;
   for (;;) {
     m = s[0]; j = s[1] - 1;
@@ -1107,13 +1488,42 @@ function wrapWord(nodes, a, b) {
     if (j >= nodes[m].data.length || !WORD.test(nodes[m].data[j])) break;
     e = [m, j];
   }
-  for (m = e[0]; m >= s[0]; m--) {
+  return [s, e];
+}
+
+function wrapWord(nodes, a, b) {
+  const [s, e] = wordBounds(nodes, a, b);
+  for (let m = e[0]; m >= s[0]; m--) {
     const n = nodes[m], from = m === s[0] ? s[1] : 0, to = m === e[0] ? e[1] + 1 : n.data.length;
     if (to <= from) continue;
     const mid = n.splitText(from); mid.splitText(to - from);
     const span = document.createElement('span'); span.className = 'sc-keep';
     mid.parentNode.insertBefore(span, mid); span.appendChild(mid);
   }
+}
+
+/* Where the first line of the text in `nodes` (text nodes, in order) ends inside a word: [a, b], the last
+   character of the first line and the first of the second ([node, offset] each), or null if the line ends between
+   two words. fs is the text's size in px. */
+function firstLineSplit(nodes, fs) {
+  if (!nodes.length) return null;
+  const r = nodes[0].ownerDocument.createRange();
+  let top0 = null, prev = null;
+  for (let k = 0; k < nodes.length; k++) {
+    const n = nodes[k];
+    for (let i = 0; i < n.data.length; i++) {
+      r.setStart(n, i); r.setEnd(n, i + 1);
+      const rc = r.getClientRects()[0];
+      if (rc && rc.height && rc.height < 2 * fs) {   // skips the floated initial and collapsed white space
+        if (top0 === null) top0 = rc.top;
+        else if (rc.top > top0 + 0.6 * fs) {         // the first character of the second line
+          return prev && WORD.test(nodes[prev[0]].data[prev[1]]) && WORD.test(n.data[i]) ? [prev, [k, i]] : null;
+        }
+      }
+      prev = [k, i];
+    }
+  }
+  return null;
 }
 
 function keepFirstLineWords(p) {
@@ -1128,23 +1538,8 @@ function keepFirstLineWords(p) {
   const nodes = [], walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
   let n;
   while ((n = walker.nextNode())) if (!n.parentElement.closest('mjx-container, .math, code')) nodes.push(n);
-  const fs = parseFloat(getComputedStyle(p).fontSize), r = document.createRange();
-  let top0 = null, prev = null;
-  for (let k = 0; k < nodes.length; k++) {
-    n = nodes[k];
-    for (let i = 0; i < n.data.length; i++) {
-      r.setStart(n, i); r.setEnd(n, i + 1);
-      const rc = r.getClientRects()[0];
-      if (rc && rc.height && rc.height < 2 * fs) {   // skips the floated initial and collapsed white space
-        if (top0 === null) top0 = rc.top;
-        else if (rc.top > top0 + 0.6 * fs) {         // the first character of the second line
-          if (prev && WORD.test(nodes[prev[0]].data[prev[1]]) && WORD.test(n.data[i])) wrapWord(nodes, prev, [k, i]);
-          return;
-        }
-      }
-      prev = [k, i];
-    }
-  }
+  const split = firstLineSplit(nodes, parseFloat(getComputedStyle(p).fontSize));
+  if (split) wrapWord(nodes, split[0], split[1]);
 }
 
 /* ==========================================================
@@ -2147,6 +2542,106 @@ function describeVaultSetup(plan) {
 
 /* Makes the plan's changes in the vault in dir: backs up .obsidian as it is, then writes; on a failure every file is
    put back and the error is thrown. Returns the backup folder, or null if there was nothing to back up or to change. */
+/* The two community plugins that draw diagrams (Lagrange writes TikZ figures and Excalidraw drawings). They are not
+   part of Scriptorium: when a vault is set up, each is downloaded from its own GitHub release, at a pinned version,
+   and every file is checked against its SHA-256 before anything is written (the same pins as the installers').
+   TikZJax is MIT-licensed; the Excalidraw plugin is AGPL-3.0.
+   installDiagramPlugins(fs, path, crypto, dir, fetch) -> {id: 'installed' | 'updated' | 'kept' | 'failed'}: a plugin
+   the vault has at the pinned version or a newer one is left exactly as it is, and so are its settings; only a
+   plugin installed new is turned on (one the writer turned off stays off, even if its files are updated); one that
+   cannot be downloaded, or does not match, is not installed, and nothing of it is written. fetch(url) resolves to
+   the bytes (a Buffer or a Uint8Array). */
+const DIAGRAM_PLUGINS = [
+  { id: 'obsidian-tikzjax', name: 'TikZJax', version: '0.5.2', base: 'https://github.com/artisticat1/obsidian-tikzjax/releases/download/0.5.2/',
+    files: { 'main.js': 'cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41', 'manifest.json': '09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1', 'styles.css': 'd9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d' } },
+  { id: 'obsidian-excalidraw-plugin', name: 'Excalidraw', version: '2.29.2', base: 'https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/download/2.29.2/',
+    files: { 'main.js': '49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541', 'manifest.json': '8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9', 'styles.css': '6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0' } },
+];
+function versionKey(v) {
+  return (String(v).match(/\d+/g) || []).slice(0, 4).map(Number);
+}
+function versionAtLeast(a, b) {
+  const x = versionKey(a), y = versionKey(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return true;
+}
+/* A file of a plugin's release, through Obsidian's own request (which is not held back by CORS). */
+async function fetchRelease(url) {
+  const res = await requestUrl({ url, method: 'GET', throw: false });
+  if (res.status !== 200) throw new Error(`status ${res.status}`);
+  return new Uint8Array(res.arrayBuffer);
+}
+/* The names of the diagram plugins that installDiagramPlugins would download into the vault in dir. */
+function diagramPluginsWanted(fs, path, dir, plugins) {
+  return (plugins || DIAGRAM_PLUGINS).filter(p => {
+    const folder = path.join(dir, '.obsidian', 'plugins', p.id);
+    let had = null;
+    try { had = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8')).version || null; } catch (e) { had = null; }
+    return !(had !== null && versionAtLeast(had, p.version) && fs.existsSync(path.join(folder, 'main.js')));
+  }).map(p => p.name);
+}
+/* The data.json written with a plugin that is installed new, where it has none; null for most. Excalidraw opens a
+   "Welcome to Excalidraw" window the first time it runs, while its previousRelease is older than the plugin, and sets
+   previousRelease to its own version when that window is closed: writing that one setting keeps the window shut.
+   Excalidraw fills in the rest with its defaults, and still shows release notes after a later update. */
+function diagramFirstSettings(p) {
+  return p.id === 'obsidian-excalidraw-plugin' ? `{\n  "previousRelease": "${p.version}"\n}\n` : null;
+}
+async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
+  const result = {};
+  for (const p of plugins || DIAGRAM_PLUGINS) {
+    const folder = path.join(dir, '.obsidian', 'plugins', p.id);
+    let had = null;
+    try { had = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8')).version || null; } catch (e) { had = null; }
+    if (had !== null && versionAtLeast(had, p.version) && fs.existsSync(path.join(folder, 'main.js'))) result[p.id] = 'kept';
+    else {
+      try {
+        const files = {};
+        for (const name of Object.keys(p.files)) {
+          const data = Buffer.from(await fetch(p.base + name));
+          if (crypto.createHash('sha256').update(data).digest('hex') !== p.files[name]) throw new Error(`${name} does not match its pinned SHA-256`);
+          files[name] = data;
+        }
+        fs.mkdirSync(folder, { recursive: true });
+        for (const name of Object.keys(files)) {         // (settings that are there, data.json, are never touched)
+          const tmp = path.join(folder, `${name}.scriptorium-tmp`);
+          fs.writeFileSync(tmp, files[name]);
+          fs.renameSync(tmp, path.join(folder, name));
+        }
+        result[p.id] = had !== null ? 'updated' : 'installed';
+        const settings = had === null ? diagramFirstSettings(p) : null;
+        if (settings && !fs.existsSync(path.join(folder, 'data.json'))) fs.writeFileSync(path.join(folder, 'data.json'), settings);
+      } catch (e) {
+        result[p.id] = 'failed';
+        continue;
+      }
+    }
+    // Only a plugin installed new is turned on: one that was there and is not in the list was turned off by the writer.
+    if (result[p.id] !== 'installed') continue;
+    const listing = path.join(dir, '.obsidian', 'community-plugins.json');
+    // (a list that is there but is not a JSON list is left as it is: the plugin is installed, and is turned on in Settings)
+    let on = [];
+    if (fs.existsSync(listing)) {
+      try { on = JSON.parse(fs.readFileSync(listing, 'utf8').replace(/^\uFEFF/, '')); } catch (e) { on = null; }
+      if (!Array.isArray(on)) continue;
+    }
+    if (!on.includes(p.id)) {
+      on.push(p.id);
+      fs.mkdirSync(path.dirname(listing), { recursive: true });
+      fs.writeFileSync(listing, JSON.stringify(on, null, 2) + '\n');
+    }
+  }
+  return result;
+}
+/* What a set-up says about the diagram plugins, from installDiagramPlugins's result; '' if there is nothing to say. */
+function diagramPluginsNote(result) {
+  const name = id => (DIAGRAM_PLUGINS.find(p => p.id === id) || { name: id }).name;
+  const got = Object.keys(result).filter(id => result[id] === 'installed' || result[id] === 'updated').map(name);
+  const failed = Object.keys(result).filter(id => result[id] === 'failed').map(name);
+  return [got.length ? `${got.join(' and ')} ${got.length === 1 ? 'was' : 'were'} added for diagrams.` : '',
+    failed.length ? `${failed.join(' and ')} could not be downloaded: to add ${failed.length === 1 ? 'it' : 'them'}, open the vault and use Settings → Community plugins → Browse.` : ''].filter(Boolean).join(' ');
+}
+
 function applyVaultSetup(fs, path, dir, plan, now) {
   const changes = plan.changes;
   if (!changes.length) return null;
@@ -2291,7 +2786,22 @@ class SetupVaultModal extends Modal {
     if (!plan.changes.length) {
       el.createEl('p', { text: 'Scriptorium is already set up here: nothing to change.' });
       for (const n of plan.notes) el.createEl('p', { cls: 'scriptorium-setup-note', text: n });
-      buttons().createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
+      // (a vault that was set up while the diagram plugins could not be downloaded can still be given them)
+      const wanted = diagramPluginsWanted(this.fs, this.path, this.target);
+      const row = buttons();
+      if (wanted.length) {
+        const diagrams = el.createEl('p', { cls: 'scriptorium-setup-note', text: `${wanted.join(' and ')}, for diagrams, ${wanted.length === 1 ? 'is' : 'are'} not in this vault: ${wanted.length === 1 ? 'it' : 'they'} can be downloaded from ${wanted.length === 1 ? 'its' : 'their'} own release${wanted.length === 1 ? '' : 's'} on GitHub.` });
+        el.insertBefore(diagrams, row);
+        const add = row.createEl('button', { text: `Add ${wanted.join(' and ')}` });
+        add.addEventListener('click', () => {
+          add.disabled = true;
+          diagrams.setText(`Adding ${wanted.join(' and ')}…`);
+          installDiagramPlugins(this.fs, this.path, require('crypto'), this.target, fetchRelease).then(
+            r => diagrams.setText(diagramPluginsNote(r) || 'TikZJax and Excalidraw are already in the vault.'),
+            () => diagrams.setText('The plugins could not be added; use Settings → Community plugins → Browse in the vault.'));
+        });
+      }
+      row.createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
       return;
     }
     const replaced = plan.changes.filter(c => c.replaces).length, added = plan.changes.length - replaced;
@@ -2318,6 +2828,11 @@ class SetupVaultModal extends Modal {
       }
       el.empty();
       el.createEl('p', { text: `Done: ${added} file${added === 1 ? '' : 's'} added, ${replaced} replaced or merged.` });
+      // the diagram plugins come from their own releases, a moment later
+      const diagrams = el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Adding the TikZJax and Excalidraw plugins for diagrams…' });
+      installDiagramPlugins(this.fs, this.path, require('crypto'), this.target, fetchRelease).then(
+        r => diagrams.setText(diagramPluginsNote(r) || 'TikZJax and Excalidraw are already in the vault.'),
+        () => diagrams.setText('The TikZJax and Excalidraw plugins could not be added; use Settings → Community plugins → Browse in the vault.'));
       if (backup) el.createEl('p', { cls: 'scriptorium-setup-note', text: `The .obsidian folder as it was is in ${backup}` });
       el.createEl('p', {
         text: this.own ? 'Reload Obsidian to see it (Ctrl/Cmd+P, “Reload app without saving”).'
@@ -4076,6 +4591,7 @@ class SyncModal extends Modal {
       const plan = planVaultSetup(k.fs, k.path, setupPackage(k.fs, k.path, k.dir), dir);
       applyVaultSetup(k.fs, k.path, dir, plan);
       setup = 'Scriptorium’s theme, snippet and plugins are set up in it.';
+      try { const note = diagramPluginsNote(await installDiagramPlugins(k.fs, k.path, require('crypto'), dir, fetchRelease)); if (note) setup += ` ${note}`; } catch (e) { /* the vault is set up without them */ }
     } catch (e) {
       setup = 'Scriptorium could not be set up in it; run “Scriptorium: Set up another vault” on it.';
       this.plugin.syncNote('setting up the retrieved vault failed', [String(e && e.message)]);
@@ -4190,6 +4706,14 @@ class Scriptorium extends Plugin {
       callback: () => this.setFancyMode(!this.settings.fancyMode)
     });
     this.addCommand({
+      id: 'toggle-live-dropcaps',
+      name: 'Toggle drop caps while editing (Live Preview)',
+      callback: async () => {
+        await this.updateSettings({ liveDropcaps: !this.settings.liveDropcaps });
+        new Notice(this.settings.liveDropcaps ? 'Drop caps are shown while editing, in Live Preview.' : 'Drop caps are shown in Reading view only.');
+      }
+    });
+    this.addCommand({
       id: 'toggle-marginalia',
       name: 'Toggle marginalia (footnotes in the margin)',
       callback: () => this.updateSettings({ marginalia: !this.settings.marginalia })
@@ -4271,6 +4795,7 @@ class Scriptorium extends Plugin {
     this.app.workspace.onLayoutReady(() => { void this.includeTitleInPdf(); void this.loadDropcapSets(); window.setTimeout(() => void this.checkFontFaces(), 4000); });
     this.dropcapSets = [];   // the sets of drop caps beside the four built in (see "Sets of drop caps")
     this.ratios = new Map();  // an image's shape (width over height), by its address
+    this.shapes = new Map();  // the shapes that are known by now (the editor asks without waiting)
     this.addCommand({
       id: 'add-dropcap-set',
       name: 'Add a set of drop caps (your own images or a font of initials)',
@@ -4304,6 +4829,13 @@ class Scriptorium extends Plugin {
     });
     // Centred and right-aligned text (see "Centred and right-aligned text"): Live Preview's lines, and the commands.
     try { this.registerEditorExtension(alignExtension()); } catch (e) { console.error('Scriptorium: text is not aligned in Live Preview', e); }
+    // Drop caps in the editor (see "Drop caps in Live Preview"): a setting, off unless the writer turns it on. What
+    // is registered is a list that stays empty while it is off (the editor is then exactly as it is without this),
+    // and holds the extension while it is on (applyLiveDropcaps).
+    this.inking = new WeakMap();   // an editor -> the timer that ends its inking
+    this.dropcapLive = null;       // the extension and its effects, while the setting is on
+    this.liveExtensions = [];
+    try { this.registerEditorExtension(this.liveExtensions); } catch (e) { console.error('Scriptorium: no drop caps in Live Preview', e); }
     for (const [id, name, kind] of [
       ['align-center', 'Centre selection', 'center'],
       ['align-right', 'Right-align selection', 'right'],
@@ -4524,14 +5056,64 @@ class Scriptorium extends Plugin {
      (the four built in are classes on body, and need no mark). A set that is not in the vault counts as no choice.
      path is the note's. Returns a promise: an image's shape is known (the text wraps round it closely). */
   mark(el, which, path) {
-    let set = which && which.startsWith('set:') ? this.findSet(which) : null;
-    if (which && which.startsWith('set:') && !set) which = null;
-    if (!which && this.settings.initials.startsWith('set:')) { set = this.findSet(this.settings.initials); which = set ? this.settings.initials : null; }
-    const image = markDropcap(el, which, set, path);
+    const choice = this.dropcapChoice(which);
+    const image = markDropcap(el, choice.which, choice.set, path);
     el.scriptoriumImage = image;
     if (!image) return Promise.resolve();
     return Promise.all([['light', '--scriptorium-dropcap-ratio'], ['dark', '--scriptorium-dropcap-ratio-dark']].map(([theme, name]) =>
       this.ratio(image[theme]).then(r => { if (r && el.scriptoriumImage === image) el.style.setProperty(name, String(r)); })));
+  }
+
+  /* What a note's choice of drop cap comes to: {which, set}. The note's own if it has one, else the vault's if that
+     is a set (the four built in are classes on body, and need no mark). A set that is not in the vault counts as no
+     choice. */
+  dropcapChoice(which) {
+    let set = which && which.startsWith('set:') ? this.findSet(which) : null;
+    if (which && which.startsWith('set:') && !set) which = null;
+    if (!which && this.settings.initials.startsWith('set:')) { set = this.findSet(this.settings.initials); which = set ? this.settings.initials : null; }
+    return { which: which || null, set };
+  }
+
+  /* An image's shape if it is known already (the editor's lines are set at once, and set again when it is). */
+  ratioKnown(url) {
+    if (!url) return 0;
+    if (this.shapes.has(url)) return this.shapes.get(url);
+    if (!this.ratios.has(url)) void this.ratio(url).then(r => { if (r) this.refreshEditors(); });
+    return 0;
+  }
+
+  /* "Show drop caps while editing (Live Preview)": puts the extension into the editors, or takes it out of them,
+     at once (no restart). Off, nothing of it is in any editor. */
+  applyLiveDropcaps() {
+    const on = Boolean(this.settings.liveDropcaps);
+    if (!this.liveExtensions || on === Boolean(this.dropcapLive)) return;
+    try {
+      this.liveExtensions.length = 0;
+      this.dropcapLive = on ? dropcapExtension(this) : null;
+      if (on) this.liveExtensions.push(this.dropcapLive.extension);
+      this.app.workspace.updateOptions();
+    } catch (e) { this.dropcapLive = null; this.liveExtensions.length = 0; console.error('Scriptorium: no drop caps in Live Preview', e); }
+  }
+
+  /* Has every editor set its opening lines again, and look again at where their first lines break. */
+  refreshEditors() {
+    if (!this.dropcapLive) return;
+    this.app.workspace.iterateAllLeaves(leaf => {
+      const cm = leaf.view && leaf.view.editor && leaf.view.editor.cm;
+      if (cm && cm.dispatch) try { cm.dispatch({ effects: this.dropcapLive.refresh.of(null) }); } catch (e) { /* an editor that is going away */ }
+    });
+  }
+
+  /* Shows a drop cap in a note's editor without saving it (which: as previewDropcap takes it), inked in unless
+     quiet is set. */
+  previewLive(view, which, quiet) {
+    const cm = view && view.editor && view.editor.cm;
+    if (!this.dropcapLive || !cm || !cm.dispatch) return;
+    try {
+      cm.dispatch({ effects: this.dropcapLive.preview.of({ which, ink: !quiet }) });
+      window.clearTimeout(this.inking.get(cm));
+      if (!quiet) this.inking.set(cm, window.setTimeout(() => { try { cm.dispatch({ effects: this.dropcapLive.ink.of(false) }); } catch (e) { /* gone */ } }, 2600));
+    } catch (e) { /* an editor that is going away */ }
   }
 
   /* An image's width over its height (0 if it cannot be read), found once. */
@@ -4540,8 +5122,8 @@ class Scriptorium extends Plugin {
     if (!known) {
       known = new Promise(resolve => {
         const img = new Image();
-        img.onload = () => resolve(img.naturalHeight ? Math.round(100 * img.naturalWidth / img.naturalHeight) / 100 : 0);
-        img.onerror = () => resolve(0);
+        img.onload = () => { const r = img.naturalHeight ? Math.round(100 * img.naturalWidth / img.naturalHeight) / 100 : 0; this.shapes.set(url, r); resolve(r); };
+        img.onerror = () => { this.shapes.set(url, 0); resolve(0); };
         img.src = url;
       });
       this.ratios.set(url, known);
@@ -4549,10 +5131,11 @@ class Scriptorium extends Plugin {
     return known;
   }
 
-  /* Shows a drop cap in a note's Reading view without saving it: which is 'yinit' | 'goudy' | 'plain' | 'none' or
+  /* Shows a drop cap in a note's Reading view and in its editor without saving it: which is 'yinit' | 'goudy' | 'plain' | 'none' or
      'set:<name>', null for the vault's, or undefined for what the note's properties say. The initial is inked in
      (the snippet's scriptorium-dropcap-inked), unless quiet is set. */
   previewDropcap(view, which, quiet) {
+    this.previewLive(view, which, quiet);
     if (which === undefined) {
       const cache = view.file && this.app.metadataCache.getFileCache(view.file);
       which = noteDropcap(cache && cache.frontmatter);
@@ -4623,6 +5206,7 @@ class Scriptorium extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
       if (leaf.view instanceof MarkdownView) this.previewDropcap(leaf.view, undefined, true);
     }
+    this.refreshEditors();
   }
 
   async makeFolder(dir) {
@@ -4886,6 +5470,7 @@ class Scriptorium extends Plugin {
   }
 
   recheck() {
+    this.refreshEditors();
     requestAnimationFrame(() => {
       for (const p of this.kept) {
         if (!p.isConnected) { this.resizeObserver.unobserve(p); this.kept.delete(p); continue; }
@@ -4919,6 +5504,7 @@ class Scriptorium extends Plugin {
 
   applyFeatures() {
     const s = this.settings, body = document.body;
+    this.applyLiveDropcaps();
     let changed = false;
     for (const [value] of INITIALS) {
       const cls = `scriptorium-initials-${value}`, on = value === s.initials && value !== 'yinit';
@@ -4953,7 +5539,9 @@ Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
-  noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
+  DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsWanted, diagramPluginsNote, versionAtLeast,
+  noteDropcap, dropcapChoices, markDropcap, dropcapMarks, isPrintPage, dressPrint,
+  noteBlocks, shownLine, linesDropcap, openingPlan, openingLine, dropcapExtension,
   alignKind, alignMarker, noteAlign, alignPlan, sectionMarks, alignClasses, blockLines, blockMarks, alignEdits, alignDropcapEdits, applyLineEdits, lineAfterEdits, markAligned,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
   seedOf, fontFaces, setLabel, monoMask, downloadPlan, fetchDropcapSet, describeDownload, sizeText,

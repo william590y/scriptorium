@@ -66,7 +66,7 @@ class Tool:
     def _run(self, cmd):
         # The children write UTF-8 (the script and Node do when asked; the exe's few non-ASCII characters may not
         # survive a Windows console code page, which is fine: the checks look at ASCII text and at the files).
-        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", SCRIPTORIUM_NO_FONTS="1")   # the fonts have tests of their own (test_fonts.py)
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", SCRIPTORIUM_NO_FONTS="1", SCRIPTORIUM_NO_DIAGRAM_PLUGINS="1")   # the fonts and the diagram plugins have tests of their own (test_fonts.py, test_diagram_plugins.py)
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace", env=env)
         for line in (r.stdout + r.stderr).splitlines():
             print("      | " + line)
@@ -81,7 +81,7 @@ class Tool:
 
 def tools(exe):
     py = [sys.executable, str(SCRIPT)]
-    found = [Tool("Setup-Scriptorium-Vault.py", py + ["--dry-run"], py + ["--yes"])]
+    found = [Tool("Setup-Scriptorium-Vault.py", py + ["--dry-run"], py + ["--yes", "--no-diagram-plugins"])]   # (the diagram plugins are downloaded: tools/test_diagram_plugins.py tests that without the network)
     if exe:
         if os.name == "nt":
             run = [str(exe)]

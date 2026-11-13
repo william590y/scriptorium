@@ -87,10 +87,60 @@ try {
     $archive = Join-Path $tempPath 'Writing.zip'
     Get-ScriptoriumDownload -Uri 'https://williamliaw.com/assets/downloads/Scriptorium.zip' -OutFile $archive
     $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne 'd6410e6ce88d497aca0b69d6cb7c1d9d8aa8ba78bbf173c90dc2e42fb9287091') { throw 'Package verification failed. Please download the current installer from the Projects page.' }
+    if ($actualHash -ne 'f2d91be389e29b0004cdb59776cb37605f5fc43adcedef2e627d36e0aec92209') { throw 'Package verification failed. Please download the current installer from the Projects page.' }
     $staging = Join-Path $tempPath 'vault'
     Expand-Archive -LiteralPath $archive -DestinationPath $staging
     if (!(Test-Path -LiteralPath (Join-Path $staging '.obsidian/appearance.json'))) { throw 'Invalid configuration archive.' }
+    # ---- The diagram plugins ----
+    # Lagrange draws technical figures with the TikZJax plugin and free-form sketches with the Excalidraw plugin. They
+    # are not part of Scriptorium: each is downloaded from its own release on GitHub, at a pinned version, and every
+    # file is checked against its SHA-256 before the plugin is put in the new vault and turned on. If one cannot be
+    # downloaded, the installation goes on without it and says so at the end.
+    $diagramMissing = @()
+    $diagramPlugins = @(
+        @{ Id = 'obsidian-tikzjax'; Name = 'TikZJax'; Version = '0.5.2'; Base = 'https://github.com/artisticat1/obsidian-tikzjax/releases/download/0.5.2/'; Files = @{
+            'main.js' = 'cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41'
+            'manifest.json' = '09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1'
+            'styles.css' = 'd9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d' } },
+        @{ Id = 'obsidian-excalidraw-plugin'; Name = 'Excalidraw'; Version = '2.29.2'; Base = 'https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/download/2.29.2/'; Files = @{
+            'main.js' = '49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541'
+            'manifest.json' = '8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9'
+            'styles.css' = '6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0' } }
+    )
+    # ---- adding the diagram plugins ----
+    foreach ($plugin in $diagramPlugins) {
+        try {
+            $pluginTemp = Join-Path $tempPath ('diagram-' + $plugin.Id)
+            New-Item -ItemType Directory -Force -Path $pluginTemp | Out-Null
+            foreach ($name in $plugin.Files.Keys) {
+                $pluginFile = Join-Path $pluginTemp $name
+                Get-ScriptoriumDownload -Uri ($plugin.Base + $name) -OutFile $pluginFile
+                if ((Get-FileHash -LiteralPath $pluginFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $plugin.Files[$name]) { throw 'The download does not match its checksum.' }
+            }
+            $pluginTarget = Join-Path $staging ('.obsidian/plugins/' + $plugin.Id)
+            New-Item -ItemType Directory -Force -Path $pluginTarget | Out-Null
+            Copy-Item -Path (Join-Path $pluginTemp '*') -Destination $pluginTarget -Force
+            # Excalidraw opens a "Welcome to Excalidraw" window the first time it runs, until its previousRelease is its
+            # own version: that one setting is written with it (only where it has no settings yet), and Excalidraw
+            # fills in the rest.
+            $pluginData = Join-Path $pluginTarget 'data.json'
+            if ($plugin.Id -eq 'obsidian-excalidraw-plugin' -and !(Test-Path -LiteralPath $pluginData)) {
+                [IO.File]::WriteAllText($pluginData, "{`n  `"previousRelease`": `"$($plugin.Version)`"`n}`n", (New-Object Text.UTF8Encoding($false)))
+            }
+            $pluginListPath = Join-Path $staging '.obsidian/community-plugins.json'
+            $pluginList = New-Object System.Collections.ArrayList
+            foreach ($entry in (Get-Content -LiteralPath $pluginListPath -Raw | ConvertFrom-Json)) { [void]$pluginList.Add([string]$entry) }
+            if (!$pluginList.Contains($plugin.Id)) {
+                [void]$pluginList.Add($plugin.Id)
+                [IO.File]::WriteAllText($pluginListPath, (ConvertTo-Json -InputObject @($pluginList)), (New-Object Text.UTF8Encoding($false)))
+            }
+            Write-Host ($plugin.Name + ' added (from its own release on GitHub).')
+        } catch {
+            $diagramMissing += $plugin.Name
+            Write-Host ($plugin.Name + ' could not be added: ' + $_.Exception.Message)
+        }
+    }
+    # ---- end of the diagram plugins ----
     function Find-Obsidian {
         foreach ($base in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
             if (!$base) { continue }
@@ -330,6 +380,7 @@ public static class ScriptoriumFonts {
     New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
     Get-ChildItem -LiteralPath $staging -Force | Copy-Item -Destination $destination -Recurse
     Write-Host "Installed in $destination"
+    if ($diagramMissing.Count) { Write-Host ('Not installed (the download failed): ' + ($diagramMissing -join ', ') + '. Scriptorium itself is installed. To add a plugin later: in Obsidian, Settings, Community plugins, Browse, search for its name, Install, then Enable.') }
 
     # ---- Open the new vault in Obsidian with its community plugins on ----
     # The first time Obsidian opens a vault that comes with plugins, it asks whether to trust the vault's author and keeps

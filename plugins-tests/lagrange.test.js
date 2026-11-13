@@ -509,9 +509,9 @@ test('Defaults: a Claude subscription is the provider, the chat edits with the p
 });
 
 test('The trebuchet is gone: no plate, no caption, no setting; a saved "trebuchet" becomes "random"', () => {
-  assert.deepEqual(L.LOADER_THEMES, ['random', 'clockwork', 'alchemy', 'orbit']);
+  assert.deepEqual(L.LOADER_THEMES, ['cycle', 'clockwork', 'alchemy', 'orbit']);
   assert.deepEqual(Object.keys(L.LOADER_CAPTIONS).sort(), ['alchemy', 'clockwork', 'orbit']);
-  assert.equal(L.sanitizeSettings({ loaderTheme: 'trebuchet' }).loaderTheme, 'random');
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'trebuchet' }).loaderTheme, 'cycle');
   const kept = L.sanitizeSettings({ loaderTheme: 'trebuchet', provider: 'demo', penSpeed: 2 });
   assert.equal(kept.provider, 'demo', 'the rest of the saved settings are kept');
   assert.equal(kept.penSpeed, 2);
@@ -519,7 +519,7 @@ test('The trebuchet is gone: no plate, no caption, no setting; a saved "trebuche
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   // The word survives only in the comment on the fallback.
   assert.deepEqual(js.split('\n').filter(l => /trebuchet/i.test(l)).map(l => l.trim()),
-    ["// A plate that no longer exists (a saved 'trebuchet', from 0.1) falls back to 'random'."]);
+    ["// A plate that no longer exists (a saved 'trebuchet', from 0.1), and the 'random' of before 0.5.2, fall back to 'cycle'."]);
   assert.doesNotMatch(css, /trebuchet/i);
   assert.doesNotMatch(js, /taking aim|\bsling\b/i);
   for (const f of ['README.md', 'THIRD_PARTY.md']) assert.doesNotMatch(fs.readFileSync(path.join(ROOT, f), 'utf8'), /trebuchet/i, f);
@@ -558,8 +558,8 @@ test('Settings: junk is replaced by defaults; the shipped data.json is the defau
   const s = L.sanitizeSettings({ provider: 'gpt', penSpeed: 99, loaderTheme: 'steam', anthropicModel: 'claude-2', showPen: 'yes' });
   assert.equal(s.provider, 'claude-code');
   assert.equal(s.penSpeed, 1);
-  assert.equal(s.loaderTheme, 'random');
-  for (const t of ['clockwork', 'alchemy', 'orbit', 'random']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
+  assert.equal(s.loaderTheme, 'cycle');
+  for (const t of ['clockwork', 'alchemy', 'orbit', 'cycle']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
   assert.equal(L.sanitizeSettings({ effort: 'extreme' }).effort, '');
   for (const e of ['', 'low', 'medium', 'high']) assert.equal(L.sanitizeSettings({ effort: e }).effort, e);
   assert.equal(L.sanitizeSettings({ agenticEdits: false, penTrail: false }).agenticEdits, false);
@@ -2481,4 +2481,549 @@ test('A look: the properties are said to be on the page when the view shows them
   assert.match(js, /The note’s properties stand above its text, as the view shows them/);
   // a look never waits without end on Obsidian's promise for mathematics (it does not settle in a session that has typeset none)
   assert.match(js, /host\.querySelector\('\.math'\)\) await Promise\.race\(\[obsidian\.finishRenderMath\(\), sleep\(3000, signal\)\]\)/);
+});
+
+test('Diagrams: TikZ figures and Excalidraw drawings in an edit are told from the text the pen writes, and drawn shapes first', () => {
+  const tikz = '```tikz\n\\begin{document}\n\\begin{tikzpicture}\n\\draw (0,0) circle (1);\n\\end{tikzpicture}\n\\end{document}\n```';
+  assert.deepEqual(L.figureKinds(`Before.\n\n${tikz}\n\nAfter.`), { tikz: 1, sketch: 0 });
+  assert.deepEqual(L.figureKinds(`${tikz}\n\n~~~tikz\nx\n~~~\n\n![[Orbit.excalidraw]] and ![[Sub/Two.excalidraw.md|300]]`), { tikz: 2, sketch: 2 });
+  assert.deepEqual(L.figureKinds('```python\nprint(1)\n```\n\n![[photo.png]] and the word tikz'), { tikz: 0, sketch: 0 });
+  assert.deepEqual(L.figureKinds(null), { tikz: 0, sketch: 0 });
+  assert.equal(L.withoutFigures(`Before.\n\n${tikz}\n\nAfter ![[Orbit.excalidraw]] it.`), 'Before.\n\n\n\nAfter  it.');
+  assert.equal(L.withoutFigures('```python\nprint(1)\n```'), '```python\nprint(1)\n```', 'other code is still typed');
+  assert.deepEqual(L.figureOrder([{ text: false }, { text: true }, { text: false }, { text: true }, { text: false }]), [0, 2, 4, 1, 3], 'labels last, each kind in the figure’s own order');
+  assert.deepEqual(L.figureOrder([]), []);
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /\.lagrange-pen-figures :is\(\.block-language-tikz svg, \.excalidraw-embedded-img svg, svg\.excalidraw-svg\):not\(\[data-lagrange-seen\]\) \{ opacity: 0 !important; \}/);
+});
+
+test('Diagrams: a drawing in a reply is read and made safe; the prompt says what the vault can draw', () => {
+  const ops = list => L.parseAgentReply('```lagrange-edits\n' + JSON.stringify(list) + '\n```').ops;
+  const [a, b] = ops([
+    { insert_after: 'hardly moving.', sketch: { name: 'Two/bodies: a?', elements: [
+      { type: 'ellipse', x: 0, y: 20, w: 90, h: 90, text: 'M' }, { type: 'arrow', points: [[95, 65], [295, 65]] }, { type: 'text', x: 170, y: 30, text: 'r' },
+      { type: 'rect', x: 0, y: 0, w: -5, h: 10 }, { type: 'image', src: 'file:///etc/passwd' }, { type: 'line', points: [[0, 0]] }, 'junk'] } },
+    { sketch: { elements: [{ type: 'rectangle', x: 1, y: 2, width: 30, height: 40 }] } },
+  ]);
+  assert.equal(a.op, 'insert');
+  assert.equal(a.after, 'hardly moving.');
+  assert.equal(a.sketch.name, 'Two bodies a');
+  assert.deepEqual(a.sketch.elements.map(e => e.type), ['ellipse', 'arrow', 'text'], 'what cannot be drawn is left out');
+  assert.equal(b.op, 'append');
+  assert.deepEqual(b.sketch, { name: 'Drawing', elements: [{ type: 'rect', x: 1, y: 2, w: 30, h: 40 }] });
+  assert.equal(ops([{ insert_after: 'x', sketch: { elements: [] } }]).length, 0, 'an empty drawing is no edit');
+  assert.equal(L.sketchSpec({ elements: Array.from({ length: 200 }, (_, i) => ({ type: 'text', x: i, y: 0, text: 't' })) }).elements.length, 80);
+  // the prompt: both, one, neither
+  const both = L.diagramStyle({ tikz: true, sketch: true });
+  assert.match(both, /```tikz/);
+  assert.match(both, /\\begin\{document\}/);
+  assert.match(both, /"sketch": \{"name"/);
+  assert.match(L.diagramStyle({ tikz: true }), /Excalidraw plugin, which this vault does not have turned on/);
+  assert.match(L.diagramStyle({ sketch: true }), /do not write a tikz block/);
+  assert.match(L.diagramStyle({}), /neither the TikZJax plugin .* nor the Excalidraw plugin/);
+  const note = { title: 'N', path: 'N.md', text: 'x' };
+  assert.ok(L.chatSystemPrompt(note, { text: 'x' }, true, false, { tikz: true, sketch: false }).includes('Diagrams: '));
+  assert.ok(!L.chatSystemPrompt(note, { text: 'x' }, false, false, { tikz: true }).includes('Diagrams: '), 'a chat that only talks draws nothing');
+});
+
+test('The loader’s plates come in turn: the first by chance, then each next one, round and round', () => {
+  const names = ['clockwork', 'alchemy', 'orbit'];
+  assert.equal(L.nextPlate(names, null, () => 0), 'clockwork');
+  assert.equal(L.nextPlate(names, null, () => 0.5), 'alchemy');
+  assert.equal(L.nextPlate(names, null, () => 0.999999), 'orbit');
+  assert.equal(L.nextPlate(names, null, () => 1), 'orbit', 'a chance of exactly 1 is still a plate');
+  assert.equal(L.nextPlate(names, 'clockwork'), 'alchemy');
+  assert.equal(L.nextPlate(names, 'alchemy'), 'orbit');
+  assert.equal(L.nextPlate(names, 'orbit'), 'clockwork');
+  for (const start of [0, 0.4, 0.9]) {
+    const seen = [];
+    let last = null;
+    for (let i = 0; i < 7; i++) seen.push(last = L.nextPlate(names, last, () => start));
+    assert.equal(new Set(seen.slice(0, 3)).size, 3, 'three in a row are three different plates');
+    assert.deepEqual(seen.slice(3, 6), seen.slice(0, 3), 'and then the same round again');
+    assert.equal(seen[6], seen[0]);
+  }
+  assert.equal(L.DEFAULT_SETTINGS.loaderTheme, 'cycle');
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'random' }).loaderTheme, 'cycle', 'the old default becomes the new one');
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'orbit' }).loaderTheme, 'orbit', 'a plate that was chosen stays chosen');
+});
+
+test('splitStable: a streaming reply is cut at whole blocks, never inside code or a displayed formula', () => {
+  const cut = t => { const r = L.splitStable(t); assert.equal(r.done + r.open, t, 'nothing is lost'); return [r.done, r.open]; };
+  assert.deepEqual(cut('One paragraph, still com'), ['', 'One paragraph, still com']);
+  assert.deepEqual(cut('First.\n\nSecond, still com'), ['First.\n\n', 'Second, still com']);
+  assert.deepEqual(cut('First.\n\n```js\nconst a = 1;\n\nconst b'), ['First.\n\n', '```js\nconst a = 1;\n\nconst b'], 'a blank line inside open code is not a place to cut');
+  assert.deepEqual(cut('```js\na\n\nb\n```\n\nAfter'), ['```js\na\n\nb\n```\n\n', 'After']);
+  assert.deepEqual(cut('~~~tikz\n\\draw;\n```\n\n~~~\n\nx'), ['~~~tikz\n\\draw;\n```\n\n~~~\n\n', 'x'], 'a fence closes with its own kind');
+  assert.deepEqual(cut('Before.\n\n$$\na = b\n\n+ c'), ['Before.\n\n', '$$\na = b\n\n+ c']);
+  assert.deepEqual(cut('$$\na\n\n$$\n\nAfter $$x$$ one line.\n\nz'), ['$$\na\n\n$$\n\nAfter $$x$$ one line.\n\n', 'z']);
+  assert.deepEqual(cut('Done.\n\n'), ['', 'Done.\n\n'], 'a paragraph is whole only once the next block has begun (it may yet be a list that goes on)');
+  assert.deepEqual(cut('```js\na\n```'), ['```js\na\n```', ''], 'code that began at the margin is whole as soon as it closes');
+  // lists: the items of one list are never set apart, nor an indented continuation from its item
+  assert.deepEqual(cut('- a\n\n- b\n\n  more of b\n\n- c'), ['', '- a\n\n- b\n\n  more of b\n\n- c']);
+  assert.deepEqual(cut('1. a\n\n2. b\n\nAfter the list.\n\nx'), ['1. a\n\n2. b\n\nAfter the list.\n\n', 'x']);
+  assert.deepEqual(cut('Para.\n\n-'), ['', 'Para.\n\n-'], 'a lone "-" may yet be an item, a rule or a word');
+  assert.deepEqual(cut('Para.\n\n- item'), ['Para.\n\n', '- item']);
+  assert.deepEqual(cut('Para.\n\n    indented'), ['', 'Para.\n\n    indented']);
+  // Lagrange's own blocks are never shown, not even the first letters of their opening line as it arrives
+  for (const start of ['```', '```l', '```lagrange-', '```lagrange-edit', '~~~lagrange-loo']) {
+    const r = L.splitStable('I will change it.\n\n' + start);
+    assert.equal(r.done + r.tail, 'I will change it.\n\n', start);
+    assert.equal(r.done + r.open, 'I will change it.\n\n' + start);
+  }
+  assert.equal(L.splitStable('Look:\n\n```py').tail, '```py', 'any other block shows as it is written');
+  assert.equal(L.splitStable('Look:\n\n```lagrange-edits-not').tail, '```lagrange-edits-not');
+  // what reaches across blocks is left to one render of the whole
+  assert.equal(L.needsWholeRender('A claim.[^1]\n\n[^1]: The source.'), true);
+  assert.equal(L.needsWholeRender('See [it][x].\n\n[x]: https://example.org'), true);
+  assert.equal(L.needsWholeRender('<details>\n\ntext\n\n</details>'), true);
+  assert.equal(L.needsWholeRender('Plain **prose**.\n\n```js\n[a]: b\n```\n\n$$x$$'), true, 'erring towards the whole is harmless');
+  assert.equal(L.needsWholeRender('Plain **prose** with <b>inline</b> HTML.\n\n- a list\n\n$$x$$'), false);
+  assert.deepEqual(cut(''), ['', '']);
+  // the rendered part only ever grows by whole blocks
+  const full = 'Intro.\n\n```py\nprint(1)\n\nprint(2)\n```\n\nThen $$\nx\n$$ and\n\nlast';
+  let prev = '';
+  for (const doc of [full, '1. one\n\n2. two\n\n   - nested\n\nThen prose - with a dash.\n\n- a\n- b\n\n12 monkeys.\n\n---\n\n> quote\n\n~~~\ncode\n~~~\nend']) {
+    prev = '';
+    for (let i = 0; i <= doc.length; i++) { const d = L.splitStable(doc.slice(0, i)).done; assert.ok(d.startsWith(prev), `at ${i}: ${JSON.stringify(doc.slice(0, i))}`); prev = d; }
+  }
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /if \(fresh\.trim\(\)\) this\.renderChat\(fresh, stream\.box\.createDiv\(/, 'only what is new is rendered while a reply streams');
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /pre \{ max-width: 100%; overflow-x: auto;/);
+});
+
+/* ---------- the chat: what is shown, and what is attached ---------- */
+
+test('chatMarkdown: a diagram whose plugin is off shows as its source with a line that says so; nothing a reply holds is run or fetched', () => {
+  const all = { tikz: true, sketch: true, acts: n => ['tikz', 'dataviewjs', 'dataview', 'base'].includes(n), inlineRun: ['$=', '='] };
+  const tikz = 'A figure:\n\n```tikz\n\\begin{document}\n\\draw (0,0) circle (1);\n\\end{document}\n```\n\nAfter.';
+  assert.equal(L.chatMarkdown(tikz, all), tikz, 'with TikZJax on, the block goes to it as it is');
+  const off = L.chatMarkdown(tikz, Object.assign({}, all, { tikz: false }));
+  assert.ok(off.includes('```tikz\n\\begin{document}'), 'the source stays, in its code block');
+  assert.match(off, /```\n\n<small class="lagrange-chat-degraded">TikZJax is not enabled in this vault, so the figure is shown as its source\.<\/small>\n\nAfter\./);
+  assert.equal((off.match(/lagrange-chat-degraded/g) || []).length, 1, 'one line');
+  // Excalidraw: an embed on a line of its own becomes a code block and a line; one inside a sentence, inline code
+  const sk = 'The drawing:\n\n![[Two bodies.excalidraw|300]]\n\nand ![[x.excalidraw.md]] here, but ![[photo.png]] is a picture.';
+  assert.equal(L.chatMarkdown(sk, all), sk);
+  const noSk = L.chatMarkdown(sk, Object.assign({}, all, { sketch: false }));
+  assert.match(noSk, /```text\n!\[\[Two bodies\.excalidraw\|300\]\]\n```\n\n<small class="lagrange-chat-degraded">Excalidraw is not enabled in this vault/);
+  assert.ok(noSk.includes('`![[x.excalidraw.md]]` <small'));
+  assert.ok(noSk.includes('![[photo.png]] is a picture'), 'any other embed is left to Obsidian');
+  // Mermaid draws; a block some plugin would act on is shown as text, and says what it was
+  const mer = '```mermaid\ngraph LR\nA-->B\n```';
+  assert.equal(L.chatMarkdown(mer, all), mer);
+  const dv = L.chatMarkdown('Run this:\n\n```dataviewjs\ndv.paragraph(app.vault.getName())\n```\n\n~~~base\nviews: []\n~~~', all);
+  assert.ok(!/```dataviewjs|~~~base/.test(dv), 'no plugin is handed the block');
+  assert.ok(dv.includes('```text\ndv.paragraph(app.vault.getName())\n```'));
+  assert.ok(dv.includes('A “dataviewjs” block: the chat shows its source and runs nothing.'));
+  assert.ok(dv.includes('A “base” block'));
+  assert.equal(L.chatMarkdown('```python\nprint(1)\n```\n\n```js {1}\nx\n```', all), '```python\nprint(1)\n```\n\n```js {1}\nx\n```', 'ordinary code keeps its name, and so its colours');
+  // inline code a plugin would run
+  assert.equal(L.chatMarkdown('The answer is `$= 6 * 7` and `= this.file.name`, and `x = 1` is code.', all), 'The answer is `​$= 6 * 7` and `​= this.file.name`, and `x = 1` is code.');
+  assert.equal(L.chatMarkdown('`$= 1`', { tikz: true, sketch: true }), '`$= 1`', 'where no plugin runs inline code, it is left alone');
+  // nothing is fetched from the web because a reply says so
+  const web = L.chatMarkdown('See ![chart](https://evil.example/c.png?d=secret) and ![[local.png]] and ![d](data:image/png;base64,AAAA) and ![v](Media/pic.png).', all);
+  assert.ok(web.includes('[chart (a picture on the web, not loaded)](https://evil.example/c.png?d=secret)'));
+  assert.ok(!/!\[chart\]/.test(web));
+  assert.ok(web.includes('![[local.png]]') && web.includes('![d](data:image/png;base64,AAAA)') && web.includes('![v](Media/pic.png)'), 'pictures of the vault and data: pictures are shown');
+  assert.equal(L.chatMarkdown('![a][r] and ![[w]]\n\n[r]: https://x.example/a.png', all), '[a][r] and ![[w]]\n\n[r]: https://x.example/a.png', 'a picture by reference becomes a link');
+  const html = L.chatMarkdown('<iframe src="https://x.example"></iframe> <img src="https://x.example/p.gif"> <img src="data:image/gif;base64,R0"> <video src="//x.example/v.mp4"> `<iframe>` <form action="/x">', all);
+  assert.equal(html, '`<iframe src="https://x.example"></iframe>` `<img src="https://x.example/p.gif">` <img src="data:image/gif;base64,R0"> `<video src="//x.example/v.mp4">` `<iframe>` `<form action="/x">`');
+  // inside code, everything is as it was written
+  const code = '```html\n<iframe src="https://x.example"></iframe>\n![a](https://x.example/a.png) `$= 1` ![[d.excalidraw]]\n```';
+  assert.equal(L.chatMarkdown(code, Object.assign({}, all, { sketch: false })), code);
+  // a block left open at the end (a reply cut off) still gets its line
+  assert.match(L.chatMarkdown('```tikz\n\\draw;', { tikz: false }), /\\draw;\n```\n\n<small[^>]*>TikZJax is not enabled/);
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  assert.match(js, /\(apart \? renderApart : renderMarkdown\)\(this\.app, chatMarkdown\(md, opts\), el,/, 'every message goes through it (one with a TikZ figure comes into the log whole, so that TikZJax meets the figure once)');
+  assert.ok(!/render(Markdown|Apart)\(this\.app, (?!chatMarkdown)/.test(js.slice(js.indexOf('class LagrangeChatView'), js.indexOf('class RewindModal'))), 'and none goes round it');
+});
+
+const bytesOf = (...parts) => Uint8Array.from(parts.flatMap(p => (typeof p === 'string' ? Array.from(Buffer.from(p, 'latin1')) : p)));
+const PNG_HEAD = bytesOf([0x89], 'PNG\r\n', [0x1a, 0x0a, 0, 0, 0, 13], 'IHDR');
+const JPEG_HEAD = bytesOf([0xff, 0xd8, 0xff, 0xe0, 0, 16], 'JFIF');
+const MP4_HEAD = bytesOf([0, 0, 0, 0x20], 'ftypisom', [0, 0, 2, 0], 'isomiso2avc1mp41');
+const WEBM_HEAD = bytesOf([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 1]);
+const PDF_HEAD = bytesOf('%PDF-1.4\n%', [0xe2, 0xe3, 0xcf, 0xd3]);
+
+test('Attachments: a file is known by its first bytes, then its type, then its name; what Lagrange cannot read is refused', () => {
+  const kind = (...a) => { const k = L.attachmentKind(...a); return k ? `${k.kind} ${k.mediaType}` : null; };
+  assert.equal(kind('shot.png', 'image/png', PNG_HEAD), 'image image/png');
+  assert.equal(kind('image.png', '', JPEG_HEAD), 'image image/jpeg', 'the bytes have the last word on the kind of picture');
+  assert.equal(kind('notes.txt', 'text/plain', PNG_HEAD), 'image image/png', 'a picture is a picture, whatever it is called');
+  assert.equal(kind('a.gif', '', bytesOf('GIF89a', [1, 0, 1, 0])), 'image image/gif');
+  assert.equal(kind('a.webp', '', bytesOf('RIFF', [0x24, 0, 0, 0], 'WEBPVP8 ')), 'image image/webp');
+  assert.equal(kind('clip.mp4', 'video/mp4', MP4_HEAD), 'video video/mp4');
+  assert.equal(kind('clip.mov', '', bytesOf([0, 0, 0, 0x14], 'ftypqt  ', [0, 0, 0, 0])), 'video video/quicktime');
+  assert.equal(kind('clip.webm', 'video/webm', WEBM_HEAD), 'video video/webm');
+  assert.equal(kind('IMG_1.HEIC', 'image/heic', bytesOf([0, 0, 0, 0x18], 'ftypheic', [0, 0, 0, 0])), null, 'a HEIC picture cannot be shown in Obsidian');
+  assert.equal(kind('paper.pdf', 'application/pdf', PDF_HEAD), 'pdf application/pdf');
+  assert.equal(kind('paper', '', PDF_HEAD), 'pdf application/pdf');
+  for (const [name, type] of [['notes.md', ''], ['data.csv', 'text/csv'], ['conf.json', 'application/json'], ['main.py', 'text/x-python'], ['Makefile', ''], ['.gitignore', ''], ['strange.xyz', '']]) {
+    assert.equal((L.attachmentKind(name, type, bytesOf('# Title\n\nSome text, with é.\n')) || {}).kind, 'text', name);
+  }
+  assert.equal(kind('logo.svg', 'image/svg+xml', bytesOf('<svg xmlns="http://www.w3.org/2000/svg"/>')), 'image image/svg+xml');
+  // not text, and nothing known: refused
+  assert.equal(kind('blob.bin', 'application/octet-stream', Uint8Array.from({ length: 256 }, (_, i) => i)), null);
+  assert.equal(kind('archive.zip', 'application/zip', bytesOf('PK', [3, 4, 20, 0, 0, 0, 8, 0])), null);
+  assert.equal(kind('broken.png', 'image/png', bytesOf('this is not a picture')), null, 'called a picture, but is not one');
+  assert.equal(kind('song.mp3', 'audio/mpeg', bytesOf('ID3', [4, 0, 0, 0, 0, 0, 0])), null);
+  assert.equal(kind('latin1.txt', 'text/plain', bytesOf('caf', [0xe9], ' au lait, na', [0xef], 've')), null, 'not UTF-8: it would be sent as garbage');
+  // a file of the vault is taken by its name until it is read
+  assert.equal(kind('Notes/idea.md', '', null), 'text text/plain');
+  assert.equal(kind('Media/photo.JPG', '', null), 'image image/jpeg');
+  assert.equal(kind('Media/clip.webm', '', null), 'video video/webm');
+  assert.equal(kind('Papers/x.pdf', '', null), 'pdf application/pdf');
+  assert.equal(kind('thing.docx', '', null), null);
+  assert.equal(kind('scan.tiff', 'image/tiff', null), null);
+  assert.equal(L.fileExt('a/b/Photo.Final.JPEG'), 'jpeg');
+  assert.equal(L.formatBytes(999), '999 B');
+  assert.equal(L.formatBytes(2400), '2.4 kB');
+  assert.equal(L.formatBytes(18424), '18 kB');
+  assert.equal(L.formatBytes(3200000), '3.2 MB');
+  assert.equal(L.attachmentLabel({ kind: 'image', name: 'a.png', size: 2400 }), 'PNG picture · 2.4 kB');
+  assert.equal(L.attachmentLabel({ kind: 'pdf', name: 'paper.pdf', size: 698 }), 'PDF · 698 B');
+  assert.equal(L.attachmentLabel({ kind: 'text', name: 'notes.md', size: 73, path: 'Media/notes.md' }), 'MD file · 73 B · in the vault');
+  assert.equal(L.attachmentLabel({ kind: 'video', name: 'clip.mp4', size: 18424 }), 'MP4 video · 18 kB');
+});
+
+test('Attachments: limits on how many and how large, each refusal with its reason', () => {
+  const f = (name, kind, size) => ({ name, kind, size });
+  const r = L.admitAttachments(0, [f('a.png', 'image', 1000), f('blob.bin', null, 10), f('huge.png', 'image', L.ATTACH_BYTES.image + 1), f('b.md', 'text', 5)]);
+  assert.deepEqual(r.take, [0, 3]);
+  assert.equal(r.refused.length, 2);
+  assert.match(r.refused[0].why, /cannot read this kind of file/);
+  assert.match(r.refused[1].why, /^it is 20 MB, and a picture may be 20 MB at most$/);
+  const many = L.admitAttachments(L.ATTACH_MAX - 2, [f('1.md', 'text', 1), f('2.md', 'text', 1), f('3.md', 'text', 1), f('4.md', 'text', 1)]);
+  assert.deepEqual(many.take, [0, 1]);
+  assert.deepEqual(many.refused.map(x => x.name), ['3.md', '4.md']);
+  assert.match(many.refused[0].why, new RegExp(`a message takes ${L.ATTACH_MAX} attachments at most`));
+  assert.equal(L.ATTACH_MAX, 8);
+  // sizes
+  assert.deepEqual(L.fitWithin(3200, 2000, 1568), { width: 1568, height: 980, scale: 0.49 });
+  assert.deepEqual(L.fitWithin(320, 200, 1568), { width: 320, height: 200, scale: 1 }, 'never enlarged');
+  assert.deepEqual(L.fitWithin(100, 5000, 1568), { width: 31, height: 1568, scale: 0.3136 });
+  // text
+  assert.deepEqual(L.clipAttachmentText('﻿a\r\nb', 100), { text: 'a\nb', clipped: false, total: 3 });
+  const long = Array.from({ length: 400 }, (_, i) => `line ${i} of the file`).join('\n');
+  const c = L.clipAttachmentText(long, 1000);
+  assert.equal(c.clipped, true);
+  assert.equal(c.total, long.length);
+  assert.ok(c.text.length <= 1000 && c.text.length > 950 && long.startsWith(c.text) && long[c.text.length] === '\n', 'cut at the end of a line');
+  assert.equal(L.clipAttachmentText('x'.repeat(5000), 1000).text.length, 1000);
+  // a video's frames
+  assert.deepEqual(L.frameTimes(4, 6), [0.5, 1.5, 2.5, 3.5], 'one a second for a short video');
+  assert.deepEqual(L.frameTimes(60, 6), [5, 15, 25, 35, 45, 55]);
+  assert.deepEqual(L.frameTimes(0.4, 6), [0.2]);
+  assert.deepEqual(L.frameTimes(NaN, 6), [0]);
+  assert.deepEqual(L.frameTimes(Infinity, 6), [0]);
+});
+
+test('Attachments: a paste of a copied file or picture is attached, a paste of text is not; a drop from the file explorer names files of the vault', () => {
+  const png = { name: 'image.png', type: 'image/png', size: 10 }, doc = { name: 'report.pdf', type: 'application/pdf', size: 10 };
+  assert.deepEqual(L.pastedFiles({ files: [png], getData: () => '' }), [png]);
+  assert.deepEqual(L.pastedFiles({ files: [], items: [{ kind: 'string' }, { kind: 'file', getAsFile: () => png }], getData: () => '' }), [png], 'a clipboard that only offers items');
+  assert.deepEqual(L.pastedFiles({ files: [], getData: () => 'just words' }), []);
+  assert.deepEqual(L.pastedFiles({ files: [png], getData: () => 'cells\tcopied\tfrom a sheet' }), [], 'text that comes with a picture of itself is pasted as text');
+  assert.deepEqual(L.pastedFiles({ files: [doc], getData: () => 'report.pdf' }), [doc], 'a copied file is attached although its name comes as text');
+  assert.deepEqual(L.pastedFiles(null), []);
+  assert.deepEqual(L.vaultPathsFromDrop('obsidian://open?vault=My%20vault&file=Notes%2FAn%20idea\nobsidian://open?vault=My%20vault&file=Media%2Fclip.mp4'), ['Notes/An idea', 'Media/clip.mp4']);
+  assert.deepEqual(L.vaultPathsFromDrop('some text\nhttps://example.org'), []);
+});
+
+/* A stand-in for the browser (attachmentEnv): pictures 3200×2000, a video of 4 s, a PDF of two pages. */
+function fakeEnv(log) {
+  return {
+    decodeImage: async (bytes, mediaType) => ({ width: bytes.length > 64 ? 3200 : 320, height: bytes.length > 64 ? 2000 : 200,
+      encode: (w, h) => { log.push(`encode ${w}x${h}`); return { mediaType: 'image/jpeg', data: `JPEG${w}x${h}` }; } }),
+    videoFrames: async (bytes, mediaType, n, edge) => { log.push(`frames n=${n} edge=${edge}`); return { duration: 4, frames: L.frameTimes(4, n).map(at => ({ mediaType: 'image/jpeg', data: `F${at}`, at })) }; },
+    pdfText: async (bytes, max) => { log.push(`pdf max=${max}`); return { pages: 2, more: 0, text: 'Page one text.\n\nPage two text.' }; },
+  };
+}
+const att = (kind, name, bytes, mediaType) => ({ kind, name, mediaType, size: bytes.length, read: async () => bytes });
+
+test('Attachments: prepared to be sent: a small picture as it is, a large one scaled down, a video as frames, a PDF with its text, a text file cut at its cap', async () => {
+  const log = [], env = fakeEnv(log);
+  const small = await L.prepareAttachment(att('image', 'small.png', PNG_HEAD, 'image/png'), env);
+  assert.deepEqual(small, { kind: 'image', name: 'small.png', image: { mediaType: 'image/png', data: Buffer.from(PNG_HEAD).toString('base64'), width: 320, height: 200, scaled: false } });
+  assert.deepEqual(log, [], 'not re-encoded');
+  const bigBytes = bytesOf(Array.from(PNG_HEAD), Array.from({ length: 100 }, () => 7));
+  const big = await L.prepareAttachment(att('image', 'big.png', bigBytes, 'image/png'), env);
+  assert.deepEqual(big.image, { mediaType: 'image/jpeg', data: 'JPEG1568x980', width: 1568, height: 980, scaled: true });
+  assert.deepEqual(log, ['encode 1568x980']);
+  // a picture models do not take as it is (an SVG) is drawn, at its own size
+  const svg = await L.prepareAttachment(att('image', 'logo.svg', bytesOf('<svg xmlns="http://www.w3.org/2000/svg"/>'), 'image/svg+xml'), env);
+  assert.deepEqual(svg.image, { mediaType: 'image/jpeg', data: 'JPEG320x200', width: 320, height: 200, scaled: false });
+  const video = await L.prepareAttachment(att('video', 'clip.mp4', MP4_HEAD, 'video/mp4'), env);
+  assert.equal(video.duration, 4);
+  assert.deepEqual(video.frames.map(f => f.at), [0.5, 1.5, 2.5, 3.5]);
+  assert.ok(log.includes(`frames n=${L.ATTACH_FRAMES} edge=768`));
+  const pdf = await L.prepareAttachment(att('pdf', 'paper.pdf', PDF_HEAD, 'application/pdf'), env);
+  assert.deepEqual(pdf, { kind: 'pdf', name: 'paper.pdf', data: Buffer.from(PDF_HEAD).toString('base64'), pages: 2, text: 'Page one text.\n\nPage two text.', clipped: false, total: 30 });
+  const text = await L.prepareAttachment(att('text', 'notes.md', bytesOf('# Notes\r\n\r\nBody.'), ''), env);
+  assert.deepEqual(text, { kind: 'text', name: 'notes.md', text: '# Notes\n\nBody.', clipped: false, total: 14 });
+  const longText = await L.prepareAttachment(att('text', 'long.txt', new TextEncoder().encode('word '.repeat(20000)), 'text/plain'), env);
+  assert.equal(longText.clipped, true);
+  assert.equal(longText.total, 100000);
+  assert.equal(longText.text.length, L.ATTACH_TEXT_CHARS);
+  // what cannot be read comes back with the reason, never as nothing
+  const gone = await L.prepareAttachment({ kind: 'text', name: 'gone.md', read: async () => { throw new Error('ENOENT'); } }, env);
+  assert.deepEqual(gone, { kind: 'text', name: 'gone.md', problem: 'the file could not be opened' });
+  const liar = await L.prepareAttachment(att('image', 'photo.png', bytesOf('not a picture at all'), 'image/png'), env);
+  assert.equal(liar.problem, 'it is not a picture Lagrange can read');
+  const undecodable = await L.prepareAttachment(att('image', 'x.png', PNG_HEAD, 'image/png'), { decodeImage: async () => { throw new Error('decode'); } });
+  assert.equal(undecodable.problem, 'it could not be read as a picture');
+  const unplayable = await L.prepareAttachment(att('video', 'x.mkv', WEBM_HEAD, 'video/x-matroska'), { videoFrames: async () => { throw new Error('codec'); } });
+  assert.equal(unplayable.problem, 'Obsidian could not play it to take frames from it');
+  const scan = await L.prepareAttachment(att('pdf', 'scan.pdf', PDF_HEAD, 'application/pdf'), { pdfText: async () => { throw new Error('no reader'); } });
+  assert.equal(scan.text, '');
+  assert.ok(scan.data, 'it can still go as a document');
+});
+
+async function preparedSet() {
+  const env = fakeEnv([]);
+  return Promise.all([
+    L.prepareAttachment(att('image', 'photo.png', PNG_HEAD, 'image/png'), env),
+    L.prepareAttachment(att('video', 'clip.mp4', MP4_HEAD, 'video/mp4'), env),
+    L.prepareAttachment(att('pdf', 'paper.pdf', PDF_HEAD, 'application/pdf'), env),
+    L.prepareAttachment(att('text', 'notes.md', bytesOf('# Notes\n\nMEDLAR.'), ''), env),
+  ]);
+}
+
+test('Attachments: what each provider takes, and the message made for it (pictures, a video as frames, a PDF as a document or as text, files as text)', async () => {
+  const S = o => Object.assign({}, L.DEFAULT_SETTINGS, o);
+  const inputs = o => { const i = L.providerInputs(S(o), {}); return `${i.images ? 'pictures' : 'no pictures'}, pdf as ${i.pdf}, ${i.video ? 'video' : 'no video'}`; };
+  assert.equal(inputs({ provider: 'anthropic' }), 'pictures, pdf as document, no video');
+  assert.equal(inputs({ provider: 'anthropic', anthropicModel: 'custom', anthropicCustomModel: 'claude-2.1' }), 'no pictures, pdf as text, no video');
+  assert.equal(inputs({ provider: 'openai-api', openaiPlatformModel: 'gpt-5' }), 'pictures, pdf as document, no video');
+  assert.equal(inputs({ provider: 'openai-api', openaiPlatformModel: 'o3-mini' }), 'no pictures, pdf as text, no video');
+  assert.equal(inputs({ provider: 'openai', openaiModel: 'llava' }), 'pictures, pdf as text, no video');
+  assert.equal(inputs({ provider: 'openai', openaiModel: 'llama3.1' }), 'no pictures, pdf as text, no video');
+  assert.equal(inputs({ provider: 'openai', openaiModel: 'llama3.1', lookPictures: 'on' }), 'pictures, pdf as text, no video', 'the writer says the model takes pictures');
+  assert.equal(inputs({ provider: 'claude-code' }), 'pictures, pdf as text, no video');
+  assert.equal(inputs({ provider: 'codex' }), 'pictures, pdf as text, no video');
+  assert.equal(inputs({ provider: 'demo' }), 'no pictures, pdf as text, no video');
+  assert.equal(L.providerInputs(S({ provider: 'openai', openaiModel: 'llava' }), { noPictures: { 'openai:llava': true } }).images, false, 'a model that turned pictures down this session is not sent them again');
+
+  const items = await preparedSet();
+  // a provider that takes pictures and documents
+  const full = L.attachmentMessage('What do you make of these?', items, L.providerInputs(S({ provider: 'anthropic' }), {}));
+  assert.deepEqual(full.parts.map(p => `${p.type} ${p.label || p.name}`), ['image photo.png', 'image clip.mp4, frame 1 of 4, at 0.5 s', 'image clip.mp4, frame 2 of 4, at 1.5 s',
+    'image clip.mp4, frame 3 of 4, at 2.5 s', 'image clip.mp4, frame 4 of 4, at 3.5 s', 'document paper.pdf']);
+  assert.equal(full.parts[5].mediaType, 'application/pdf');
+  assert.ok(full.parts[5].alt.includes('Page one text.'), 'the document carries its text, for a provider that turns it down');
+  assert.match(full.text, /^<attachments>\nThe writer attached these to the message:\n- “photo\.png” \(a picture, 320×200 pixels\): attached\.\n- “clip\.mp4” \(a video of 4 seconds\): you cannot be given video, so 4 frames taken from it \(at 0\.5, 1\.5, 2\.5, 3\.5 s\) are attached as pictures, in order\./);
+  assert.ok(full.text.includes('- “paper.pdf” (a PDF, 2 pages): attached as a document.'));
+  assert.ok(full.text.includes('<attached_file name="notes.md">\n# Notes\n\nMEDLAR.\n</attached_file>'));
+  assert.ok(full.text.endsWith('\n\nWhat do you make of these?'));
+  assert.ok(!full.text.includes('Page one text.'), 'the PDF is not sent twice');
+  assert.deepEqual(full.notes, ['Claude takes no video, so “clip.mp4” (4 s) was sent as 4 frames taken from it, without its sound.'], 'the writer is told what did not go as it is');
+  // the same in words alone
+  assert.ok(full.alt.includes('- “photo.png” (a picture, 320×200 pixels): it could not be shown to you, since the model in use reads text only.'));
+  assert.ok(full.alt.includes('- “clip.mp4” (a video of 4 seconds): it could not be shown to you.'));
+  assert.ok(full.alt.includes('<attached_file name="paper.pdf" pages="2" as="text taken from the PDF">\nPage one text.\n\nPage two text.\n</attached_file>'));
+  assert.ok(full.alt.includes('MEDLAR.') && full.alt.endsWith('What do you make of these?'));
+  // a local model that takes pictures: the PDF goes as its text
+  const local = L.attachmentMessage('Q', items, L.providerInputs(S({ provider: 'openai', openaiModel: 'llava' }), {}));
+  assert.equal(local.parts.length, 5);
+  assert.ok(local.parts.every(p => p.type === 'image'));
+  assert.ok(local.text.includes('- “paper.pdf” (a PDF, 2 pages): the text taken from it is below; its pictures and layout are not.'));
+  assert.ok(local.text.includes('Page two text.'));
+  assert.ok(local.notes.some(n => n === '“paper.pdf” was given to the model on your server as the text taken from it, without its pictures and layout.'));
+  assert.ok(local.notes.some(n => n === 'The model on your server takes no video, so “clip.mp4” (4 s) was sent as 4 frames taken from it, without its sound.'), 'a line begins with a capital');
+  // a model that reads text only: nothing is dropped in silence
+  const blind = L.attachmentMessage('Q', items, L.providerInputs(S({ provider: 'openai', openaiModel: 'llama3.1' }), {}));
+  assert.deepEqual(blind.parts, []);
+  assert.equal(blind.text, blind.alt);
+  assert.equal(blind.notes.length, 3);
+  assert.match(blind.notes[0], /takes no pictures, so “photo\.png” was not shown to it/);
+  assert.match(blind.notes[1], /takes neither video nor pictures, so “clip\.mp4” was not shown to it/);
+  // the demo sends nothing
+  const demo = L.attachmentMessage('Q', items, L.providerInputs(S({ provider: 'demo' }), {}));
+  assert.deepEqual(demo.parts, []);
+  assert.deepEqual(demo.notes, ['photo.png', 'clip.mp4', 'paper.pdf', 'notes.md'].map(n => `“${n}” was not sent anywhere (demo mode).`));
+  assert.match(L.demoAttachmentLine(items), /^You attached \*\*photo\.png\*\* \(a picture, 320×200\), \*\*clip\.mp4\*\* \(a video of 4 s, 4 frames taken\), \*\*paper\.pdf\*\* \(a PDF, 2 pages, 30 characters of text\), \*\*notes\.md\*\* \(a text file, 16 characters\)\. In demo mode nothing is sent anywhere/);
+  // a file cut short, a PDF with no text, a file that could not be read, a message of attachments alone
+  const env = fakeEnv([]);
+  const odd = [
+    await L.prepareAttachment(att('text', 'long.txt', new TextEncoder().encode('word '.repeat(20000)), 'text/plain'), env),
+    await L.prepareAttachment(att('pdf', 'scan.pdf', PDF_HEAD, 'application/pdf'), { pdfText: async () => ({ pages: 3, more: 0, text: '  ' }) }),
+    await L.prepareAttachment({ kind: 'image', name: 'gone.png', read: async () => { throw new Error('x'); } }, env),
+  ];
+  const o = L.attachmentMessage('', odd, L.providerInputs(S({ provider: 'openai', openaiModel: 'llava' }), {}));
+  assert.ok(o.text.includes('[The file is cut here: these are the first 60,000 of its 100,000 characters.]\n</attached_file>'));
+  assert.ok(o.text.includes('- “scan.pdf” (a PDF, 3 pages): no text could be taken from it (it may be a scan), so you are not given it.'));
+  assert.ok(o.text.includes('- “gone.png” (picture): it could not be read (the file could not be opened), so you are not given it.'));
+  assert.ok(o.text.endsWith('(The writer sent the attachments without a message.)'));
+  assert.deepEqual(o.notes, ['“long.txt” is long (100,000 characters), so Lagrange was given its first 60,000.',
+    'No text could be taken from “scan.pdf” (it may be a scan), and the model on your server takes no PDF as it is, so Lagrange was not given it.',
+    '“gone.png” could not be read (the file could not be opened), so Lagrange was not given it.']);
+  // …but a scan still goes as a document where documents are taken
+  const scanDoc = L.attachmentMessage('Q', odd.slice(1, 2), L.providerInputs(S({ provider: 'anthropic' }), {}));
+  assert.equal(scanDoc.parts.length, 1);
+  assert.deepEqual(scanDoc.notes, []);
+});
+
+/* A mock server for the provider tests: an OpenAI-compatible /chat/completions and an Anthropic-like /v1/messages on
+   127.0.0.1, which record what they are sent. answer(body, n) may return {status, error} to turn a request down. */
+async function withMockServer(answer, run) {
+  const http = require('node:http');
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', d => { raw += d; });
+    req.on('end', () => {
+      const body = JSON.parse(raw);
+      requests.push({ url: req.url, headers: req.headers, body });
+      const a = answer ? answer(body, requests.length) : null;
+      if (a && a.status) { res.writeHead(a.status, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: a.error, type: 'invalid_request_error' } })); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (req.url.endsWith('/chat/completions')) res.end('data: {"choices":[{"delta":{"content":"seen"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      else res.end(ANTHROPIC_STREAM);
+    });
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try { return await run(`http://127.0.0.1:${server.address().port}`, requests); } finally { await new Promise(r => server.close(r)); }
+}
+
+test('Attachments, sent to a mock server: image_url parts for pictures and frames, the text of files in the message; a server that turns pictures down gets the words', async () => {
+  const items = await preparedSet();
+  await withMockServer(null, async (base, requests) => {
+    const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai', openaiBaseUrl: `${base}/v1`, openaiModel: 'llava' });
+    const made = L.attachmentMessage('What is this?', items, L.providerInputs(s, {}));
+    const message = { role: 'user', content: made.parts.concat([{ type: 'text', text: made.text }]), alt: made.alt };
+    const res = await L.complete(s, { system: 'S', messages: [{ role: 'user', content: 'Earlier.' }, { role: 'assistant', content: 'Yes.' }, message] }, {}, {});
+    assert.equal(res.text, 'seen');
+    assert.equal(res.picturesRefused, false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, '/v1/chat/completions');
+    const content = requests[0].body.messages[3].content;
+    assert.deepEqual(content.map(p => p.type), ['image_url', 'image_url', 'image_url', 'image_url', 'image_url', 'text']);
+    assert.equal(content[0].image_url.url, `data:image/png;base64,${Buffer.from(PNG_HEAD).toString('base64')}`, 'the picture arrives byte for byte');
+    assert.equal(content[1].image_url.url, 'data:image/jpeg;base64,F0.5');
+    assert.ok(content[5].text.includes('a video of 4 seconds') && content[5].text.includes('MEDLAR.') && content[5].text.includes('Page one text.') && content[5].text.endsWith('What is this?'));
+    assert.deepEqual(Object.keys(requests[0].body.messages[3]), ['role', 'content'], 'the words-only form stays at home');
+  });
+  // the text-only fallback
+  await withMockServer(body => (JSON.stringify(body).includes('image_url') ? { status: 400, error: 'this model does not support image input' } : null), async (base, requests) => {
+    const s = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'openai', openaiBaseUrl: `${base}/v1`, openaiModel: 'llava' });
+    const made = L.attachmentMessage('What is this?', items, L.providerInputs(s, {}));
+    const session = {};
+    const res = await L.complete(s, { system: 'S', messages: [{ role: 'user', content: made.parts.concat([{ type: 'text', text: made.text }]), alt: made.alt }] }, {}, session);
+    assert.equal(res.picturesRefused, true);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].body.messages[1].content, made.alt, 'the second request is the words alone');
+    assert.ok(!JSON.stringify(requests[1].body).includes('image_url'));
+    assert.ok(made.alt.includes('MEDLAR.') && made.alt.includes('Page one text.') && made.alt.includes('“photo.png” (a picture, 320×200 pixels): it could not be shown to you'));
+    assert.deepEqual(session.noPictures, { 'openai:llava': true });
+    assert.equal(L.providerInputs(s, session).images, false, 'and the next message is made in words from the start');
+  });
+});
+
+test('Attachments, the shapes for the other providers: a PDF as an Anthropic document block and an OpenAI file part; Claude Code and Codex get pictures and the PDF’s text', async () => {
+  const items = await preparedSet();
+  const pdfB64 = Buffer.from(PDF_HEAD).toString('base64');
+  const an = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'anthropic', anthropicApiKey: 'sk-ant-x' });
+  const made = L.attachmentMessage('Q', items, L.providerInputs(an, {}));
+  const messages = [{ role: 'user', content: made.parts.concat([{ type: 'text', text: made.text }]), alt: made.alt }];
+  let bodies = [];
+  const res = await L.streamAnthropic(an, { system: 'S', messages }, { fetch: async (url, init) => { bodies.push(JSON.parse(init.body)); return streamResponse([ANTHROPIC_STREAM]); } }, {});
+  assert.equal(res.picturesRefused, false);
+  const c = bodies[0].messages[0].content;
+  assert.deepEqual(c.map(p => p.type), ['image', 'image', 'image', 'image', 'image', 'document', 'text']);
+  assert.deepEqual(c[0], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from(PNG_HEAD).toString('base64') } });
+  assert.deepEqual(c[5], { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 }, title: 'paper.pdf' });
+  // Anthropic turns the document down: once more in words, and the reply says so
+  bodies = [];
+  const session = {};
+  const again = await L.streamAnthropic(an, { system: 'S', messages }, {
+    fetch: async (url, init) => { const b = JSON.parse(init.body); bodies.push(b); return Array.isArray(b.messages[0].content) ? jsonResponse(400, { type: 'error', error: { type: 'invalid_request_error', message: 'Could not process PDF document' } }) : streamResponse([ANTHROPIC_STREAM]); },
+  }, session);
+  assert.equal(again.picturesRefused, true);
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1].messages[0].content, made.alt);
+  // an error that is not about what was attached is still an error
+  await assert.rejects(L.streamAnthropic(an, { system: 'S', messages }, { fetch: async () => jsonResponse(400, { type: 'error', error: { type: 'invalid_request_error', message: 'max_tokens too large' } }) }, {}), L.LagrangeError);
+  // OpenAI's API: a file part
+  const oa = L.openaiMessages(messages)[0].content;
+  assert.deepEqual(oa[5], { type: 'file', file: { filename: 'paper.pdf', file_data: `data:application/pdf;base64,${pdfB64}` } });
+  // the subscriptions: pictures as pictures (messagePictures), the PDF as text in the one prompt they take
+  const cc = Object.assign({}, L.DEFAULT_SETTINGS, { provider: 'claude-code' });
+  const forCli = L.attachmentMessage('Q', items, L.providerInputs(cc, {}));
+  const cliMessages = [{ role: 'user', content: forCli.parts.concat([{ type: 'text', text: forCli.text }]), alt: forCli.alt }];
+  assert.equal(L.messagePictures(cliMessages).length, 5);
+  const prompt = L.transcriptPrompt(cliMessages);
+  assert.ok(prompt.startsWith('[Attached picture 1: photo.png.]\n\n[Attached picture 2: clip.mp4, frame 1 of 4, at 0.5 s.]'));
+  assert.ok(prompt.includes('Page one text.') && prompt.includes('MEDLAR.'));
+  const line = JSON.parse(L.claudeCodeInput(cliMessages, L.messagePictures(cliMessages)));
+  assert.deepEqual(line.message.content.map(p => p.type), ['image', 'image', 'image', 'image', 'image', 'text']);
+  // a conversation that moved to a provider of words: a document left in it reads as its text
+  assert.ok(L.messageText(messages[0]).includes('<attached_file name="paper.pdf" pages="2" as="text taken from the PDF">'));
+});
+
+test('Attachments stay in the conversation, but only the last few messages keep their pictures and documents', () => {
+  const pic = n => ({ role: 'user', content: [{ type: 'image', mediaType: 'image/png', data: 'AAAA', label: `p${n}.png` }, { type: 'text', text: `with picture ${n}` }], alt: `words for ${n}` });
+  const history = [pic(1), { role: 'assistant', content: 'a' }, pic(2), { role: 'assistant', content: 'b' }, pic(3), { role: 'assistant', content: 'c' }, { role: 'user', content: 'plain' }];
+  const out = L.recentBinaries(history, 2);
+  assert.equal(out[0].content, 'words for 1');
+  assert.deepEqual(Object.keys(out[0]), ['role', 'content']);
+  assert.equal(out[2], history[2]);
+  assert.equal(out[4], history[4]);
+  assert.equal(out[6], history[6]);
+  assert.ok(Array.isArray(history[0].content), 'the conversation itself is not changed');
+  assert.equal(L.recentBinaries(history, 5).filter(m => Array.isArray(m.content)).length, 3);
+  assert.equal(L.hasBinaryParts(history), true);
+  assert.equal(L.hasBinaryParts(L.recentBinaries(history, 0)), false);
+  assert.equal(L.hasBinaryParts([{ role: 'user', content: [{ type: 'text', text: 'x' }] }]), false);
+  assert.ok(L.ATTACH_KEPT >= 3, 'a message with attachments and its two looks all keep their pictures');
+});
+
+test('TikZJax: how a figure stands on the page, and what is said of one that does not come', () => {
+  const block = has => ({ querySelector: sel => (has.includes(sel) ? {} : null) });
+  assert.equal(L.tikzState(block(['script[type="text/tikz"]'])), 'waiting');
+  assert.equal(L.tikzState(block(['svg', 'svg > circle > animate'])), 'waiting', 'the spinner is an svg too');
+  assert.equal(L.tikzState(block(['svg'])), 'drawn');
+  assert.equal(L.tikzState(block(['img'])), 'failed');
+  assert.equal(L.tikzState(block([])), 'waiting');
+  assert.equal(L.tikzState(null), 'waiting');
+  assert.match(L.tikzTrouble('failed', 'chat'), /error in its TikZ.*Its source:$/);
+  assert.match(L.tikzTrouble('late', 'chat'), /after 30 seconds, so its source is shown:$/);
+  assert.match(L.tikzTrouble('late', 'chat', 5000), /after 5 seconds/);
+  assert.match(L.tikzTrouble('failed', 'note'), /broken-picture mark/);
+  assert.match(L.tikzTrouble('late', 'note'), /after 30 seconds/);
+  assert.equal(L.TIKZ_WAIT, 30000);
+});
+
+test('TikZJax: the model is told what the plugin takes (each point was tried in Obsidian with TikZJax 0.5.2)', () => {
+  const told = L.diagramStyle({ tikz: true, sketch: true });
+  assert.match(told, /\\usetikzlibrary\{…\} line naming every TikZ library/);
+  assert.match(told, /arrows\.meta, calc, positioning, shapes\.geometric, matrix/);
+  assert.match(told, /No \\documentclass/);
+  assert.match(told, /\\foreach/);
+  assert.match(told, /\\text needs amsmath and \\mathbb needs amssymb/);
+  assert.match(told, /never the Unicode character/);
+  assert.match(told, /only these packages exist/);
+  assert.doesNotMatch(L.diagramStyle({ sketch: true }), /usetikzlibrary/);
+});
+
+test('Demo mode: a diagram for the pen where TikZJax is on, and a reply with mathematics, code and a figure', () => {
+  const note = { title: 'On Balance', text: 'A note.\n' };
+  const draw = L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, { tikz: true }));
+  assert.equal(draw.ops.length, 1);
+  assert.deepEqual(L.figureKinds(draw.ops[0].text || draw.ops[0].append || JSON.stringify(draw.ops[0]).replace(/\\n/g, '\n').replace(/\\\\/g, '\\')), { tikz: 1, sketch: 0 });
+  assert.deepEqual(L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, { tikz: false })).ops, [], 'no figure is written where TikZJax is off');
+  assert.deepEqual(L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false)).ops, []);
+  // the figure keeps to what TikZJax takes: a whole document body, no \documentclass, no library, no blank line, ASCII
+  const fig = L.DEMO_FIGURE;
+  assert.match(fig, /^```tikz\n\\begin\{document\}\n\\begin\{tikzpicture\}/);
+  assert.match(fig, /\\end\{tikzpicture\}\n\\end\{document\}\n```$/);
+  assert.doesNotMatch(fig, /\\documentclass|\\usetikzlibrary|\n\n|[^\x00-\x7f]/);
+  const told = L.demoChatReply('Explain the first point', note, true, true, { tikz: true });
+  assert.deepEqual(L.parseAgentReply(told).ops, [], 'an explanation edits nothing');
+  assert.match(told, /\$\$r \\approx R \\left\( \\frac\{M_2\}\{3 M_1\} \\right\)\^\{1\/3\}\$\$/);
+  assert.match(told, /```python\ndef hill_radius/);
+  assert.equal(L.figureKinds(told).tikz, 1);
+  assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true, { tikz: false })).tikz, 0);
+  assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true)).tikz, 0);
 });

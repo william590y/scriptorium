@@ -1,0 +1,29 @@
+{
+  "about": "The community plugins the installers download for Lagrange's diagrams. This is the one place their versions and SHA-256 hashes are changed: run `python3 tools/pin_plugins.py --bump <id> <version>`, which rewrites this file and the copies of the pins inside each installer (they are single files that must work alone); `python3 tools/pin_plugins.py` checks that every copy agrees with this file.",
+  "plugins": [
+    {
+      "id": "obsidian-tikzjax",
+      "name": "TikZJax",
+      "version": "0.5.2",
+      "repository": "artisticat1/obsidian-tikzjax",
+      "licence": "MIT",
+      "files": {
+        "main.js": "cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41",
+        "manifest.json": "09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1",
+        "styles.css": "d9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d"
+      }
+    },
+    {
+      "id": "obsidian-excalidraw-plugin",
+      "name": "Excalidraw",
+      "version": "2.29.2",
+      "repository": "zsviczian/obsidian-excalidraw-plugin",
+      "licence": "AGPL-3.0",
+      "files": {
+        "main.js": "49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541",
+        "manifest.json": "8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9",
+        "styles.css": "6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0"
+      }
+    }
+  ]
+}

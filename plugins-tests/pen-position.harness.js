@@ -16,6 +16,11 @@
 // pens' handwriting ever meets, that the note is in the end exactly what one pen leaves (the same edits are run again
 // with "Several pens at once" off) in less time, that the view does not move when the run ends, and that a key, a
 // click, typing alongside and Undo do with three pens what they do with one.
+// And, where a chapter's opening paragraph has its drop cap in Live Preview (Scriptorium's setting "Show drop caps
+// while editing", off by default: the cases that are about drop caps turn it on for themselves, and every other case
+// runs with it as the vault has it, or as window.penPositionOptions.liveDropcaps says: true | false): that handwriting which
+// begins with the initial begins at the initial's left edge on the first line's baseline, and that later lines of
+// handwriting beside an initial (a letter, or a picture) begin after it, where the note's own lines begin.
 // This cannot run under Node (it needs Obsidian's editor and its layout), so it is not part of
 // `node --test`; it is a manual check, or one a machine can run through the DevTools protocol.
 //
@@ -51,12 +56,21 @@
     '# Pen position check', 'A paragraph of prose stands before the verse, long enough to wrap onto a second line of the page, so that the column is plain to see.',
     '::: center\nTyger Tyger, burning bright,\nIn the forests of the night;\n:::', '::: right\n— William Blake\n:::', 'The paragraph after the verse.',
   ].join('\n\n') + '\n';
+  // (a note whose own drop cap is a set of images: the paragraph begins with a letter Dropcat has)
+  const CAPNOTE = ['---', 'dropcap: Dropcat', '---', '## The pendulum', '', 'The pendulum keeps its own time, whatever the width of its swing, or near enough that the difference did not trouble anybody for a hundred years; the discovery is the reason there are clocks worth the name, and navigators who know where they are, and a great many people who are punctual against their will.', '', 'Short line here.', ''].join('\n');
   const PARA = 'Energy is never lost, only moved about: what a falling stone loses in height it gains in speed, and what it gains in speed it gives up, when it lands, as heat and sound and a dent in the ground. The books balance to the last farthing, which is why the idea has outlived every theory that was built upon it, and why a perpetual motion machine is a fraud before it is switched on. Nobody has yet caught the universe cheating.';
 
   // name, mode ('live' | 'source' | 'reading'), note text (default NOTE), the operations, and what to expect
   const cases = [
     { name: 'replace mid-paragraph', ops: [{ find: 'The kinetic energy of a moving body grows with the square of its speed.', replace: 'The energy of motion grows as the square of the speed, so twice as fast is four times as hard to stop.' }] },
     { name: 'replace at a line wrap (first words of the paragraph)', ops: [{ find: 'A body at rest stays at rest, and a body in motion keeps its motion', replace: 'What is still stays still, and what moves keeps moving' }] },
+    { name: 'a drop cap: the opening paragraph’s first words rewritten (the hand begins at the initial’s edge, on the first line; three lines written)', cap: 'own', lines: 3,
+      ops: [{ find: 'A body at rest stays at rest, and a body in motion keeps its motion', replace: 'Whatever is still stays still, and whatever moves keeps moving at the same speed and along the same line for as long as nothing pushes it or pulls it, which is the whole of the first law and the beginning of the science' }] },
+    { name: 'beside a drop cap: a sentence that begins on the opening paragraph’s first line rewritten (its later lines begin after the initial)', cap: 'beside', lines: 3,
+      ops: [{ find: 'and a body in motion keeps its motion, unless something acts on it', replace: 'and whatever moves keeps moving at the same speed and along the same line for as long as nothing pushes it or pulls it, which is the whole of the first law and the beginning of the science' }] },
+    { name: 'beside a drop cap that is a picture (a set of images): a sentence on the first line rewritten', cap: 'beside', picture: true, lines: 3, note: CAPNOTE,
+      ops: [{ find: 'whatever the width of its swing, or near enough', replace: 'however wide or narrow its swing may be, or so nearly that the difference, which is there, and which Huygens measured, and for which he bent the cheeks of his clocks, did not trouble anybody else' }] },
+    { name: 'a chapter is appended: its opening paragraph has its drop cap when the pen has written it', cap: 'after', aligned: 'center', ops: [{ append: '## A new chapter\n\nIts opening paragraph follows the heading, and is long enough to run on to a second line of the page.' }] },
     { name: 'replace one word', ops: [{ find: 'Short line here.', replace: 'Short sentence here.' }] },
     { name: 'insert after a sentence', ops: [{ insert_after: 'Short line here.', text: ' And a second sentence comes after it.' }] },
     { name: 'insert a new paragraph', ops: [{ insert_after: 'Short line here.', text: '\n\nA new paragraph is put in after the short line, and it runs on for a while so that it wraps.' }] },
@@ -153,9 +167,17 @@
   const canvas = document.createElement('canvas').getContext('2d');
   // Where the character at pos stands in the note: its left edge and its baseline.
   const glyphAt = (cm, pos) => {
-    const c = cm.coordsAtPos(pos, 1) || cm.coordsAtPos(pos, -1);
+    let c = cm.coordsAtPos(pos, 1) || cm.coordsAtPos(pos, -1);
     if (!c) return null;
     const at = cm.domAtPos(pos), el = at.node.nodeType === 1 ? at.node : at.node.parentElement, cs = getComputedStyle(el);
+    // A drop cap (Scriptorium sets the first letter of a chapter's opening paragraph three lines deep in Live
+    // Preview, or a picture in its place) is a letter of the first line: it stands at its own left edge, on the
+    // baseline of the letter after it.
+    const lineHeight = parseFloat(getComputedStyle(el.closest('.cm-line') || el).lineHeight) || 24, tall = c.bottom - c.top;
+    if (tall > lineHeight * 1.8 || tall < lineHeight * 0.3) {
+      const next = cm.coordsAtPos(pos + 1, 1);
+      if (next && next.bottom > next.top && next.bottom - next.top <= lineHeight * 1.8) c = { left: c.left, top: next.top, bottom: next.bottom };
+    }
     canvas.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
     const m = canvas.measureText('x'), ratio = m.fontBoundingBoxAscent / (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent);
     return { x: c.left, baseline: c.top + (c.bottom - c.top) * ratio };
@@ -215,13 +237,40 @@
         line.left = Math.min(line.left, r.left); line.top = Math.min(line.top, r.top); line.bottom = Math.max(line.bottom, r.bottom);
       } else lines.push({ left: r.left, top: r.top, bottom: r.bottom });
     }
-    return lines.map(l => l.left);
+    const lefts = lines.map(l => l.left);
+    lefts.mids = lines.map(l => (l.top + l.bottom) / 2);
+    return lefts;
+  };
+  // The initial of a chapter's opening paragraph in Live Preview (a letter three lines deep, or a picture): where the
+  // lines beside it begin, and where it ends. null if the line has none.
+  const initialOf = line => {
+    if (!line.classList.contains('scriptorium-opening')) return null;
+    const px = v => parseFloat(v) || 0, cs = getComputedStyle(line), box = line.getBoundingClientRect();
+    const picture = getComputedStyle(line, '::before'), letter = getComputedStyle(line, '::first-letter');
+    if (picture.content !== 'none' && picture.content !== 'normal' && picture.float === 'left') {
+      return { right: box.left + px(cs.paddingLeft) + px(picture.marginLeft) + px(picture.width) + px(picture.marginRight), bottom: box.top + px(cs.paddingTop) + px(picture.marginTop) + px(picture.height) + px(picture.marginBottom) };
+    }
+    if (letter.float !== 'left') return null;
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT), r = document.createRange();
+    let out = null;
+    for (let node = walker.nextNode(), seen = 0; node && seen < 8; node = walker.nextNode()) {
+      for (let i = 0; i < node.length && seen < 8; i++, seen++) {
+        r.setStart(node, i); r.setEnd(node, i + 1);
+        const q = r.getClientRects()[0];
+        if (q && q.height > px(cs.lineHeight) * 1.8) out = { right: Math.max(out ? out.right : 0, q.right + px(letter.marginRight)), bottom: q.bottom + px(letter.marginBottom) };
+      }
+    }
+    return out;
   };
 
+  // Scriptorium's drop caps in Live Preview: on for the cases about them, else as asked for, else as the vault has them
+  const scriptorium = app.plugins.plugins.scriptorium, capsWere = scriptorium && scriptorium.settings ? scriptorium.settings.liveDropcaps : undefined;
+  const setCaps = async on => { if (scriptorium && typeof scriptorium.applyLiveDropcaps === 'function' && scriptorium.settings.liveDropcaps !== on) await scriptorium.updateSettings({ liveDropcaps: on }); };
   const results = [];
   for (const c of cases) {
     await setPanel(c.panel || PANEL);
     if (options.only && !c.name.includes(options.only)) continue;
+    await setCaps(c.cap ? true : options.liveDropcaps != null ? Boolean(options.liveDropcaps) : Boolean(capsWere));
     const text = c.note != null ? c.note : NOTE;
     const mode = c.mode || 'live';
     plugin.settings.severalPens = c.several !== false;
@@ -303,7 +352,13 @@
               const line = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
               if (line) {
                 const edge = line.getBoundingClientRect().left + parseFloat(getComputedStyle(line).paddingLeft);
-                for (const x of lefts.slice(1)) seen.lineDx = Math.max(seen.lineDx, Math.abs(x - edge));
+                // (beside a drop cap the note's own lines begin after the initial, and so must the handwriting's)
+                const cap = initialOf(line);
+                lefts.slice(1).forEach((x, i) => {
+                  const want = cap && lefts.mids[i + 1] < cap.bottom ? cap.right : edge;
+                  seen.beside = Math.max(seen.beside || 0, want - edge);
+                  seen.lineDx = Math.max(seen.lineDx, Math.abs(x - want));
+                });
               }
             }
           } else seen.unmatchedFrames++;
@@ -389,6 +444,14 @@
       if (c.aligned && seen.frames && seen.set !== c.aligned) fail(`the note sets this text ${seen.set || 'nowhere'}, not ${c.aligned}: are the Scriptorium plugin and its snippet on?`);
       if (seen.markers) fail(`the handwriting wrote a marker line (in ${seen.markers} frames)`);
       if (c.lines && seen.lines < c.lines) fail(`the pen wrote ${seen.lines} line(s), not ${c.lines}`);
+      if (c.cap) {
+        // the paragraph has its drop cap in the editor (Scriptorium is on), and the case met it
+        const opening = Array.from(cm.contentDOM.querySelectorAll('.cm-line.scriptorium-opening'));
+        out.cap = opening.length;
+        if (!opening.length) fail('no paragraph of the note has a drop cap in Live Preview: is the Scriptorium plugin on (one that has “Show drop caps while editing”), with its snippet?');
+        if (c.picture && !opening.some(l => l.classList.contains('scriptorium-dropcap-image'))) fail('the drop cap is not a picture: is the set Dropcat in the plugin’s folder?');
+        if (c.cap !== 'after') { out.beside = +(seen.beside || 0).toFixed(1); if (!(seen.beside > 20)) fail('no later line of the handwriting was beside the initial: the case is not what it was written for'); }
+      }
       if (c.math != null && !c.loose && drawn !== c.math) fail(`the pen drew on ${drawn} of the note's equations, not ${c.math}`);
       if (mdx > TOL) fail(`an equation was drawn ${mdx.toFixed(1)} px from where it rests`);
       if (mdsize > 0.02) fail(`an equation was drawn ${(mdsize * 100).toFixed(1)}% off its final size`);
@@ -1064,7 +1127,127 @@
     chat.clear();
   });
 
+
+  /* ---- Diagrams (TikZJax figures, Excalidraw drawings) and the loader's plates ---- */
+  const figureCase = async (label, has, selector, makeText) => {
+    await extra(`${label}: the pen draws it where the note has it, shapes first and labels last; a key ends it; Undo takes it out`, async (out, fail) => {
+      if (!has()) { out.skipped = true; fail(`${label}: the plugin is not installed and enabled in this vault`); return; }
+      const text = await makeText();
+      const open = async () => {
+        await leaf.openFile(file, { state: { mode: 'source', source: false } });
+        leaf.view.editor.setValue(NOTE);
+        await sleep(options.settle || 500);
+        leaf.view.editor.setCursor(0, 0);
+        const cm = leaf.view.editor.cm;
+        const now = L.locateOps(cm.state.doc.toString(), L.parseAgentReply('```lagrange-edits\n' + JSON.stringify([{ insert_after: 'Short line here.', text }]) + '\n```').ops);
+        return { cm, run: plugin.applyEdits(leaf.view, now.located, now.skipped, null, null) };
+      };
+      const shown = n => getComputedStyle(n).opacity !== '0';
+      const parts = svg => Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text')).filter(n => !n.closest('defs, mask, clipPath, marker, metadata') && (n.getBoundingClientRect().width > 0.3 || n.getBoundingClientRect().height > 0.3));
+      // 1. a whole run
+      let { cm, run } = await open();
+      const seen = { early: 0, frames: 0, away: 0, order: 0, counts: [] };
+      let on = true;
+      const tick = () => {
+        if (!on) return;
+        for (const svg of cm.contentDOM.querySelectorAll(selector)) {
+          // (before the pen has begun: once the run is over the note may draw the figure afresh, and then it simply shows)
+          if (!seen.frames && !svg.hasAttribute('data-lagrange-seen') && shown(svg)) seen.early++;
+          if (!svg.hasAttribute('data-lagrange-drawing')) continue;
+          seen.frames++;
+          const d = Number(svg.getAttribute('data-lagrange-drawn'));
+          if (seen.counts[seen.counts.length - 1] !== d) seen.counts.push(d);
+          const ps = parts(svg), shapesLeft = ps.some(n => n.tagName !== 'text' && !shown(n));
+          if (shapesLeft && ps.filter(n => n.tagName === 'text').some(shown)) seen.order++;
+          // the nib is on the figure (within its box, give or take the flight to the next part)
+          const pen = Array.from(document.querySelectorAll('.lagrange-pen')).find(p => p.style.display !== 'none');
+          const m = pen && /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(pen.getAttribute('transform') || '');
+          if (m) {
+            const sheet = pen.closest('.lagrange-pen-sheet').getBoundingClientRect(), r = svg.getBoundingClientRect();
+            const x = sheet.left + Number(m[1]), y = sheet.top + Number(m[2]);
+            if (x < r.left - 60 || x > r.right + 60 || y < r.top - 60 || y > r.bottom + 60) seen.away++;
+          }
+        }
+        setTimeout(() => requestAnimationFrame(tick), 0);
+      };
+      requestAnimationFrame(tick);
+      let res = await run;
+      await sleep(500);
+      on = false;
+      const svg = cm.contentDOM.querySelector(selector);
+      Object.assign(out, { frames: seen.frames, parts: svg ? parts(svg).length : 0, counts: seen.counts.join(',') });
+      if (!svg) fail('the note did not draw the diagram');
+      if (seen.early) fail(`the diagram was visible before the pen drew it (${seen.early} frames)`);
+      if (seen.frames < 10) fail('the pen did not draw the diagram');
+      if (seen.order) fail(`a label was shown before the shapes were finished (${seen.order} frames)`);
+      if (seen.away > seen.frames * 0.1) fail(`the nib was off the figure in ${seen.away} of ${seen.frames} frames`);
+      if (seen.counts.some((c, i) => i && c !== seen.counts[i - 1] + 1)) fail(`the parts were not drawn one after another: ${seen.counts.join(',')}`);
+      if (svg && (parts(svg).some(n => !shown(n)) || svg.querySelector('[style*="dash"]'))) fail('the pen left the figure half drawn');
+      if (res.applied.length !== 1 || !cm.state.doc.toString().includes(text.trim())) fail('the note does not hold the diagram');
+      if (cm.dom.classList.contains('lagrange-pen-figures')) fail('the editor is still marked as waiting for figures');
+      // Undo takes it out again, in one step
+      plugin.undoEdit(plugin.edits[plugin.edits.length - 1]);
+      await sleep(300);
+      if (cm.state.doc.toString() !== NOTE) fail('Undo did not take the diagram out');
+      document.querySelectorAll('.notice').forEach(n => n.remove());
+      // 2. a key while the pen draws: the figure is whole at once, and the run is over
+      ({ cm, run } = await open());
+      for (let i = 0; i < 1500 && !cm.contentDOM.querySelector(`${selector.split(',')[0].trim()}[data-lagrange-drawing], svg[data-lagrange-drawing]`); i++) await frame();
+      for (let i = 0; i < 20; i++) await frame();
+      cm.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', bubbles: true, cancelable: true }));
+      // at once: nothing of a figure is hidden or half drawn (the note may be drawing it afresh at this moment, the
+      // run's undo step having been made: then it is whole when it comes)
+      const whole = () => Array.from(cm.contentDOM.querySelectorAll(selector)).every(g => shown(g) && !g.hasAttribute('data-lagrange-drawing') && !parts(g).some(n => !shown(n)) && !g.querySelector('[style*="dash"]'));
+      if (!whole()) fail('right after a key a figure is hidden or half drawn');
+      for (let i = 0; i < 300 && !cm.contentDOM.querySelector(selector); i++) await frame();
+      if (!cm.contentDOM.querySelector(selector) || !whole()) fail('after a key the figure is not whole');
+      if (cm.dom.classList.contains('lagrange-pen-figures')) fail('after a key the editor is still marked as waiting for figures');
+      res = await run;
+      if (res.ended !== 'key') fail(`the run reports ended=${res.ended}`);
+      await sleep(300);
+      document.querySelectorAll('.notice').forEach(n => n.remove());
+    });
+  };
+  const has = id => Boolean(app.plugins.enabledPlugins.has(id) && app.plugins.plugins[id]);
+  await figureCase('a TikZ figure', () => has('obsidian-tikzjax'), '.block-language-tikz svg',
+    async () => '\n\n```tikz\n\\begin{document}\n\\begin{tikzpicture}\n\\draw (0,0) circle (1.5);\n\\draw[->, thick] (1.5,0) -- (1.5,1.4) node[right] {$v$};\n\\draw[dashed] (-2.2,0) -- (2.2,0);\n\\draw (0,0) -- (1.5,0) node[midway, below] {$r$};\n\\end{tikzpicture}\n\\end{document}\n```');
+  await figureCase('an Excalidraw drawing', () => has('obsidian-excalidraw-plugin') && Boolean(window.ExcalidrawAutomate), '.excalidraw-embedded-img svg, svg.excalidraw-svg', async () => {
+    let f = app.vault.getFiles().find(x => /Pen position sketch\.excalidraw/.test(x.path));
+    if (!f) {
+      const ea = window.ExcalidrawAutomate;
+      ea.reset();
+      ea.addEllipse(0, 20, 90, 90); ea.addEllipse(300, 45, 40, 40); ea.addArrow([[95, 65], [295, 65]]); ea.addText(28, 55, 'M'); ea.addText(170, 30, 'r');
+      await ea.create({ filename: 'Pen position sketch', foldername: '', onNewPane: false, silent: true });
+      for (let i = 0; i < 40 && !f; i++) { await sleep(100); f = app.vault.getFiles().find(x => /Pen position sketch\.excalidraw/.test(x.path)); }
+    }
+    return `\n\n![[${f.path.replace(/\.md$/, '')}]]`;
+  });
+
+  await extra('the loader’s plates come in turn: three sends show three different plates', async (out, fail) => {
+    const was = plugin.settings.loaderTheme;
+    plugin.settings.loaderTheme = 'cycle';
+    plugin.settings.provider = 'demo';
+    const chat = await plugin.activateView(false);
+    chat.clear();
+    const plates = [];
+    for (const q of ['What is this note about?', 'And how long is it?', 'What does it say about energy?', 'And once more?']) {
+      chat.inputEl.value = q;
+      chat.send();
+      const l = chat.logEl.querySelector('.lagrange-loader');
+      plates.push(l ? (/lagrange-loader--(\w+)/.exec(l.className) || [])[1] : null);
+      for (let i = 0; i < 400 && (chat.pending || plugin.editing); i++) await sleep(50);
+      await sleep(150);
+    }
+    out.plates = plates.join(',');
+    if (plates.some(p => !p)) fail('a send showed no loader');
+    if (new Set(plates.slice(0, 3)).size !== 3) fail(`three sends in a row showed ${plates.slice(0, 3).join(', ')}`);
+    if (plates[3] !== plates[0]) fail(`the fourth send showed ${plates[3]}, not the first plate again (${plates[0]})`);
+    plugin.settings.loaderTheme = was;
+    chat.clear();
+  });
+
   await setPanel(PANEL);
+  if (capsWere !== undefined) await setCaps(Boolean(capsWere));
   plugin.settings.penSpeed = saved.speed;
   plugin.settings.severalPens = saved.several;
   plugin.settings.maxPens = saved.max;

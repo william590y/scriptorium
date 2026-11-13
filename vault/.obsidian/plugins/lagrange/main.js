@@ -84,7 +84,7 @@ const LOOK_PICTURES = ['auto', 'on', 'off'];
 
 const PEN_MAX = 4;                    // pens that may write at once, at most (the pen's styles know as many; see penLanes)
 
-const LOADER_THEMES = ['random', 'clockwork', 'alchemy', 'orbit'];
+const LOADER_THEMES = ['cycle', 'clockwork', 'alchemy', 'orbit'];
 // Reasoning effort, where the provider and model take one; '' leaves it to the provider's own default.
 const EFFORTS = ['low', 'medium', 'high'];
 const CLAUDE_CODE_MODELS = ['sonnet', 'opus', 'haiku'];   // Claude Code's aliases for the latest of each
@@ -109,7 +109,7 @@ const DEFAULT_SETTINGS = {
   agenticEdits: true,                 // a chat message may edit the open note with the pen; off: the chat only talks
   lookAtPage: true,                   // Lagrange may look at the note as rendered; off: the page is never rendered or captured
   lookPictures: 'auto',               // 'auto' (pictures where the model takes them) | 'on' | 'off' (a description only)
-  loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'orbit'
+  loaderTheme: 'cycle',               // 'cycle' (each plate in turn, the first by chance) | 'clockwork' | 'alchemy' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
   penTrail: true,                     // a fading line of ink behind the pen's nib as it moves
@@ -127,7 +127,7 @@ function sanitizeSettings(saved) {
     }
   }
   if (!['anthropic', 'claude-code', 'openai-api', 'codex', 'openai', 'demo'].includes(s.provider)) s.provider = DEFAULT_SETTINGS.provider;
-  // A plate that no longer exists (a saved 'trebuchet', from 0.1) falls back to 'random'.
+  // A plate that no longer exists (a saved 'trebuchet', from 0.1), and the 'random' of before 0.5.2, fall back to 'cycle'.
   if (!LOADER_THEMES.includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
   if (s.anthropicModel !== 'custom' && !ANTHROPIC_MODELS.some(m => m.id === s.anthropicModel)) {
     s.anthropicModel = DEFAULT_SETTINGS.anthropicModel;
@@ -648,14 +648,78 @@ function splitAgentReply(reply) {
 
 /* One item of an edits block, as an operation: {op: 'replace', find, replace, reason}, {op: 'insert', after | before,
    text, reason} or {op: 'append', text, reason}. Null if it is none of these. */
+/* A drawing as a reply asks for it, made safe: {name, elements}. An element is {type: 'rect' | 'ellipse' | 'diamond',
+   x, y, w, h, text?}, {type: 'line' | 'arrow', points: [[x, y], …]} or {type: 'text', x, y, text}; numbers are
+   pixels on a canvas whose y grows downwards. Anything else is left out; null if nothing is left. At most
+   SKETCH_ELEMENTS elements. Pure. */
+const SKETCH_ELEMENTS = 80, SKETCH_PLACE = '![[drawing]]';
+function sketchSpec(raw) {
+  const num = v => (typeof v === 'number' && isFinite(v) ? Math.max(-20000, Math.min(20000, v)) : null);
+  const words = v => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b-\u001f]/g, '').slice(0, 400) : '');
+  const out = [];
+  for (const e of Array.isArray(raw && raw.elements) ? raw.elements : []) {
+    if (!e || typeof e !== 'object' || out.length >= SKETCH_ELEMENTS) continue;
+    const type = String(e.type || '').toLowerCase().replace('rectangle', 'rect').replace('circle', 'ellipse');
+    if (['rect', 'ellipse', 'diamond'].includes(type)) {
+      const [x, y, w, h] = [num(e.x), num(e.y), num(e.w != null ? e.w : e.width), num(e.h != null ? e.h : e.height)];
+      if (x === null || y === null || !(w > 0) || !(h > 0)) continue;
+      out.push(Object.assign({ type, x, y, w, h }, words(e.text) ? { text: words(e.text) } : {}));
+    } else if (type === 'line' || type === 'arrow') {
+      const points = (Array.isArray(e.points) ? e.points : []).map(p => (Array.isArray(p) ? [num(p[0]), num(p[1])] : null)).filter(p => p && p[0] !== null && p[1] !== null).slice(0, 40);
+      if (points.length >= 2) out.push({ type, points });
+    } else if (type === 'text') {
+      const [x, y] = [num(e.x), num(e.y)];
+      if (x !== null && y !== null && words(e.text)) out.push({ type, x, y, text: words(e.text) });
+    }
+  }
+  if (!out.length) return null;
+  const name = words(raw.name).replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Drawing';
+  return { name, elements: out };
+}
+
+/* What the model is told about diagrams, by which of the two plugins the vault has (have: {tikz, sketch}). Pure. */
+function diagramStyle(have) {
+  const h = have || {};
+  // (what TikZJax 0.5.2 takes was tried, construct by construct, in real Obsidian: see the README, "Diagrams")
+  const tikz = 'A technical or mathematical figure (a graph, a geometric construction, a circuit, a commutative diagram, a plot) ' +
+    'is written in TikZ, in a code block fenced with ```tikz, which the TikZJax plugin sets as a figure. The block must hold a ' +
+    'whole document body, in this order: any \\usepackage lines (only these packages exist: tikz-cd, circuitikz, pgfplots, chemfig, ' +
+    'tikz-3dplot, amsmath, amssymb, amsfonts, amstext, array; with pgfplots also write \\pgfplotsset{compat=1.16}); one ' +
+    '\\usetikzlibrary{…} line naming every TikZ library the picture uses (arrows.meta, calc, positioning, shapes.geometric, matrix, ' +
+    'decorations.pathreplacing, intersections and so on: no library is loaded unless it is named there, and using one that is not ' +
+    'named is an error); then \\begin{document}, the picture (\\begin{tikzpicture} … \\end{tikzpicture}, or the package’s own ' +
+    'environment), and \\end{document}. No \\documentclass, and no blank line inside the block. Plain TikZ needs no library: ' +
+    '\\draw, \\node, \\foreach, plot, scopes, styles, arrows such as -> and >=stealth, colours such as blue!30. In labels, \\text ' +
+    'needs amsmath and \\mathbb needs amssymb, and every character is plain ASCII LaTeX ($\\alpha$, $\\to$, \\\'e), never the ' +
+    'Unicode character itself. A single error leaves the whole figure undrawn, with no message, so write only what is sure to ' +
+    'compile, and keep a figure to a few hundred shapes (a large one takes many seconds). Put the block in a paragraph of its own.';
+  const sketch = 'A free-form sketch (boxes and arrows, a rough picture of an idea) is an Excalidraw drawing. You do not write its file: ' +
+    'in the edits list give an item {"insert_after": "words of the note", "sketch": {"name": "a short title", "elements": [...]}} ' +
+    '(or with "insert_before"; with neither, the drawing goes at the end of the note). Elements, in the order they are to be drawn, ' +
+    'with coordinates in pixels (x to the right, y downwards; about 600 wide at most): {"type": "rect" | "ellipse" | "diamond", ' +
+    '"x", "y", "w", "h", "text": "an optional label inside"}, {"type": "line" | "arrow", "points": [[x, y], [x, y], …]}, ' +
+    '{"type": "text", "x", "y", "text"}. The plugin makes the drawing and puts it in the note.';
+  if (h.tikz && h.sketch) return `Diagrams: ${tikz} ${sketch} Use TikZ where exactness matters and a sketch where it does not.`;
+  if (h.tikz) return `Diagrams: ${tikz} Free-form sketches need the Excalidraw plugin, which this vault does not have turned on: if the writer asks for one, say so, and offer a TikZ figure where it would serve.`;
+  if (h.sketch) return `Diagrams: ${sketch} Technical figures in TikZ need the TikZJax plugin, which this vault does not have turned on: do not write a tikz block; if the writer asks for such a figure, say so, and offer a sketch where it would serve.`;
+  return 'Diagrams: this vault has neither the TikZJax plugin (technical figures) nor the Excalidraw plugin (free-form sketches) turned on, so do not write a tikz block or a drawing; if the writer asks for a diagram, tell them to turn one of the two on in Settings → Community plugins.';
+}
+
 function normalizeOp(item) {
   if (!item || typeof item !== 'object') return null;
   const str = keys => { for (const k of keys) if (typeof item[k] === 'string') return item[k]; return null; };
   const reason = (str(['reason', 'why', 'explanation']) || '').trim();
   const text = str(['text', 'insert', 'content']);
   const append = str(['append']);
-  if (append !== null) return append ? { op: 'append', text: append, reason } : null;
   const after = str(['insert_after', 'after']), before = str(['insert_before', 'before']);
+  // a free-form drawing (see "Diagrams"): placed like an insertion or an append; its text is made when the drawing is
+  if (item.sketch && typeof item.sketch === 'object') {
+    const sketch = sketchSpec(item.sketch);
+    if (!sketch) return null;
+    if (after || before) return after ? { op: 'insert', after, text: SKETCH_PLACE, reason, sketch } : { op: 'insert', before, text: SKETCH_PLACE, reason, sketch };
+    return { op: 'append', text: SKETCH_PLACE, reason, sketch };
+  }
+  if (append !== null) return append ? { op: 'append', text: append, reason } : null;
   if (after !== null || before !== null) {
     if (!text || !(after || before)) return null;
     return after ? { op: 'insert', after, text, reason } : { op: 'insert', before, text, reason };
@@ -1061,7 +1125,11 @@ function messageText(m) {
   if (typeof m.content === 'string') return m.content;
   if (!Array.isArray(m.content)) return '';
   let k = 0;
-  return m.content.map(p => (p && p.type === 'image' ? `[Picture ${++k} of the page is attached.]` : (p && typeof p.text === 'string' ? p.text : ''))).filter(Boolean).join('\n\n');
+  return m.content.map(p => {
+    if (p && p.type === 'image') return p.label ? `[Attached picture ${++k}: ${p.label}.]` : `[Picture ${++k} of the page is attached.]`;
+    if (p && p.type === 'document') return p.alt || `[The PDF “${p.name || 'document'}” was attached; its text could not be taken.]`;
+    return p && typeof p.text === 'string' ? p.text : '';
+  }).filter(Boolean).join('\n\n');
 }
 
 /* The pictures in a list of messages, in order: [{mediaType, data}]. */
@@ -1077,23 +1145,30 @@ function withoutPictures(messages) {
 }
 
 /* The messages as the Messages API takes them: text as it is, a picture as an image block with its bytes in base64
-   (pictures first, then the words about them, which is the order Claude reads best). */
+   (pictures first, then the words about them, which is the order Claude reads best), an attached PDF as a document
+   block. */
 function anthropicMessages(messages) {
   return (messages || []).map(m => ({
     role: m.role,
     content: !Array.isArray(m.content) ? m.content : m.content.map(p => (p.type === 'image'
       ? { type: 'image', source: { type: 'base64', media_type: p.mediaType || 'image/png', data: p.data } }
-      : { type: 'text', text: p.text })),
+      : p.type === 'document'
+        ? { type: 'document', source: { type: 'base64', media_type: p.mediaType || 'application/pdf', data: p.data }, title: p.name || 'document' }
+        : { type: 'text', text: p.text })),
   }));
 }
 
-/* The messages as chat completions take them: a picture is an image_url part holding a data URL. */
+/* The messages as chat completions take them: a picture is an image_url part holding a data URL, an attached PDF a
+   file part holding one (OpenAI's own API takes it; a server that does not turns the request down, and the PDF goes
+   again as its text: see streamOpenAI). */
 function openaiMessages(messages) {
   return (messages || []).map(m => ({
     role: m.role,
     content: !Array.isArray(m.content) ? m.content : m.content.map(p => (p.type === 'image'
       ? { type: 'image_url', image_url: { url: `data:${p.mediaType || 'image/png'};base64,${p.data}` } }
-      : { type: 'text', text: p.text })),
+      : p.type === 'document'
+        ? { type: 'file', file: { filename: p.name || 'document.pdf', file_data: `data:${p.mediaType || 'application/pdf'};base64,${p.data}` } }
+        : { type: 'text', text: p.text })),
   }));
 }
 
@@ -1396,6 +1471,57 @@ function plainInline(text) {
       .replace(/==(?=\S)([^\n]*?\S)==/g, '$1');
   }
   return t.replace(/[\uE100-\uE1FF]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE100));
+}
+
+/* ---- Diagrams ----
+   Two community plugins draw diagrams in a note, and the pen draws what they render instead of writing its source:
+   TikZJax sets a ```tikz code block as a figure (for technical and mathematical figures), and Excalidraw shows an
+   embedded drawing, ![[Name.excalidraw]] (free-form sketches). Both put an <svg> in the note in Live Preview.
+   figureKinds(text) -> {tikz, sketch}: how many of each a piece of Markdown holds. withoutFigures(text): the text
+   with them taken out, which is what is left for the pen to write by hand. Pure. */
+const TIKZ_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*tikz[ \t]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
+const SKETCH_EMBED = /!\[\[[^\]\n]*\.excalidraw(?:\.md)?(?:[|#][^\]\n]*)?\]\]/g;
+function figureKinds(text) {
+  const t = String(text == null ? '' : text);
+  return { tikz: (t.match(TIKZ_FENCE) || []).length, sketch: (t.match(SKETCH_EMBED) || []).length };
+}
+function withoutFigures(text) {
+  return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(SKETCH_EMBED, '');
+}
+
+/* How a ```tikz block stands on the page. TikZJax (0.5.2) puts a <script type="text/tikz"> in the block, replaces it
+   by a spinner (an <svg> with a <circle> that holds <animate>) while TeX runs, and that by the figure's <svg>; a
+   figure whose TikZ has an error becomes a broken <img> instead, and nothing else says so.
+   block: the .block-language-tikz element (anything with querySelector). -> 'waiting' | 'drawn' | 'failed'. Pure. */
+function tikzState(block) {
+  if (!block || block.querySelector('script[type="text/tikz"]') || block.querySelector('svg > circle > animate')) return 'waiting';
+  if (block.querySelector('svg')) return 'drawn';
+  return block.querySelector('img') ? 'failed' : 'waiting';
+}
+/* How long a figure is waited for before its source is shown in its place. TikZJax sets its figures one after
+   another: a plain one takes well under a second, pgfplots or circuitikz a second or two, a thousand shapes half a
+   minute. */
+const TIKZ_WAIT = 30000;
+/* What is said of a figure that did not come: kind 'failed' (TikZJax gave up on its TikZ) or 'late' (it is still
+   not drawn after `wait` ms); where: 'chat' (the source is shown under these words) or 'note'. Pure. */
+function tikzTrouble(kind, where, wait) {
+  const secs = Math.round((wait == null ? TIKZ_WAIT : wait) / 1000);
+  if (where === 'note') {
+    return kind === 'failed'
+      ? 'TikZJax could not draw a figure Lagrange wrote in the note: there is an error in its TikZ, and the note shows a broken-picture mark where the figure should be. Ask Lagrange to correct the figure, or undo the edit. (What TeX said is in the developer console.)'
+      : `TikZJax has not drawn a figure Lagrange wrote in the note after ${secs} seconds. It may be a very large figure, still being set; otherwise ask Lagrange for a simpler one, or undo the edit.`;
+  }
+  return kind === 'failed'
+    ? 'TikZJax could not draw this figure: there is an error in its TikZ (what TeX said is in the developer console). Its source:'
+    : `TikZJax has not drawn this figure after ${secs} seconds, so its source is shown:`;
+}
+
+/* The order in which the pen draws a figure's parts: shapes first, in the order the figure has them (which is the
+   order TikZ and Excalidraw drew them in), then its labels. parts: [{text: boolean}] -> their indexes. Pure. */
+function figureOrder(parts) {
+  const shapes = [], labels = [];
+  (parts || []).forEach((p, i) => (p && p.text ? labels : shapes).push(i));
+  return shapes.concat(labels);
 }
 
 /* (plain: the text is written as Live Preview shows it, without its Markdown marks; see plainInline) */
@@ -1911,12 +2037,25 @@ function demoRevise(passage, instruction) {
 }
 
 /* The demo's edits block for a chat message that asks for a change, or '' when it asks for none: "fix", "proofread"
-   or "correct" proofreads; "equation" or "formula" adds one; "code" or "function" adds a code block; "add" or
-   "append" adds a line. */
-function demoChatEdits(question, note) {
+   or "correct" proofreads; "diagram", "figure" or "draw" adds a TikZ figure where the vault has TikZJax on (have:
+   {tikz}); "equation" or "formula" adds one; "code" or "function" adds a code block; "add" or "append" adds a
+   line. */
+const DEMO_FIGURE = ['```tikz', '\\begin{document}', '\\begin{tikzpicture}[scale=1.25]',
+  '\\draw[dashed] (0,0) circle (2);',
+  '\\draw[dashed] (-2.5,0) -- (3,0);',
+  '\\draw[dashed] (0,0) -- (1,1.732) -- (2,0) -- (1,-1.732) -- cycle;',
+  '\\fill (0,0) circle (0.14) node[below=5pt] {$M_1$};',
+  '\\fill (2,0) circle (0.07) node[below=3pt] {$M_2$};',
+  '\\foreach \\x/\\n in {1.45/1, 2.6/2, -2/3} \\fill (\\x,0) circle (0.04) node[above] {$L_\\n$};',
+  '\\fill (1,1.732) circle (0.04) node[above] {$L_4$};',
+  '\\fill (1,-1.732) circle (0.04) node[below] {$L_5$};',
+  '\\end{tikzpicture}', '\\end{document}', '```'].join('\n');
+function demoChatEdits(question, note, have) {
   const q = String(question || '').toLowerCase();
   let ops = null;
-  if (/\b(equation|formula|math)/.test(q)) {
+  if (/\b(diagram|figure|draw|tikz)/.test(q) && have && have.tikz) {
+    ops = [{ append: `The five points, with the two masses:\n\n${DEMO_FIGURE}` }];
+  } else if (/\b(equation|formula|math)/.test(q)) {
     ops = [{ append: 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$' }];
   } else if (/\b(code|function|script|snippet|program)/.test(q)) {
     ops = [{ append: 'The distance to the first Lagrange point, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```' }];
@@ -1931,14 +2070,26 @@ function demoChatEdits(question, note) {
 /* The demo looks at the page when the message is about how it looks. */
 const DEMO_LOOK_RE = /\b(?:looks?|rendered|renders?|the page|drop ?caps?|cent(?:re|er)(?:ed|d)?|align(?:ed|ment)?|margins?|layout|typeset)\b/i;
 
-function demoChatReply(question, note, agentic, look) {
+/* The demo explains when asked to ("explain", "show me", "an example"): a reply with mathematics, code and, where the
+   vault has TikZJax on, a figure, so that the chat's rendering can be seen without a model. */
+const DEMO_EXPLAIN_RE = /\b(?:explain|show me|example)\b/i;
+
+function demoChatReply(question, note, agentic, look, have) {
   const parts = ['*Demo mode: a canned reply, written without a model. Choose a Claude or ChatGPT subscription, an ' +
     'API key or an OpenAI-compatible server in Settings → Lagrange for real answers.*'];
   if (look && note && DEMO_LOOK_RE.test(String(question || ''))) {
     return parts.concat(`Let me look at the page of **${note.title}** as it is rendered.`, '```lagrange-look\n{"target": "note"}\n```').join('\n\n');
   }
+  if (DEMO_EXPLAIN_RE.test(String(question || ''))) {
+    return parts.concat('A small body between two great ones can rest where their pulls and the turning of the frame balance. ' +
+      'At the first point, for a small $M_2$, its distance $r$ from the smaller mass is close to the Hill radius,',
+    '$$r \\approx R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}$$',
+    'which is quick to work out:',
+    '```python\ndef hill_radius(m1, m2, r):\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n\nhill_radius(1.989e30, 5.972e24, 1.496e8)   # about 1.5 million km\n```',
+    have && have.tikz ? DEMO_FIGURE : '*(With the TikZJax plugin turned on, a figure of the five points is drawn here.)*').join('\n\n');
+  }
   if (agentic && note) {
-    const block = demoChatEdits(question, note);
+    const block = demoChatEdits(question, note, have);
     if (block) return parts.concat(`Here is what the pen will set down in **${note.title}**.`, block).join('\n\n');
   }
   if (note) {
@@ -1953,7 +2104,8 @@ function demoChatReply(question, note, agentic, look) {
   parts.push(`You asked: “${excerpt(String(question || '').replace(/\s+/g, ' '), 160)}” A model would answer here, ` +
     'with the note in mind.');
   parts.push('The edits work offline in demo mode:\n\n' +
-    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation* or to *add some code*, and the pen does it.\n' : '') +
+    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation*, to *add some code* or (with TikZJax on) to *draw a diagram*, and the pen does it.\n' : '') +
+    '- Ask me to *explain* something, and the reply shows how the chat sets mathematics, code and a figure.\n' +
     '- **Proofread note** finds typographic slips (straight quotes, spaced hyphens, doubled spaces) and sets the ' +
     'corrections down with the pen.\n' +
     '- **Revise selection** rewrites the selected passage: ask for it *shorter*, *in title case* or *in capitals*.\n\n' +
@@ -2244,6 +2396,7 @@ async function streamAnthropic(s, req, hooks, session) {
     system: req.system,
     messages: anthropicMessages(req.messages),
   };
+  let picturesRefused = false;
   if (req.cache) body.cache_control = { type: 'ephemeral' };   // reuses the note across turns of one conversation
   const headers = {
     'content-type': 'application/json',
@@ -2276,6 +2429,12 @@ async function streamAnthropic(s, req, hooks, session) {
     } else if (effort && res.status === 400 && /effort|output_config/i.test(said)) {
       forgetEffort(session, `anthropic:${model}`);
       effort = '';
+    // A model that will not take the pictures or the PDF attached (a custom ID for a text-only model, a file it
+    // cannot read) says so: what was attached goes again in words.
+    } else if (!picturesRefused && res.status === 400 && hasBinaryParts(req.messages) && /image|picture|document|pdf|media|vision|multimodal/i.test(said)) {
+      forgetPictures(session, `anthropic:${model}`);
+      body.messages = anthropicMessages(withoutPictures(req.messages));
+      picturesRefused = true;
     } else {
       throw httpError('anthropic', res, text, model);
     }
@@ -2285,7 +2444,7 @@ async function streamAnthropic(s, req, hooks, session) {
     const delta = applyAnthropicEvent(st, ev);
     if (delta && hooks.onText) hooks.onText(delta, st.text);
   });
-  return { text: st.text, stopReason: st.stopReason, stopDetails: st.stopDetails, model: st.model || model, fallbackTo: st.fallbackTo };
+  return { text: st.text, stopReason: st.stopReason, stopDetails: st.stopDetails, model: st.model || model, fallbackTo: st.fallbackTo, picturesRefused };
 }
 
 /* Applies one chat-completions stream chunk (or a whole non-streamed response) to st; returns the text it added. */
@@ -2337,9 +2496,9 @@ async function streamOpenAI(s, req, hooks, session) {
       effort = '';
       continue;
     }
-    // A model that reads text only turns a request with pictures down (400, 415 or 422, in as many wordings as
-    // there are servers): the page goes again in words.
-    if (!picturesRefused && [400, 415, 422].includes(res.status) && messagePictures(messages).length) {
+    // A model that reads text only turns a request with pictures (or an attached PDF) down (400, 415 or 422, in as
+    // many wordings as there are servers): the page, or what was attached, goes again in words.
+    if (!picturesRefused && [400, 415, 422].includes(res.status) && hasBinaryParts(messages)) {
       forgetPictures(session, `openai:${model}`);
       messages = withoutPictures(messages);
       picturesRefused = true;
@@ -2880,8 +3039,8 @@ const CHAT_LOOK_AFTER_EDITS =
   ' A reply may hold an edits block and, after it, a look block: your pen writes the edits first, and the look then ' +
   'shows the page as it stands after them, which is how to check a change you have made.';
 
-function chatSystemPrompt(note, clip, agentic, look) {
-  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) +
+function chatSystemPrompt(note, clip, agentic, look, diagrams) {
+  return CHAT_INTRO + (agentic ? CHAT_AGENTIC : CHAT_TALK_ONLY) + (agentic && diagrams ? '\n\n' + diagramStyle(diagrams) : '') +
     (look && note ? '\n\n' + CHAT_LOOK + (agentic ? CHAT_LOOK_AFTER_EDITS : '') : '') + '\n\n' +
     (note ? noteBlock(note, clip) : 'No note is open at the moment; talk with the writer about their writing in general.');
 }
@@ -2932,7 +3091,7 @@ function reviseUserMessage(note, clip, passage, instruction) {
 //
 // Contract
 //   mountLoader(containerEl, theme) -> { stop() }
-//     theme  'random' | 'clockwork' | 'alchemy' | 'orbit' (anything else counts as 'random')
+//     theme  'cycle' | 'clockwork' | 'alchemy' | 'orbit' (anything else counts as 'cycle': see nextPlate)
 //     stop() removes the plate and stops its animation. Called once; calling it again does nothing.
 /* Lagrange's loading plates: three ink engravings drawn into an <svg viewBox="0 0 320 240">.
    drawPlate(svg, name, opts) -> stop(); name is 'clockwork' | 'alchemy' | 'orbit'.
@@ -3245,11 +3404,487 @@ const LOADER_CAPTIONS = {
   alchemy: 'Lagrange is distilling',
   orbit: 'Lagrange is finding the balance',
 };
+/* A reply as it streams in, cut where it is safe to render: {done, open, tail}. done is the part made of whole
+   blocks; open is what is still being written (done + open is the reply); tail is `open` as the chat shows it, as
+   plain text, until it closes. A cut is made only where what follows cannot change how what came before is set:
+   - right after a code fence that began at the margin has closed, and
+   - at a blank line outside code and formulas, once the next line is known to begin a new block at the margin (not
+     a further item of the same list, not an indented continuation).
+   So the blocks rendered one by one read as the whole reply would (see needsWholeRender for what is left to the
+   end). While a reply streams, only what is new in `done` is rendered, each stretch once. The tail leaves out an
+   opening fence whose name is still arriving and may be one of Lagrange's own blocks (```lagrange-ed…), which are
+   never shown. Pure. */
+const INTERNAL_BLOCKS = ['lagrange-edits', 'lagrange-look'];
+function splitStable(md) {
+  const text = String(md == null ? '' : md);
+  let fence = null, margin = false, math = false, at = 0, safe = 0, blank = false, inList = false, hide = -1;
+  for (const line of text.split('\n')) {
+    const end = at + line.length + 1, whole = end <= text.length;   // whole: the line has its newline already
+    const f = /^( {0,3})(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !line.slice(f[0].length).trim()) {
+        fence = null;
+        if (margin) { safe = Math.min(end, text.length); inList = false; }
+      }
+    } else if (math) {
+      if (((line.match(/\$\$/g) || []).length) % 2) math = false;
+    } else if (!line.trim()) {
+      blank = true;
+    } else {
+      const indented = /^[ \t]/.test(line);
+      const item = /^(?:[-*+]|\d{1,9}[.)])[ \t]/.test(line) || (whole && /^(?:[-*+]|\d{1,9}[.)])$/.test(line));
+      const known = whole || item || indented || /^[^-*+\d]/.test(line);   // (a lone "-" or "12" may yet become an item)
+      if (blank && known && !indented && !(item && inList)) { safe = at; inList = false; }
+      if (item) inList = true;
+      blank = false;
+      if (f) {
+        fence = f[2];
+        margin = !f[1];
+        const name = line.slice(f[0].length).trim().toLowerCase();
+        if (!whole && INTERNAL_BLOCKS.some(b => b.startsWith(name))) hide = at;
+      } else if (((line.match(/\$\$/g) || []).length) % 2) {
+        math = true;
+      }
+    }
+    at = end;
+  }
+  const open = text.slice(safe);
+  return { done: text.slice(0, safe), open, tail: hide >= safe ? text.slice(safe, hide) : open };
+}
+
+/* Whether a reply holds something that reaches across its blocks (a footnote or a link defined apart from its use,
+   a block of HTML): such a reply is rendered once more as a whole when it is complete. Pure. */
+function needsWholeRender(md) {
+  return /^ {0,3}(?:\[[^\]\n]+\]:|<\/?[a-zA-Z][^>\n]*>[ \t]*$)/m.test(String(md || ''));
+}
+
+/* The Markdown of a chat message as it is given to Obsidian's renderer. The chat only ever shows a reply; it runs
+   nothing a reply holds. So:
+   - a ```tikz block where TikZJax is off, and an Excalidraw embed where Excalidraw is off, are shown as their source
+     in a code block, with a line that says why;
+   - a code block of any other kind that a plugin of the vault would act on (opts.acts(name): a Dataview query, a
+     block of JavaScript for some plugin to run) is shown as its source too, with a line that says so. Mermaid and
+     TikZ only draw, and are let through;
+   - inline code that begins with one of opts.inlineRun (the prefixes a plugin such as Dataview runs inline code by)
+     is kept from running by a zero-width space before it;
+   - nothing is fetched from the web because a reply says so: a picture at an http(s) address becomes a link to it
+     (pictures of the vault and data: pictures are shown), and HTML that would load or run something (a frame, an
+     embedded object, a form, a remote picture or video) is shown as its text, in inline code.
+   opts: {tikz, sketch: whether the two diagram plugins are on; acts(name) -> bool; inlineRun: [string]}. Pure. */
+const CHAT_DRAWN_BLOCKS = new Set(['mermaid', 'tikz', 'math', 'latex']);
+function chatMarkdown(md, opts) {
+  const o = opts || {};
+  const out = [];
+  const say = text => { out.push('', `<small class="lagrange-chat-degraded">${text}</small>`, ''); skip = true; };
+  let fence = null, note = '', skip = false;   // skip: a line has just been said, and the blank line after it is in already
+  const runs = (o.inlineRun || []).filter(Boolean);
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const runRe = runs.length ? new RegExp('(`+)([ \\t]*)(?=' + runs.map(esc).join('|') + ')', 'g') : null;
+  const sketchRe = /!\[\[([^\]\n|#]*\.excalidraw(?:\.md)?)((?:[|#][^\]\n]*)?)\]\]/gi;
+  for (const line of String(md == null ? '' : md).split('\n')) {
+    if (skip) {
+      skip = false;
+      if (!line.trim()) continue;
+    }
+    const f = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      out.push(line);
+      if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !f[3].trim()) {
+        fence = null;
+        if (note) say(note);
+        note = '';
+      }
+      continue;
+    }
+    if (f) {
+      const info = f[3].trim(), name = (info.split(/[\s{,]/)[0] || '').toLowerCase();
+      fence = f[2];
+      note = '';
+      if (name === 'tikz' && !o.tikz) {
+        note = 'TikZJax is not enabled in this vault, so the figure is shown as its source.';
+      } else if (name && !CHAT_DRAWN_BLOCKS.has(name) && o.acts && o.acts(name)) {
+        // (the name goes, so that no plugin takes the block up; what it was is said under it)
+        out.push(`${f[1]}${f[2]}text`);
+        note = `A “${name}” block: the chat shows its source and runs nothing.`;
+        continue;
+      }
+      out.push(line);
+      continue;
+    }
+    let l = line;
+    if (!o.sketch && sketchRe.test(l)) {
+      sketchRe.lastIndex = 0;
+      if (/^\s*!\[\[[^\]\n]*\]\]\s*$/.test(l)) {
+        out.push('', '```text', l.trim(), '```');
+        say('Excalidraw is not enabled in this vault, so the drawing is shown as its embed.');
+        continue;
+      }
+      l = l.replace(sketchRe, (m, name, rest) => `\`![[${name}${rest}]]\` <small class="lagrange-chat-degraded">(Excalidraw is not enabled in this vault, so the drawing is shown as its embed.)</small>`);
+    }
+    sketchRe.lastIndex = 0;
+    if (runRe) l = l.replace(runRe, '$1$2\u200b');
+    // (outside inline code only: what is in backticks is shown as it is anyway)
+    l = l.split(/(`+[^`\n]*`+)/).map((seg, i) => (i % 2 ? seg : seg
+      .replace(/!\[([^\]\n]*)\]\(\s*<?(https?:\/\/[^\s)>]+)>?[^)\n]*\)/gi, (m, alt, url) => `[${alt || 'picture'} (a picture on the web, not loaded)](${url})`)
+      .replace(/!\[(?!\[)([^\]\n]*)\]\[([^\]\n]*)\]/g, '[$1][$2]')
+      .replace(/<\/?(?:iframe|webview|object|embed|frame|frameset|form|script|style|link|meta|base|portal)\b[^>\n]*>?/gi, m => `\`${m}\``)
+      .replace(/<(?:img|video|audio|source|picture|track|input)\b(?=[^>\n]*(?:https?:)?\/\/)[^>\n]*>?/gi, m => `\`${m}\``)
+      .replace(/``/g, ''))).join('');                    // (an opening tag and its closing tag side by side are one piece of code)
+    out.push(l);
+  }
+  if (fence && note) { out.push(fence); say(note); }   // (a block the reply left open at its end)
+  return out.join('\n');
+}
+
+/* ---- Attachments: what the writer gives Lagrange with a message (pictures, video, PDFs, text files) ----
+   Kept in memory for the session, like the conversation itself (nothing is written into the vault); a file of the
+   vault is attached by its path and read when the message is sent. */
+const ATTACH_MAX = 8;                      // attachments to one message
+const ATTACH_BYTES = { image: 20e6, video: 100e6, pdf: 20e6, text: 5e6 };
+const ATTACH_TEXT_CHARS = 60000;           // of one text file (and of a PDF's text) sent to the model
+const ATTACH_IMAGE_EDGE = 1568;            // a picture's longer side, in pixels, as it is sent
+const ATTACH_IMAGE_BYTES = 3500000;        // a picture larger than this is re-encoded even if it is small enough in pixels
+const ATTACH_FRAMES = 6, ATTACH_FRAME_EDGE = 768;
+const ATTACH_PDF_PAGES = 60;               // pages of a PDF whose text is read
+const ATTACH_KEPT = 4;                     // messages of the conversation that keep their pictures and documents
+const MODEL_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const ATTACH_EXT = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'svg'],
+  video: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ogv'],
+  pdf: ['pdf'],
+  text: ['md', 'markdown', 'txt', 'text', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'log', 'xml', 'html', 'htm', 'css',
+    'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rb', 'rs', 'go', 'java', 'kt', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'swift', 'm', 'php', 'pl', 'lua', 'r',
+    'jl', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'sql', 'tex', 'bib', 'sty', 'cls', 'org', 'rst', 'adoc', 'srt', 'vtt', 'canvas', 'base', 'gitignore', 'env'],
+};
+const EXT_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif',
+  svg: 'image/svg+xml', mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', ogv: 'video/ogg', pdf: 'application/pdf' };
+
+function fileExt(name) {
+  const m = /\.([A-Za-z0-9]+)$/.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : (/^\.?([A-Za-z0-9]+)$/.exec(String(name || '').split(/[\\/]/).pop()) || [])[1] || '';
+}
+
+/* What kind of attachment a file is: {kind: 'image' | 'video' | 'pdf' | 'text', mediaType}, or null for a file
+   Lagrange cannot read (it is then refused, and the writer told). The file's first bytes decide where they can (a
+   picture, a PDF or a video is known by its signature, whatever it is called); then its type as the system gives it;
+   then its name; and a file that is none of these but holds text (no zero byte, valid UTF-8) is a text file.
+   head: its first bytes (Uint8Array), or null when they are not read yet (a file of the vault). Pure. */
+function attachmentKind(name, mime, head) {
+  const ext = fileExt(name), type = String(mime || '').toLowerCase().split(';')[0].trim();
+  const b = head && head.length ? head : null;
+  const at = (s, o) => b && b.length >= o + s.length && Array.from(s).every((c, i) => b[o + i] === c.charCodeAt(0));
+  if (b) {
+    if (b[0] === 0x89 && at('PNG', 1)) return { kind: 'image', mediaType: 'image/png' };
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { kind: 'image', mediaType: 'image/jpeg' };
+    if (at('GIF8', 0)) return { kind: 'image', mediaType: 'image/gif' };
+    if (at('RIFF', 0) && at('WEBP', 8)) return { kind: 'image', mediaType: 'image/webp' };
+    if (at('BM', 0) && (ext === 'bmp' || type === 'image/bmp')) return { kind: 'image', mediaType: 'image/bmp' };
+    if (at('%PDF-', 0)) return { kind: 'pdf', mediaType: 'application/pdf' };
+    if (at('ftyp', 4)) {
+      const brand = String.fromCharCode(...b.slice(8, 12));
+      if (/^(?:avif|avis)$/.test(brand)) return { kind: 'image', mediaType: 'image/avif' };
+      if (/^(?:hei[cxms]|hev[cx]|mif1|msf1)$/.test(brand)) return null;        // HEIC: Obsidian cannot show it
+      return { kind: 'video', mediaType: ext === 'mov' || brand === 'qt  ' ? 'video/quicktime' : 'video/mp4' };
+    }
+    if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return { kind: 'video', mediaType: ext === 'mkv' ? 'video/x-matroska' : 'video/webm' };
+    if (at('OggS', 0) && (ext === 'ogv' || type.startsWith('video/'))) return { kind: 'video', mediaType: 'video/ogg' };
+  }
+  const known = k => ATTACH_EXT[k].includes(ext);
+  const textual = () => {
+    if (!b) return true;
+    if (b.includes(0)) return false;
+    try { new TextDecoder('utf-8', { fatal: true }).decode(b.length > 16 ? b.slice(0, b.length - 4) : b); return true; } catch (e) { return false; }
+  };
+  if (type === 'image/svg+xml' || (ext === 'svg' && !type.startsWith('text/'))) return textual() ? { kind: 'image', mediaType: 'image/svg+xml' } : null;
+  // (a file with bytes in hand that are none of the signatures above is not a picture, a PDF or a video, whatever
+  // it is called: it is a text file if it reads as one, and is refused if not)
+  if (!b) {
+    if (known('image') || /^image\/(?:png|jpeg|gif|webp|bmp|avif)$/.test(type)) return { kind: 'image', mediaType: EXT_MIME[ext] || type };
+    if (type.startsWith('image/')) return null;                                 // (TIFF, HEIC: Obsidian cannot show them)
+    if (type.startsWith('video/') || known('video')) return { kind: 'video', mediaType: type.startsWith('video/') ? type : EXT_MIME[ext] };
+    if (type === 'application/pdf' || known('pdf')) return { kind: 'pdf', mediaType: 'application/pdf' };
+    if (type.startsWith('text/') || /^application\/(?:json|xml|x-yaml|yaml|toml|javascript|x-sh|x-tex|sql|csv)$/.test(type) || known('text')) return { kind: 'text', mediaType: type || 'text/plain' };
+    return null;
+  }
+  if (known('image') || known('video') || known('pdf') || /^(?:image|video|audio)\//.test(type) || type === 'application/pdf') return null;   // called one, but is not
+  return textual() ? { kind: 'text', mediaType: type.startsWith('text/') ? type : 'text/plain' } : null;
+}
+
+function formatBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1000) return `${v} B`;
+  if (v < 1e6) return `${(v / 1000).toFixed(v < 1e4 ? 1 : 0)} kB`;
+  if (v < 1e9) return `${(v / 1e6).toFixed(v < 1e7 ? 1 : 0)} MB`;
+  return `${(v / 1e9).toFixed(1)} GB`;
+}
+
+const ATTACH_KIND_WORD = { image: 'picture', video: 'video', pdf: 'PDF', text: 'text file' };
+/* A chip's second line: “PNG picture · 2.4 kB”. */
+function attachmentLabel(a) {
+  const ext = fileExt(a.name).toUpperCase();
+  const what = a.kind === 'pdf' ? 'PDF' : `${ext && ext.length <= 5 ? ext + ' ' : ''}${a.kind === 'text' ? 'file' : ATTACH_KIND_WORD[a.kind]}`;
+  return `${what}${a.size != null ? ` · ${formatBytes(a.size)}` : ''}${a.path ? ' · in the vault' : ''}`;
+}
+
+/* Which of the files offered are taken, given what is attached already: {take: [index], refused: [{name, why}]}.
+   have: how many are attached; files: [{name, size, kind (attachmentKind's, or null)}]. Pure. */
+function admitAttachments(have, files) {
+  const take = [], refused = [];
+  let n = have;
+  (files || []).forEach((f, i) => {
+    const name = f.name || 'A file';
+    if (!f.kind) refused.push({ name, why: 'Lagrange cannot read this kind of file (it takes pictures, video, PDFs and text files)' });
+    else if (f.size > ATTACH_BYTES[f.kind]) refused.push({ name, why: `it is ${formatBytes(f.size)}, and a ${ATTACH_KIND_WORD[f.kind]} may be ${formatBytes(ATTACH_BYTES[f.kind])} at most` });
+    else if (n >= ATTACH_MAX) refused.push({ name, why: `a message takes ${ATTACH_MAX} attachments at most` });
+    else { take.push(i); n++; }
+  });
+  return { take, refused };
+}
+
+/* The size a picture is sent at: within max pixels on its longer side, never enlarged. Pure. */
+function fitWithin(width, height, max) {
+  const w = Math.max(1, Math.round(width) || 1), h = Math.max(1, Math.round(height) || 1);
+  const scale = Math.min(1, max / Math.max(w, h));
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)), scale };
+}
+
+/* A text file's text as it is sent: all of it, or its first `cap` characters (cut at a line's end where one is
+   near): {text, clipped, total}. Pure. */
+function clipAttachmentText(text, cap) {
+  const t = String(text == null ? '' : text).replace(/\r\n?/g, '\n').replace(/^\ufeff/, '');
+  if (t.length <= cap) return { text: t, clipped: false, total: t.length };
+  let cut = t.lastIndexOf('\n', cap);
+  if (cut < cap * 0.8) cut = cap;
+  return { text: t.slice(0, cut), clipped: true, total: t.length };
+}
+
+/* The moments of a video its frames are taken at: the middles of n equal parts of it (one frame for each second
+   of a video shorter than n seconds). Pure. */
+function frameTimes(duration, n) {
+  const d = Number(duration);
+  if (!(d > 0) || !Number.isFinite(d)) return [0];
+  const k = Math.max(1, Math.min(n, Math.ceil(d)));
+  return Array.from({ length: k }, (_, i) => +(((i + 0.5) * d) / k).toFixed(3));
+}
+
+/* What the provider and model in use take with a message: {images, pdf: 'document' | 'text', video: false, who}.
+   No provider path of Lagrange's takes video itself (the Messages API, chat completions, Claude Code's and Codex's
+   input all take pictures only), so a video always goes as frames taken from it. A PDF goes as a document to the
+   Messages API and to OpenAI's chat completions (a "file" part); a local server, Claude Code and Codex are given
+   its text. The demo sends nothing anywhere. */
+function providerInputs(s, session) {
+  const who = { anthropic: 'Claude', 'claude-code': 'Claude Code', 'openai-api': 'this OpenAI model', codex: 'Codex', openai: 'the model on your server', demo: 'the demo' }[s.provider] || 'this model';
+  if (s.provider === 'demo') return { images: false, pdf: 'text', video: false, who, demo: true };
+  const refused = Boolean(session && session.noPictures && session.noPictures[providerKey(s)]);
+  const images = !refused && (picturesSupported(s) || (s.provider === 'openai' && s.lookPictures === 'on'));
+  const pdf = images && (s.provider === 'anthropic' || s.provider === 'openai-api') ? 'document' : 'text';
+  return { images, pdf, video: false, who };
+}
+
+const seconds = d => (d >= 10 ? `${Math.round(d)}` : `${Math.round(d * 10) / 10}`);
+
+/* The writer's message with its attachments, as the model is sent it: {parts, text, alt, notes}.
+   parts: the pictures (a video's frames among them) and documents, as message parts ({type: 'image', mediaType,
+   data, label} and {type: 'document', mediaType, data, name, alt}); text: a list of what is attached, the text
+   files (and PDFs given as text), then the message; alt: the same in words alone, for a model that turns pictures
+   and documents down; notes: what the writer is told in the chat (a file cut short, a video sent as frames, a
+   picture this model cannot see). Nothing attached is ever left out without a line in both.
+   items: prepared attachments [{kind, name, problem} + image: {image: {mediaType, data, width, height, scaled}};
+   video: {duration, frames: [{mediaType, data, at}]}; text: {text, clipped, total}; pdf: {data, pages, text,
+   clipped, total}]. inputs: providerInputs. Pure. */
+function attachmentMessage(message, items, inputs) {
+  const parts = [], notes = [], files = [], altFiles = [];
+  const list = [], altList = [];
+  const quote = n => `“${n}”`;
+  const fileBlock = (name, extra, body) => `<attached_file name="${String(name).replace(/"/g, "'")}"${extra}>\n${body}\n</attached_file>`;
+  const cutLine = it => `\n[The file is cut here: these are the first ${it.text.length.toLocaleString('en')} of its ${it.total.toLocaleString('en')} characters.]`;
+  for (const it of items || []) {
+    const name = it.name || 'attachment';
+    if (it.problem) {
+      const line = `- ${quote(name)} (${ATTACH_KIND_WORD[it.kind] || 'file'}): it could not be read (${it.problem}), so you are not given it.`;
+      list.push(line);
+      altList.push(line);
+      notes.push(`${quote(name)} could not be read (${it.problem}), so Lagrange was not given it.`);
+      continue;
+    }
+    if (it.kind === 'image') {
+      const size = `${it.image.width}×${it.image.height} pixels`;
+      const blind = `- ${quote(name)} (a picture, ${size}): it could not be shown to you, since ${inputs.demo ? 'nothing is sent in demo mode' : 'the model in use reads text only'}.`;
+      altList.push(blind);
+      if (inputs.images) {
+        parts.push({ type: 'image', mediaType: it.image.mediaType, data: it.image.data, label: name });
+        list.push(`- ${quote(name)} (a picture, ${size}): attached.`);
+        if (it.image.scaled) notes.push(`${quote(name)} was scaled down to ${size} to be sent.`);
+      } else {
+        list.push(blind);
+        notes.push(inputs.demo ? `${quote(name)} was not sent anywhere (demo mode).` : `${inputs.who} takes no pictures, so ${quote(name)} was not shown to it: it was told only that the picture is there.`);
+      }
+    } else if (it.kind === 'video') {
+      const n = it.frames.length, d = seconds(it.duration);
+      const blind = `- ${quote(name)} (a video of ${d} seconds): it could not be shown to you.`;
+      altList.push(blind);
+      if (inputs.images && n) {
+        it.frames.forEach((f, i) => parts.push({ type: 'image', mediaType: f.mediaType, data: f.data, label: `${name}, frame ${i + 1} of ${n}, at ${seconds(f.at)} s` }));
+        list.push(`- ${quote(name)} (a video of ${d} seconds): you cannot be given video, so ${n === 1 ? 'one frame' : `${n} frames`} taken from it ` +
+          `(at ${it.frames.map(f => seconds(f.at)).join(', ')} s) ${n === 1 ? 'is' : 'are'} attached as pictures, in order. You do not have its sound, or what happens between the frames.`);
+        notes.push(`${inputs.who} takes no video, so ${quote(name)} (${d} s) was sent as ${n === 1 ? 'one frame' : `${n} frames`} taken from it, without its sound.`);
+      } else {
+        list.push(blind);
+        notes.push(inputs.demo ? `${quote(name)} was not sent anywhere (demo mode).` : `${inputs.who} takes neither video nor pictures, so ${quote(name)} was not shown to it: it was told only that the video is there.`);
+      }
+    } else if (it.kind === 'text') {
+      const block = fileBlock(name, '', it.text + (it.clipped ? cutLine(it) : ''));
+      files.push(block);
+      altFiles.push(block);
+      const line = `- ${quote(name)} (a text file${it.clipped ? ', cut short' : ''}): its text is below.`;
+      list.push(line);
+      altList.push(line);
+      if (it.clipped) notes.push(`${quote(name)} is long (${it.total.toLocaleString('en')} characters), so Lagrange was given its first ${it.text.length.toLocaleString('en')}.`);
+    } else if (it.kind === 'pdf') {
+      const pages = `${it.pages || '?'} ${it.pages === 1 ? 'page' : 'pages'}`;
+      const hasText = Boolean(it.text && it.text.trim());
+      const block = hasText ? fileBlock(name, ` pages="${it.pages || ''}" as="text taken from the PDF"`, it.text + (it.clipped ? cutLine(it) : '')) : '';
+      const asText = `- ${quote(name)} (a PDF, ${pages}): the text taken from it is below${it.clipped ? ', cut short' : ''}; its pictures and layout are not.`;
+      const unread = `- ${quote(name)} (a PDF, ${pages}): no text could be taken from it (it may be a scan), so you are not given it.`;
+      if (hasText) altFiles.push(block);
+      altList.push(hasText ? asText : unread);
+      if (inputs.pdf === 'document' && it.data) {
+        parts.push({ type: 'document', mediaType: 'application/pdf', data: it.data, name, alt: hasText ? block : '' });
+        list.push(`- ${quote(name)} (a PDF, ${pages}): attached as a document.`);
+      } else if (hasText) {
+        files.push(block);
+        list.push(asText);
+        notes.push(`${quote(name)} was given to ${inputs.demo ? 'the demo' : inputs.who} as the text taken from it${it.clipped ? ` (its first ${it.text.length.toLocaleString('en')} of ${it.total.toLocaleString('en')} characters)` : ''}, without its pictures and layout.`);
+      } else {
+        list.push(unread);
+        notes.push(`No text could be taken from ${quote(name)} (it may be a scan), and ${inputs.who} takes no PDF as it is, so Lagrange was not given it.`);
+      }
+    }
+  }
+  const said = inputs.demo ? (items || []).filter(it => !it.problem).map(it => `${quote(it.name || 'attachment')} was not sent anywhere (demo mode).`).concat(notes.filter(n => / could not be read /.test(n)))
+    : notes.map(n => n.charAt(0).toUpperCase() + n.slice(1));
+  const words = String(message || '').trim() || '(The writer sent the attachments without a message.)';
+  const build = (l, fs) => (l.length ? `<attachments>\nThe writer attached ${l.length === 1 ? 'this' : 'these'} to the message:\n${l.join('\n')}\n</attachments>\n\n` : '') +
+    (fs.length ? fs.join('\n\n') + '\n\n' : '') + words;
+  return { parts, text: build(list, files), alt: build(altList, altFiles), notes: said };
+}
+
+/* Whether any message holds a picture or a document (which a provider may turn down). */
+function hasBinaryParts(messages) {
+  return (messages || []).some(m => m && Array.isArray(m.content) && m.content.some(p => p && (p.type === 'image' || p.type === 'document')));
+}
+
+/* The conversation as it is sent: only its last `keep` messages with pictures or documents still hold them; in the
+   earlier ones they have become words (the message's alt), so that a long conversation does not carry every
+   picture ever attached with every request. Pure; the messages themselves are not changed. */
+function recentBinaries(messages, keep) {
+  let left = keep;
+  const out = (messages || []).slice();
+  for (let i = out.length - 1; i >= 0; i--) {
+    const m = out[i];
+    if (!m || !Array.isArray(m.content) || !m.content.some(p => p && (p.type === 'image' || p.type === 'document'))) continue;
+    if (left > 0) { left--; continue; }
+    out[i] = { role: m.role, content: typeof m.alt === 'string' ? m.alt : messageText(m) };
+  }
+  return out;
+}
+
+/* The files of the vault named by what was dropped from Obsidian's own file explorer (its text is one obsidian://
+   link a line): their paths, as the links give them (a note's may lack its ".md"). Pure. */
+function vaultPathsFromDrop(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^obsidian:\/\/open\?(.*)$/.exec(line.trim());
+    if (!m) continue;
+    const file = /(?:^|&)file=([^&]*)/.exec(m[1]);
+    if (file) { try { out.push(decodeURIComponent(file[1].replace(/\+/g, ' '))); } catch (e) { /* not a path */ } }
+  }
+  return out;
+}
+
+/* The files a paste brings (clipboardData), or [] when the paste is of text: a copied file or picture is attached;
+   text copied from an application that also offers a picture of it (a word processor, a spreadsheet) is pasted as
+   text. clip: {files, items, getData}. */
+function pastedFiles(clip) {
+  if (!clip) return [];
+  let files = Array.from(clip.files || []);
+  if (!files.length && clip.items) files = Array.from(clip.items).filter(i => i && i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return [];
+  let text = '';
+  try { text = clip.getData ? String(clip.getData('text/plain') || '') : ''; } catch (e) { /* no text */ }
+  if (text.trim() && files.every(f => /^image\//.test(f.type || ''))) return [];
+  return files;
+}
+
+/* Prepares one attachment to be sent: reads it, scales a picture down, takes a video's frames, takes a PDF's text.
+   Resolves with an item for attachmentMessage; what cannot be read comes back with `problem` (a few words), never
+   as nothing. att: {kind, name, mediaType, size, read() -> Promise<Uint8Array>}. env does what needs a browser:
+     env.decodeImage(bytes, mediaType) -> Promise<{width, height, encode(width, height) -> {mediaType, data}}>
+     env.videoFrames(bytes, mediaType, n, edge) -> Promise<{duration, frames: [{mediaType, data, at}]}>
+     env.pdfText(bytes, maxPages) -> Promise<{pages, text}> */
+async function prepareAttachment(att, env) {
+  const base = { kind: att.kind, name: att.name };
+  let bytes;
+  try { bytes = await att.read(); } catch (e) { return Object.assign(base, { problem: 'the file could not be opened' }); }
+  if (bytes.length > ATTACH_BYTES[att.kind]) return Object.assign(base, { problem: `it is ${formatBytes(bytes.length)}, over the limit of ${formatBytes(ATTACH_BYTES[att.kind])}` });
+  // (a file of the vault was taken by its name: its bytes have the last word on what it is)
+  const real = attachmentKind(att.name, att.mediaType, bytes.subarray(0, 4096));
+  if (!real || real.kind !== att.kind) return Object.assign(base, { problem: `it is not a ${ATTACH_KIND_WORD[att.kind]} Lagrange can read` });
+  const mediaType = real.mediaType || att.mediaType;
+  if (att.kind === 'image') {
+    try {
+      const pic = await env.decodeImage(bytes, mediaType);
+      const fit = fitWithin(pic.width, pic.height, ATTACH_IMAGE_EDGE);
+      if (fit.scale === 1 && MODEL_IMAGE_TYPES.includes(mediaType) && bytes.length <= ATTACH_IMAGE_BYTES) {
+        return Object.assign(base, { image: { mediaType, data: base64FromBytes(bytes), width: fit.width, height: fit.height, scaled: false } });
+      }
+      const enc = pic.encode(fit.width, fit.height);
+      return Object.assign(base, { image: { mediaType: enc.mediaType, data: enc.data, width: fit.width, height: fit.height, scaled: fit.scale < 1 } });
+    } catch (e) { return Object.assign(base, { problem: 'it could not be read as a picture' }); }
+  }
+  if (att.kind === 'video') {
+    try {
+      const v = await env.videoFrames(bytes, mediaType, ATTACH_FRAMES, ATTACH_FRAME_EDGE);
+      if (!v.frames.length) throw new Error('no frames');
+      return Object.assign(base, { duration: v.duration, frames: v.frames });
+    } catch (e) { return Object.assign(base, { problem: 'Obsidian could not play it to take frames from it' }); }
+  }
+  if (att.kind === 'pdf') {
+    let got = { pages: 0, text: '' };
+    try { got = await env.pdfText(bytes, ATTACH_PDF_PAGES); } catch (e) { /* no text: it may still go as a document */ }
+    const clip = clipAttachmentText(got.text, ATTACH_TEXT_CHARS);
+    return Object.assign(base, { data: base64FromBytes(bytes), pages: got.pages, text: clip.text, clipped: clip.clipped || got.more > 0, total: clip.total });
+  }
+  let text;
+  try { text = new TextDecoder('utf-8').decode(bytes); } catch (e) { return Object.assign(base, { problem: 'it could not be read as text' }); }
+  return Object.assign(base, clipAttachmentText(text, ATTACH_TEXT_CHARS));
+}
+
+/* A line for the demo's reply about what was attached (nothing is sent anywhere in demo mode). */
+function demoAttachmentLine(items) {
+  if (!items || !items.length) return '';
+  const one = it => `**${it.name}** (${it.problem ? `could not be read: ${it.problem}` : it.kind === 'image' ? `a picture, ${it.image.width}×${it.image.height}`
+    : it.kind === 'video' ? `a video of ${seconds(it.duration)} s, ${it.frames.length} frames taken` : it.kind === 'pdf' ? `a PDF, ${it.pages || '?'} ${it.pages === 1 ? 'page' : 'pages'}, ${it.total.toLocaleString('en')} characters of text`
+      : `a text file, ${it.total.toLocaleString('en')} characters`})`;
+  return `You attached ${items.map(one).join(', ')}. In demo mode nothing is sent anywhere, so no model has looked at ${items.length === 1 ? 'it' : 'them'}.`;
+}
+
+/* Which plate the next loader shows when none is chosen in the settings: the first one of a session is taken by
+   chance, and each one after it is the next in order, round and round, so that all of them are seen in turn.
+   (Before 0.5.2 every loader was a separate throw of the dice, and a run of the same plate was common.)
+   names: the plates; last: the one shown before, or null; chance: a function like Math.random. Pure. */
+function nextPlate(names, last, chance) {
+  const i = names.indexOf(last);
+  if (i < 0) return names[Math.min(names.length - 1, Math.floor((chance || Math.random)() * names.length))];
+  return names[(i + 1) % names.length];
+}
+const loaderTurn = { last: null };       // the plate last shown in turn, since the plugin was loaded
+
 function mountLoader(containerEl, theme) {
   const doc = containerEl.ownerDocument || document;
   const win = doc.defaultView || window;
   const names = LagrangePlates.NAMES;
-  const name = names.includes(theme) ? theme : names[Math.floor(Math.random() * names.length)];
+  const name = names.includes(theme) ? theme : (loaderTurn.last = nextPlate(names, loaderTurn.last));
   const el = doc.createElement('div');
   el.className = `lagrange-loader lagrange-loader--${name}`;
   el.setAttribute('role', 'status');
@@ -3842,13 +4477,14 @@ function createPen(app, settings) {
   /* Where the character at pos stands: {x, top, bottom, baseline} on the sheet, or null if it is not drawn (off
      screen). The baseline is found from the font's own ascent and descent, which is what the character's box is. */
   const charBox = (L, view, pos) => {
-    const c = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
+    let c = view.coordsAtPos(pos, 1) || view.coordsAtPos(pos, -1);
     if (!c) return null;
     let ratio = 0.8;
     try {
       const at = view.domAtPos(pos);
       const el = at.node.nodeType === 1 ? at.node : at.node.parentElement;
       const win = el.ownerDocument.defaultView, cs = win.getComputedStyle(el);
+      c = onItsLine(c, pos < view.state.doc.length ? view.coordsAtPos(pos + 1, 1) : null, parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 16) * 1.5);
       const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
       // (a font is measured once: this is asked for every pen in every frame)
       const known = charBox.fonts || (charBox.fonts = new Map());
@@ -3864,6 +4500,48 @@ function createPen(app, settings) {
     } catch (e) { /* the usual proportion */ }
     const o = org(L);
     return { x: c.left - o.x, top: c.top - o.y, bottom: c.bottom - o.y, baseline: c.top - o.y + (c.bottom - c.top) * ratio };
+  };
+  /* An initial counts as a letter of the line it opens. Scriptorium sets the first letter of a chapter's opening
+     paragraph as a drop cap, in Live Preview too: three lines deep (its box is far taller than a line), or not
+     drawn at all where a picture stands for it (its box has no height). The pen writes words on the lines of the
+     text, so such a letter is given the height of the letter after it (next), and keeps its own left edge. */
+  const onItsLine = (c, next, lineHeight) => {
+    const h = c.bottom - c.top;
+    if (!next || !(next.bottom > next.top) || (h <= lineHeight * 1.8 && h >= lineHeight * 0.3)) return c;
+    return next.bottom - next.top > lineHeight * 1.8 ? c : { left: c.left, right: c.right, top: next.top, bottom: next.bottom };
+  };
+  /* The initial that the text at pos stands beside, if it does: the lines beside a drop cap (a letter three lines
+     deep, or a picture in its place) begin after it, and so must the lines of the handwriting. → {right, bottom,
+     own} on the sheet (where those lines begin; where the initial ends; own, whether the text at pos begins with
+     the initial itself, and so begins at the margin), or null: there is none, or the text stands below it. first
+     is the charBox of pos. */
+  const besideInitial = (L, view, pos, first) => {
+    try {
+      const at = view.domAtPos(pos), el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
+      if (!el || !el.classList.contains('scriptorium-opening')) return null;
+      const win = L.win, o = org(L), px = v => parseFloat(v) || 0;
+      const picture = win.getComputedStyle(el, '::before'), letter = win.getComputedStyle(el, '::first-letter');
+      let right = 0, bottom = 0;
+      if (picture.content !== 'none' && picture.content !== 'normal' && picture.float === 'left') {
+        const box = el.getBoundingClientRect(), cs = win.getComputedStyle(el);
+        right = box.left + px(cs.paddingLeft) + px(picture.marginLeft) + px(picture.width) + px(picture.marginRight);
+        bottom = box.top + px(cs.paddingTop) + px(picture.marginTop) + px(picture.height) + px(picture.marginBottom);
+      } else if (letter.float === 'left') {
+        const line = view.state.doc.lineAt(pos), tall = px(win.getComputedStyle(el).lineHeight) * 1.8;
+        let cap = null, capAt = -1;
+        for (let p = line.from; p < Math.min(line.to, line.from + 8) && !cap; p++) {
+          const c = view.coordsAtPos(p, 1);
+          if (c && c.bottom - c.top > tall) { cap = c; capAt = p; }
+        }
+        if (!cap) return null;
+        const end = view.coordsAtPos(capAt + 1, -1);       // (a place has no width: the letter's right edge is the place after it)
+        right = Math.max(cap.right, end && end.bottom - end.top > tall ? end.right : cap.right) + px(letter.marginRight);
+        bottom = cap.bottom + px(letter.marginBottom);
+        if (pos <= capAt) return { right: right - o.x, bottom: bottom - o.y, own: true };
+      } else return null;
+      right -= o.x; bottom -= o.y;
+      return first.top < bottom - 2 && first.x >= right - 2 ? { right, bottom, own: false } : null;
+    } catch (e) { return null; }
   };
   /* The text column at pos: the left and right edges (on the sheet) between which the note's line wraps, and the
      height of its lines. */
@@ -3888,6 +4566,11 @@ function createPen(app, settings) {
       const c = /\S/.test(doc.sliceString(p, p + 1)) ? view.coordsAtPos(p, 1) : null;
       mids.push(c ? (c.top + c.bottom) / 2 : null);
       at.push(c);
+    }
+    for (let i = 0; i + 1 < at.length; i++) {
+      if (!at[i] || !at[i + 1]) continue;
+      const c = onItsLine(at[i], at[i + 1], lineHeight);
+      if (c !== at[i]) { at[i] = c; mids[i] = (c.top + c.bottom) / 2; }
     }
     const starts = lineStarts(mids, lineHeight * 0.5), rows = [];
     starts.forEach((s, n) => {
@@ -3943,6 +4626,111 @@ function createPen(app, settings) {
   };
   /* Draws one of the note's own equations where it stands, as drawGlyph draws each symbol; one too long for that is
      uncovered from left to right under the nib. It is in the pen's ink while it is drawn, then turns to the note's. */
+  /* The diagrams the note has drawn for an edit (see "Diagrams"): the <svg>s that were not there before. They are
+     unseen from the moment they come (the styles: .lagrange-pen-figures, until an svg is marked data-lagrange-seen),
+     so a figure never pops in ahead of the pen. TikZJax compiles a figure before it shows it, which takes a moment,
+     and longer the first time in a session: the pen waits for as many figures as the edit holds, for at most `wait` ms. */
+  const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg';
+  // (TikZJax's spinner is an <svg> in the block too: it is not a figure, and is never drawn by the pen)
+  const figureList = view => Array.from(view.contentDOM.querySelectorAll(FIGURES)).filter(svg => !svg.parentElement.closest('svg') && !svg.querySelector(':scope > circle > animate'));
+  // the ```tikz blocks TikZJax has given up on (a broken picture), that the pen has not yet counted
+  const figureFailures = view => Array.from(view.contentDOM.querySelectorAll('.block-language-tikz:not([data-lagrange-seen])')).filter(b => tikzState(b) === 'failed');
+  const awaitFigures = async (L, view, want, wait) => {
+    const until = L.win.performance.now() + wait;
+    for (;;) {
+      const found = figureList(view).filter(svg => !svg.hasAttribute('data-lagrange-seen'));
+      const failed = figureFailures(view);     // (a figure with an error in it will never come: it is not waited for)
+      if (found.length + failed.length >= want || L.win.performance.now() > until) {
+        for (const b of failed) b.setAttribute('data-lagrange-seen', '');
+        return found;
+      }
+      await pause(L, 80);
+    }
+  };
+  const FIGURE_STYLES = ['opacity', 'fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset', 'clipPath'];
+  const figureParts = svg => Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text, foreignObject, image'))
+    .filter(n => !n.closest('defs, mask, clipPath, marker, metadata, pattern, symbol') && !(n.tagName.toLowerCase() !== 'text' && n.closest('text')));
+  const restoreFigure = svg => {
+    svg.setAttribute('data-lagrange-seen', '');
+    svg.removeAttribute('data-lagrange-drawing');
+    svg.style.clipPath = '';
+    for (const n of figureParts(svg)) for (const p of FIGURE_STYLES) n.style[p] = '';
+  };
+  /* Draws a figure where the note has it: each line of it is drawn along its length under the nib, in the figure's
+     own order, and filled when it is closed; then its labels are uncovered from left to right. A figure of very
+     many parts is uncovered from left to right as a whole. data-lagrange-drawn counts the parts drawn so far.
+     The note may draw a figure afresh while the pen is at it (Live Preview makes the block again when the text
+     around it changes): the pen then stops, and the caller hands it the new one to go on with from part `from`.
+     -> how many parts are drawn, or -1 when the whole figure is. */
+  const drawFigure = async (L, svg, k, from) => {
+    const win = L.win;
+    const parts = figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
+    const order = figureOrder(parts.map(n => ({ text: /^(text|foreignObject|image)$/i.test(n.tagName) })));
+    const at = n => { const r = rel(L, n.getBoundingClientRect()); return { x: r.left, y: r.top + r.height * 0.6 }; };
+    if (!parts.length || parts.length > 220) {
+      svg.style.clipPath = 'inset(0 100% 0 0)';
+      svg.setAttribute('data-lagrange-seen', '');
+      const r0 = rel(L, svg.getBoundingClientRect());
+      await fly(L, r0.left, r0.top + r0.height * 0.5, 280 * k, 6);
+      await tween(L, Math.min(3200, Math.max(600, r0.width * 6)) * k, t => {
+        const r = rel(L, svg.getBoundingClientRect());
+        svg.style.clipPath = `inset(0 ${((1 - t) * 100).toFixed(1)}% 0 0)`;
+        place(L, r.left + r.width * t, r.top + r.height * (0.5 + 0.35 * Math.sin(t * 40)));
+      });
+      svg.style.clipPath = '';
+      return -1;
+    }
+    order.forEach((i, at) => { if (at >= (from || 0)) parts[i].style.opacity = '0'; });
+    svg.setAttribute('data-lagrange-drawing', '');
+    svg.setAttribute('data-lagrange-seen', '');
+    svg.setAttribute('data-lagrange-drawn', '0');
+    const each = Math.max(70, Math.min(520, 6500 / parts.length));
+    let drawn = Math.min(from || 0, order.length);
+    svg.setAttribute('data-lagrange-drawn', String(drawn));
+    for (const i of order.slice(drawn)) {
+      const n = parts[i];
+      if (!svg.isConnected) return drawn;
+      const label = /^(text|foreignObject|image)$/i.test(n.tagName);
+      let len = 0;
+      try { len = !label && n.getTotalLength ? n.getTotalLength() : 0; } catch (e) { len = 0; }
+      const start = at(n);
+      if (len) {
+        try { const q0 = new win.DOMPoint(n.getPointAtLength(0).x, n.getPointAtLength(0).y).matrixTransform(n.getScreenCTM()), o = org(L); start.x = q0.x - o.x; start.y = q0.y - o.y; } catch (e) { /* its box */ }
+      }
+      if (!L.pos || Math.hypot(start.x - L.pos.x, start.y - L.pos.y) > 5) await fly(L, start.x, start.y, Math.min(200, each) * k, 4);
+      if (len) {
+        const cs = win.getComputedStyle(n), bare = cs.stroke === 'none' || parseFloat(cs.strokeWidth) === 0;
+        n.style.fillOpacity = '0';
+        if (bare) { n.style.stroke = cs.fill && cs.fill !== 'none' ? cs.fill : 'currentColor'; n.style.strokeWidth = '0.6'; }
+        n.style.strokeDasharray = `${len} ${len}`;
+        n.style.strokeDashoffset = String(len);
+        n.style.opacity = '';
+        await tween(L, Math.max(each * 0.6, Math.min(each * 2.2, len * 3)) * k, t => {
+          n.style.strokeDashoffset = (len * (1 - t)).toFixed(2);
+          try {
+            let q = n.getPointAtLength(len * t);
+            q = new win.DOMPoint(q.x, q.y).matrixTransform(n.getScreenCTM());
+            const o = org(L);
+            place(L, q.x - o.x, q.y - o.y);
+          } catch (e) { /* the nib stays */ }
+        });
+        for (const p of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) n.style[p] = '';
+      } else {
+        n.style.clipPath = 'inset(-20% 100% -20% -10%)';
+        n.style.opacity = '';
+        await tween(L, each * k, t => {
+          n.style.clipPath = `inset(-20% ${((1 - t) * 100).toFixed(1)}% -20% -10%)`;
+          const r = rel(L, n.getBoundingClientRect());
+          place(L, r.left + r.width * t, r.top + r.height * 0.7 + Math.sin(t * 12) * 1.5);
+        });
+        n.style.clipPath = '';
+      }
+      svg.setAttribute('data-lagrange-drawn', String(++drawn));
+    }
+    svg.removeAttribute('data-lagrange-drawing');
+    return svg.isConnected ? -1 : drawn;
+  };
+
   const drawInPlace = async (L, box, k) => {
     const win = L.win, glyphs = mathGlyphs(box);
     if (!box.isConnected) return;
@@ -4080,7 +4868,7 @@ function createPen(app, settings) {
       const ink = [];                                   // the strokes that strike the old words out
       const claimed = new Set();                        // the note's own equations the pen has taken to draw
       const ctx = context();
-      let hand = null, cleared = false, S = null, L = null, skipped = null;
+      let hand = null, cleared = false, S = null, L = null, skipped = null, figuring = false;
       let inkG = null;                                  // the strokes' group, moved with the words they strike
       let keep = null;                                  // how what is drawn stays on its text: {read(), write()}, see keepUp
       const live = { read() { if (keep) keep.read(); }, write() { if (keep) keep.write(); } };
@@ -4105,6 +4893,13 @@ function createPen(app, settings) {
       const clear = instant => {
         if (cleared) return;
         cleared = true;
+        if (figuring) {
+          // every figure of this edit is shown as the note has it, whether the pen had drawn it or not
+          figuring = false;
+          for (const svg of figureList(view)) if (svg.hasAttribute('data-lagrange-drawing') || !svg.hasAttribute('data-lagrange-seen')) restoreFigure(svg);
+          if (L) { L.figures = Math.max(0, (L.figures || 0) - 1); if (!L.figures) view.dom.classList.remove('lagrange-pen-figures'); }
+          // (one that the note draws after the pen has gone is shown by the styles again, the class being off)
+        }
         keep = null;
         if (S) S.live.delete(live);
         tracked.delete(at);
@@ -4248,6 +5043,17 @@ function createPen(app, settings) {
           const maths = mathSegments(text).filter(g => g.type === 'math');
           const mj = maths.length ? await mathReady(L) : null;
           const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
+          // Diagrams in the text (Live Preview draws them): those already in the note are marked as seen, and the
+          // ones this edit brings stay unseen until the pen draws them.
+          const figs = live ? figureKinds(text) : { tikz: 0, sketch: 0 };
+          const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch;
+          if (wantFigures) {
+            for (const svg of figureList(view)) svg.setAttribute('data-lagrange-seen', '');
+            for (const b of figureFailures(view)) b.setAttribute('data-lagrange-seen', '');
+            L.figures = (L.figures || 0) + 1;
+            view.dom.classList.add('lagrange-pen-figures');
+            figuring = true;
+          }
           if (!at.dirty) {
             const old = view.state.doc;
             const startsLine = at.from === 0 || old.sliceString(at.from - 1, at.from) === '\n';
@@ -4269,8 +5075,9 @@ function createPen(app, settings) {
             console.debug(`Lagrange: ${maths.length - targets.length} of ${maths.length} equation(s) in this edit are not typeset in the note here (off screen, the cursor is in one, or Obsidian does not read their delimiters), so the pen draws them in its script.`);
           }
           // The pen's script: the words (and code), and the equations the note does not typeset itself.
-          const lines = rangeRects(view, at.start, at.end);
           const col = columnAt(L, view, at.start);
+          // (the lines the new text takes: an initial it begins with is three lines deep, and no line of its own)
+          const lines = (all => { const text = all.filter(r => r.height <= col.lineHeight * 1.8); return text.length ? text : all; })(rangeRects(view, at.start, at.end));
           const mayWrite = penLines(settings && settings.penLines, lines.length, tally && tally.spent, speed);
           // Text the note centres or sets to the right is written line for line as the note sets it (noteRows).
           let rows = first && (col.align || text.split('\n').some(l => ALIGN_MARK.test(l))) ? noteRows(L, view, at.start, at.end, col.lineHeight) : [];
@@ -4284,7 +5091,7 @@ function createPen(app, settings) {
             if (rows.length > mayWrite || rows.more) out.push({ type: 'text', text: ' …' });
             return out;
           };
-          const script = (!first ? [] : rows.length ? byRow() : penScript(text, Math.min(520, 150 * mayWrite), live)).filter(g => {
+          const script = (!first ? [] : rows.length ? byRow() : penScript(wantFigures ? withoutFigures(text) : text, Math.min(520, 150 * mayWrite), live)).filter(g => {
             if (g.type !== 'math') return true;
             const i = inNote.indexOf(bare(g.source));
             if (i < 0) return true;
@@ -4350,7 +5157,16 @@ function createPen(app, settings) {
               hand.style.lineHeight = `${col.lineHeight.toFixed(2)}px`;
               hand.style.left = `${col.left.toFixed(2)}px`;
               hand.style.width = `${(col.right - col.left).toFixed(2)}px`;
-              hand.style.textIndent = `${Math.max(0, first.x - col.left).toFixed(2)}px`;
+              // Beside a drop cap the lines begin after it: a float of the initial's width and depth holds its place
+              // (from the second line on, where the text written is the initial's own paragraph from its first letter:
+              // the float's shape leaves the first line free).
+              const cap = rows.length ? null : besideInitial(L, view, at.start, first);
+              const beside = cap ? Math.max(0, cap.right - col.left) : 0, under = cap && cap.own ? col.lineHeight * 1.4 : 0;   // (well into the second line: the first is a little deeper than a line where a tall letter stands on it)
+              hand.classList.toggle('is-beside-initial', beside > 0);
+              hand.style.setProperty('--lagrange-pen-beside', `${beside.toFixed(2)}px`);
+              hand.style.setProperty('--lagrange-pen-beside-from', `${under.toFixed(2)}px`);
+              hand.style.setProperty('--lagrange-pen-beside-deep', '1px');
+              hand.style.textIndent = `${Math.max(0, first.x - col.left - (under ? 0 : beside)).toFixed(2)}px`;
               hand.style.whiteSpace = rows.length ? 'nowrap' : '';
               for (const lead of leads) {
                 const now = charBox(L, view, at.start + lead.row.off);
@@ -4360,6 +5176,7 @@ function createPen(app, settings) {
               hand.style.top = '0px';
               const base = hand.firstChild.getBoundingClientRect().bottom - hand.getBoundingClientRect().top;
               hand.style.top = `${(first.baseline - base).toFixed(2)}px`;
+              if (beside) hand.style.setProperty('--lagrange-pen-beside-deep', `${Math.max(1, cap.bottom - (first.baseline - base)).toFixed(2)}px`);
             };
             L.sheet.appendChild(hand);
             lay();
@@ -4395,7 +5212,14 @@ function createPen(app, settings) {
             // line to itself.
             const last = lines[lines.length - 1];
             const followed = at.end < view.state.doc.length && view.state.doc.sliceString(at.end, at.end + 1) !== '\n';
-            const tall = () => Math.round(hand.getBoundingClientRect().height / col.lineHeight);
+            const tall = () => {
+              const box = hand.getBoundingClientRect();
+              if (!hand.classList.contains('is-beside-initial')) return Math.round(box.height / col.lineHeight);
+              // (beside an initial the hand's box is as deep as the float that holds the initial's place: its words are counted)
+              let bottom = box.top;
+              for (const q of pieces) for (const r of q.el.getClientRects()) bottom = Math.max(bottom, r.bottom);
+              return Math.max(1, Math.round((bottom - box.top) / col.lineHeight));
+            };
             const overruns = () => {
               if (!last) return false;
               if (lines.length !== 1 && (!followed || tall() < lines.length)) return false;
@@ -4546,10 +5370,23 @@ function createPen(app, settings) {
           view.dom.style.setProperty('--lagrange-pen-reveal', `${fade}ms`);
           view.dom.classList.add(`lagrange-pen-revealing-${slot}`);
           if (hand) { hand.style.transition = `opacity ${fade}ms ease`; hand.style.opacity = '0'; }
-          if (targets.length) {
+          if (targets.length || wantFigures) {
             await pause(L, fade * 0.6);
             // Then the equations, each where the note has it.
             for (const t of targets.slice(0, SCRIPT_EQUATIONS)) await drawInPlace(L, t.el, k);
+            // And the diagrams: the note draws them (TikZJax after it has compiled one), and the pen draws each in its place.
+            if (wantFigures) {
+              const found = await awaitFigures(L, view, wantFigures, figs.tikz ? 15000 : 6000);
+              for (let svg of found) {
+                // (drawn again by the note while the pen was at it: the pen goes on with the new one)
+                for (let done = 0, tries = 0; svg && tries < 6; tries++) {
+                  done = await drawFigure(L, svg, k, done);
+                  if (done < 0) break;
+                  svg = (await awaitFigures(L, view, 1, 3000))[0];
+                }
+              }
+              if (found.length < wantFigures) console.debug(`Lagrange: ${wantFigures - found.length} of ${wantFigures} diagram(s) of this edit were not drawn by the note in time (the plugin is off, the figure has an error, or the cursor is in its source), so the pen did not draw them.`);
+            }
             await flyOff();
             await pause(L, 380 * k);                      // the finished equation is looked at for a moment
           } else if (!hand) {
@@ -5091,7 +5928,8 @@ async function renderPage(app, view, text, width, frontmatter) {
     reading.style.width = '100%';
     const pane = page.pane = reading.createDiv({ cls: classes.join(' ') });
     const written = pane.createDiv();
-    await renderMarkdown(app, text, written, file.path, component);
+    if (figureKinds(text).tikz) await renderApart(app, text, written, file.path, component);   // (see renderApart)
+    else await renderMarkdown(app, text, written, file.path, component);
     page.sizer = dressLikeReadingView(written, file.basename);
     page.properties = dressProperties(view, page.sizer, frontmatter);
     page.sizer.createDiv({ cls: 'mod-footer mod-ui' });
@@ -5249,7 +6087,8 @@ async function settlePage(page, signal) {
     if (doc.fonts && doc.fonts.ready) await Promise.race([doc.fonts.ready, sleep(2000, signal)]);
     for (let laid = false; ;) {
       await sleep(50, signal);
-      const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)');
+      const waiting = Array.from(host.querySelectorAll('img')).some(img => !img.complete) || host.querySelector('.math:not(.is-loaded)')
+        || Array.from(host.querySelectorAll('.block-language-tikz')).some(b => tikzState(b) === 'waiting');   // a TikZ figure that TikZJax is still compiling
       const late = Date.now() > deadline;
       if (!late && (waiting || Date.now() - changed < 160)) continue;
       if (!late && dressEmbeds(page)) continue;     // embedded notes have come in: framed, and waited for in turn
@@ -5393,6 +6232,7 @@ function measurePage(page, info) {
     let inner = el;
     if (cls.contains('inline-title')) b.kind = 'title';
     else if (/^h[1-6]$/.test(tag)) { b.kind = 'heading'; b.level = Number(tag[1]); }
+    else if (tag === 'p' && el.querySelector('svg.excalidraw-svg, .excalidraw-embedded-img')) { b.kind = 'Excalidraw drawing'; b.text = tidy((el.querySelector('.internal-embed') || el).getAttribute('src') || '').slice(0, 80); }
     else if (tag === 'p') b.kind = el.querySelector('img') && !b.text ? 'picture' : 'paragraph';
     else if (tag === 'blockquote') { b.kind = 'blockquote'; inner = el.querySelector('p') || el; }
     else if (cls.contains('callout')) {
@@ -5412,6 +6252,7 @@ function measurePage(page, info) {
       if (lang) b.language = lang[1];
       inner = el.querySelector('code') || el;
     } else if (cls.contains('math')) { b.kind = 'math'; b.text = ''; }
+    else if (cls.contains('block-language-tikz')) { b.kind = el.querySelector('svg') ? 'TikZ figure' : 'TikZ figure (not drawn: TikZJax is off, or the figure has an error)'; b.text = ''; }
     else if (tag === 'hr') b.kind = 'rule';
     else if (tag === 'section' && cls.contains('footnotes')) { b.kind = 'footnotes'; b.items = el.querySelectorAll('li').length; inner = el.querySelector('li') || el; }
     parts.set(b, { el, inner, inMargin });
@@ -5696,12 +6537,117 @@ async function lookAtPage(app, view, spec, opts) {
  * 8. The chat view, the revise modal, the settings tab and the plugin
  * ------------------------------------------------------------------------------------------------------------- */
 
+/* Renders Markdown apart from the page and puts the result into `el` in one step; -> the ```tikz blocks it holds,
+   [{block, source}]. For text with a TikZ figure in it, because of how TikZJax 0.5.2 finds its figures: it watches
+   the page for nodes that come in, and where an element and something inside it both come in during one task
+   (which is how Obsidian's renderer fills an element that is already on the page) it meets the figure's <script>
+   twice, puts its spinner in at the first and forgets that spinner at the second, so that the figure is compiled
+   (and kept in TikZJax's store, which is why the same figure shows at once the next time) but the spinner on the
+   page turns for ever. Coming in once, already whole, the figure is met once. */
+async function renderApart(app, markdown, el, sourcePath, component) {
+  const apart = el.ownerDocument.createElement('div');
+  await renderMarkdown(app, markdown, apart, sourcePath, component);
+  const figures = Array.from(apart.querySelectorAll('.block-language-tikz')).map(block => {
+    const script = block.querySelector('script[type="text/tikz"]');
+    return { block, source: script ? script.textContent : '' };
+  });
+  el.append(...Array.from(apart.childNodes));
+  return figures;
+}
+
 function renderMarkdown(app, markdown, el, sourcePath, component) {
   if (MarkdownRenderer.render) return MarkdownRenderer.render(app, markdown, el, sourcePath, component);
   return MarkdownRenderer.renderMarkdown(markdown, el, sourcePath, component);
 }
 
+/* What preparing an attachment needs of the browser (see prepareAttachment): a picture is decoded and drawn smaller
+   on a canvas (as a JPEG, on white), a video is played unseen and unheard to the moments its frames are taken at, a
+   PDF's text is read with the PDF reader Obsidian has. Everything is read from the bytes in memory (blob: addresses),
+   so nothing is fetched and no file is written. */
+function attachmentEnv(win) {
+  const doc = win.document;
+  const jpeg = (source, w, h, quality) => {
+    const c = doc.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, w, h);
+    g.drawImage(source, 0, 0, w, h);
+    const url = c.toDataURL('image/jpeg', quality);
+    return { mediaType: 'image/jpeg', data: url.slice(url.indexOf(',') + 1) };
+  };
+  const waitFor = (el, ok, bad, ms) => new Promise((resolve, reject) => {
+    const done = f => () => { win.clearTimeout(timer); el.removeEventListener(ok, yes); el.removeEventListener(bad, no); f(); };
+    const yes = done(resolve), no = done(() => reject(new Error(bad)));
+    const timer = win.setTimeout(done(() => reject(new Error('timeout'))), ms);
+    el.addEventListener(ok, yes);
+    el.addEventListener(bad, no);
+  });
+  return {
+    async decodeImage(bytes, mediaType) {
+      const url = win.URL.createObjectURL(new win.Blob([bytes], { type: mediaType }));
+      try {
+        const img = new win.Image();
+        const loaded = waitFor(img, 'load', 'error', 20000);
+        img.src = url;
+        await loaded;
+        const width = img.naturalWidth || 1024, height = img.naturalHeight || 1024;   // (an SVG may state no size)
+        return { width, height, encode: (w, h) => jpeg(img, w, h, 0.9) };
+      } finally {
+        win.URL.revokeObjectURL(url);
+      }
+    },
+    async videoFrames(bytes, mediaType, n, edge) {
+      const url = win.URL.createObjectURL(new win.Blob([bytes], { type: mediaType }));
+      const v = doc.createElement('video');
+      try {
+        v.muted = true;
+        v.preload = 'auto';
+        const ready = waitFor(v, 'loadeddata', 'error', 20000);
+        v.src = url;
+        await ready;
+        const duration = Number.isFinite(v.duration) ? v.duration : 0;
+        const fit = fitWithin(v.videoWidth, v.videoHeight, edge);
+        const frames = [];
+        for (const at of frameTimes(duration, n)) {
+          if (Math.abs(v.currentTime - at) > 0.001) {
+            const sought = waitFor(v, 'seeked', 'error', 8000);
+            v.currentTime = at;
+            await sought;
+          }
+          frames.push(Object.assign(jpeg(v, fit.width, fit.height, 0.8), { at }));
+          await new Promise(r => win.setTimeout(r, 0));     // (the panel stays live between frames)
+        }
+        return { duration, frames };
+      } finally {
+        v.removeAttribute('src');
+        try { v.load(); } catch (e) { /* gone */ }
+        win.URL.revokeObjectURL(url);
+      }
+    },
+    async pdfText(bytes, maxPages) {
+      const pdfjs = await obsidian.loadPdfJs();
+      const task = pdfjs.getDocument({ data: bytes.slice() });
+      const pdf = await task.promise;
+      try {
+        const pages = pdf.numPages, read = Math.min(pages, maxPages);
+        const out = [];
+        for (let i = 1; i <= read; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          out.push(content.items.map(it => (it.str || '') + (it.hasEOL ? '\n' : '')).join('').trim());
+        }
+        return { pages, more: pages - read, text: out.filter(Boolean).join('\n\n') };
+      } finally {
+        try { await task.destroy(); } catch (e) { /* closed */ }
+      }
+    },
+  };
+}
+
 let pickerUid = 0;   // radio groups need a name of their own in each picker drawn
+let attachUid = 0;
 
 class LagrangeChatView extends ItemView {
   constructor(leaf, plugin) {
@@ -5712,6 +6658,8 @@ class LagrangeChatView extends ItemView {
     this.clipNoted = new Set();  // notes whose clipping the writer has been told about
     this.checkpoints = [];       // one per message sent, for "Rewind to here" (see rewindTo)
     this.shown = null;           // {look, el, hint}: a page the writer has shown Lagrange, to go with the next message
+    this.attachments = [];       // what is attached to the message being written (see attach): pictures, video, files
+    this.urls = [];              // blob: addresses made for showing them, given up when the conversation is cleared
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -5759,6 +6707,8 @@ class LagrangeChatView extends ItemView {
     this.watchLog();
 
     const compose = root.createDiv({ cls: 'lagrange-compose' });
+    // What is attached to the message being written: a chip each, above the box (renderTray).
+    this.trayEl = compose.createDiv({ cls: 'lagrange-tray is-empty', attr: { 'aria-label': 'Attached to your message' } });
     this.inputEl = compose.createEl('textarea', {
       cls: 'lagrange-input',
       attr: { rows: '2', placeholder: this.plugin.settings.agenticEdits ? 'Ask about this note, or ask for a change…' : 'Ask about this note…', 'aria-label': 'Message to Lagrange' },
@@ -5770,8 +6720,41 @@ class LagrangeChatView extends ItemView {
       }
     });
     this.inputEl.addEventListener('input', () => this.fitInput());
+    // A copied picture, video or file pasted into the box is attached; so is one dropped anywhere on the panel (from
+    // the system, or a file of the vault from Obsidian's file explorer), or picked with the paperclip.
+    this.inputEl.addEventListener('paste', ev => {
+      const files = pastedFiles(ev.clipboardData);
+      if (!files.length) return;
+      ev.preventDefault();
+      void this.attachFiles(files);
+    });
+    root.addEventListener('dragover', ev => {
+      if (!this.canDrop(ev)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.dataTransfer.dropEffect = 'copy';
+      root.addClass('is-dropping');
+    });
+    root.addEventListener('dragleave', ev => { if (!root.contains(ev.relatedTarget)) root.removeClass('is-dropping'); });
+    root.addEventListener('drop', ev => {
+      root.removeClass('is-dropping');
+      if (!this.canDrop(ev)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      void this.takeDrop(ev);
+    });
     const foot = compose.createDiv({ cls: 'lagrange-foot' });
     const left = foot.createDiv({ cls: 'lagrange-foot-left' });
+    const pick = compose.createEl('input', { cls: 'lagrange-attach-input', attr: { type: 'file', multiple: '', hidden: '', tabindex: '-1', 'aria-hidden': 'true' } });
+    pick.addEventListener('change', () => {
+      const files = Array.from(pick.files || []);
+      pick.value = '';
+      if (files.length) void this.attachFiles(files);
+    });
+    this.pickEl = pick;
+    const clip = left.createEl('button', { cls: 'lagrange-attach clickable-icon', attr: { type: 'button', 'aria-label': 'Attach pictures, video or files' } });
+    setIcon(clip, 'paperclip');
+    clip.addEventListener('click', () => pick.click());
     // The model and effort in use: a button that opens the picker (openPicker).
     this.modelEl = left.createEl('button', {
       cls: 'lagrange-model',
@@ -5802,6 +6785,7 @@ class LagrangeChatView extends ItemView {
   async onClose() {
     this.stop();
     this.closePicker();
+    this.dropUrls();
   }
 
   refreshSubject() {
@@ -5926,6 +6910,158 @@ class LagrangeChatView extends ItemView {
     }
   }
 
+  /* ---- Attachments ---- */
+
+  /* Whether what is dragged over the panel can be attached: files of the system, or of the vault (dragged from
+     Obsidian's file explorer, which says what it drags in app.dragManager). */
+  canDrop(ev) {
+    const dt = ev.dataTransfer;
+    if (!dt) return false;
+    const d = this.app.dragManager && this.app.dragManager.draggable;
+    return Array.from(dt.types || []).includes('Files') || Boolean(d && (d.file || d.files));
+  }
+
+  async takeDrop(ev) {
+    const dt = ev.dataTransfer, vault = this.app.vault;
+    const d = this.app.dragManager && this.app.dragManager.draggable;
+    const own = [];
+    if (d && d.file) own.push(d.file);
+    else if (d && Array.isArray(d.files)) own.push(...d.files);
+    const files = Array.from(dt.files || []);
+    if (!own.length && !files.length) {
+      let text = '';
+      try { text = dt.getData('text/plain'); } catch (e) { /* nothing */ }
+      for (const p of vaultPathsFromDrop(text)) {
+        const f = vault.getAbstractFileByPath(p) || vault.getAbstractFileByPath(`${p}.md`);
+        if (f) own.push(f);
+      }
+    }
+    if (own.length) this.attachVaultFiles(own);
+    if (files.length) await this.attachFiles(files);
+    this.inputEl.focus();
+  }
+
+  /* Files of the system (pasted, dropped or picked): each is known by its first bytes, and is read in full only
+     when the message is sent. */
+  async attachFiles(files) {
+    const list = [];
+    for (const f of files) {
+      let kind = null;
+      try { kind = attachmentKind(f.name, f.type, new Uint8Array(await f.slice(0, 4096).arrayBuffer())); } catch (e) { /* a folder, or unreadable */ }
+      list.push({
+        name: f.name || 'pasted file', size: f.size, kind: kind && kind.kind, mediaType: kind && kind.mediaType, blob: f,
+        read: async () => new Uint8Array(await f.arrayBuffer()),
+      });
+    }
+    this.attach(list);
+  }
+
+  /* Files of the vault: attached by their path, and read from the vault when the message is sent. */
+  attachVaultFiles(files) {
+    this.attach(files.map(f => {
+      if (f.children) return { name: f.name || f.path, size: 0, kind: null, folder: true };
+      const kind = attachmentKind(f.name, '', null);
+      return {
+        name: f.name, path: f.path, size: f.stat ? f.stat.size : null, kind: kind && kind.kind, mediaType: kind && kind.mediaType,
+        url: this.app.vault.getResourcePath(f),
+        read: async () => new Uint8Array(await this.app.vault.readBinary(f)),
+      };
+    }));
+  }
+
+  attach(list) {
+    const { take, refused } = admitAttachments(this.attachments.length, list);
+    for (const i of take) {
+      const a = list[i];
+      a.id = ++attachUid;
+      if (!a.url && a.blob && (a.kind === 'image' || a.kind === 'video')) {
+        a.url = window.URL.createObjectURL(a.blob);
+        this.urls.push(a.url);
+      }
+      this.attachments.push(a);
+    }
+    if (refused.length) new Notice(refused.map(r => `${r.name}: ${r.why}.`).join('\n'), 10000);
+    this.renderTray();
+  }
+
+  removeAttachment(a) {
+    this.attachments = this.attachments.filter(x => x !== a);
+    this.renderTray();
+    this.inputEl.focus();
+  }
+
+  renderTray() {
+    const t = this.trayEl;
+    if (!t) return;
+    t.empty();
+    t.toggleClass('is-empty', !this.attachments.length);
+    for (const a of this.attachments) t.appendChild(this.chipEl(a, true));
+  }
+
+  /* An attachment as a chip: a small picture of it (or a sign for its kind), its name, its kind and size, and in the
+     tray a button that takes it off. */
+  chipEl(a, removable) {
+    const chip = createDiv({ cls: `lagrange-chip lagrange-chip--${a.kind}` });
+    const thumb = chip.createDiv({ cls: 'lagrange-chip-thumb' });
+    if (a.kind === 'image' && a.url) thumb.createEl('img', { attr: { src: a.url, alt: '' } });
+    else if (a.kind === 'video' && a.url) thumb.createEl('video', { attr: { src: a.url, preload: 'metadata', tabindex: '-1' } }).muted = true;
+    else setIcon(thumb, a.kind === 'pdf' ? 'file-text' : a.kind === 'video' ? 'film' : a.kind === 'image' ? 'image' : 'file');
+    const words = chip.createDiv({ cls: 'lagrange-chip-words' });
+    words.createDiv({ cls: 'lagrange-chip-name', text: a.name });
+    words.createDiv({ cls: 'lagrange-chip-kind', text: attachmentLabel(a) });
+    if (removable) {
+      const x = chip.createEl('button', { cls: 'lagrange-chip-remove clickable-icon', attr: { type: 'button', 'aria-label': `Remove ${a.name}` } });
+      setIcon(x, 'x');
+      x.addEventListener('click', () => this.removeAttachment(a));
+    }
+    return chip;
+  }
+
+  dropUrls() {
+    for (const u of this.urls) { try { window.URL.revokeObjectURL(u); } catch (e) { /* gone */ } }
+    this.urls = [];
+  }
+
+  /* A message's Markdown set in the log as Obsidian sets a note (code with its colours and its copy button,
+     mathematics, Mermaid, TikZ and Excalidraw where the vault has them, pictures and video of the vault), after
+     chatMarkdown has made it safe to show. */
+  renderChat(md, el, sourcePath, component) {
+    try {
+      // (a message with a TikZ figure comes into the log whole, and the figure is watched until it is drawn: see
+      // renderApart and watchFigures)
+      const opts = this.plugin.chatRenderOptions(), apart = Boolean(opts.tikz && figureKinds(md).tikz);
+      const rendered = (apart ? renderApart : renderMarkdown)(this.app, chatMarkdown(md, opts), el, sourcePath || '', component);
+      const done = apart ? rendered.then(figures => { this.watchFigures(figures); }) : rendered;
+      Promise.resolve(done).then(() => this.scrollDown(), e => { console.error('Lagrange: rendering a message', e); });
+    } catch (e) {
+      console.error('Lagrange: rendering a message', e);
+      el.setText(md);
+    }
+  }
+
+  /* The TikZ figures of a message, until each is drawn: one that TikZJax gives up on (it leaves a broken picture and
+     says nothing), or that is still not drawn after TIKZ_WAIT, gives way to its source under a line that says why. */
+  async watchFigures(figures, wait) {
+    const until = Date.now() + (wait == null ? TIKZ_WAIT : wait);
+    let left = (figures || []).slice();
+    while (left.length) {
+      await sleep(200).catch(() => {});
+      left = left.filter(f => {
+        if (!f.block.isConnected) return false;
+        const state = tikzState(f.block);
+        if (state === 'waiting' && Date.now() <= until) return true;
+        if (state !== 'drawn') {
+          f.block.empty();
+          f.block.addClass('lagrange-figure-source');
+          f.block.createEl('small', { cls: 'lagrange-chat-degraded', text: tikzTrouble(state === 'failed' ? 'failed' : 'late', 'chat', wait) });
+          f.block.createEl('pre').createEl('code', { text: f.source });
+        }
+        this.scrollDown();
+        return false;
+      });
+    }
+  }
+
   fitInput() {
     const el = this.inputEl;
     el.style.height = 'auto';
@@ -6010,6 +7146,9 @@ class LagrangeChatView extends ItemView {
     this.shown = null;
     this.clipNoted.clear();
     this.logEl.empty();
+    this.attachments = [];
+    this.renderTray();
+    this.dropUrls();
     this.showEmpty();
   }
 
@@ -6033,10 +7172,24 @@ class LagrangeChatView extends ItemView {
   }
 
   /* The writer's message in the log, with its "Rewind to here" button. */
-  addUser(text, checkpoint) {
+  addUser(text, checkpoint, attached) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--user' });
-    el.createDiv({ cls: 'lagrange-turn-text', text });
+    // (the writer's own message is rendered too: code, mathematics and diagrams in it show as they do in a note)
+    if (text) {
+      const said = el.createDiv({ cls: 'lagrange-turn-text markdown-rendered' });
+      const target = this.plugin.targetMarkdownView();
+      this.renderChat(text, said, (target && target.file && target.file.path) || '', this);
+    }
+    // What was attached: pictures as they are (scaled to the panel), video with its controls, files as chips.
+    if (attached && attached.length) {
+      const strip = el.createDiv({ cls: 'lagrange-attached' });
+      for (const a of attached) {
+        if (a.kind === 'image' && a.url) strip.createEl('img', { cls: 'lagrange-attached-image', attr: { src: a.url, alt: a.name } });
+        else if (a.kind === 'video' && a.url) strip.createEl('video', { cls: 'lagrange-attached-video', attr: { src: a.url, controls: '', preload: 'metadata', 'aria-label': a.name } });
+        else strip.appendChild(this.chipEl(a, false));
+      }
+    }
     if (checkpoint) {
       checkpoint.el = el;
       const b = el.createEl('button', { cls: 'lagrange-rewind clickable-icon' });
@@ -6093,6 +7246,8 @@ class LagrangeChatView extends ItemView {
     }
     this.showEmpty();
     this.inputEl.value = cp.text;
+    this.attachments = (cp.attachments || []).slice(0, ATTACH_MAX);   // (what was attached to it is attached again)
+    this.renderTray();
     this.fitInput();
     this.inputEl.focus();
     if (cp.expired) new Notice(`Rewound the conversation. The note as it was then is no longer kept (only the last ${CHECKPOINTS_KEPT} points are), so it was left as it is.`, 8000);
@@ -6107,7 +7262,7 @@ class LagrangeChatView extends ItemView {
     return el;
   }
 
-  /* A reply in the log: a loader until the first words, then Markdown, re-rendered as text streams in. */
+  /* A reply in the log: a loader until the first words, then Markdown, rendered block by block as text streams in. */
   addReply(sourcePath) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--reply' });
@@ -6115,19 +7270,35 @@ class LagrangeChatView extends ItemView {
     let loader = mountLoader(body.createDiv({ cls: 'lagrange-loader-slot' }), this.plugin.settings.loaderTheme);
     this.scrollDown();
     let md = '', shown = null, timer = null, comp = null, status = null;
-    const render = () => {
-      timer = null;
-      if (md === shown) return;
-      shown = md;
-      if (loader) { loader.stop(); loader = null; }
+    // While the reply streams: the whole blocks that have come are rendered once each, as Obsidian renders a note
+    // (renderChat), and what is still being written is shown as plain text under them (splitStable). When the
+    // reply is complete, what is left of it is rendered; it is rendered again as a whole only if it holds something
+    // that reaches across blocks (needsWholeRender) or is not what was streamed, so a diagram is not drawn twice.
+    let stream = null;                     // {box, tail, done}
+    const begin = () => {
       const next = new Component();
       this.addChild(next);
       const box = createDiv();
-      renderMarkdown(this.app, md, box, sourcePath || '', next);
       body.empty();
       body.appendChild(box);
       if (comp) this.removeChild(comp);
       comp = next;
+      stream = { box, tail: body.createDiv({ cls: 'lagrange-turn-open' }), done: '' };
+    };
+    const render = last => {
+      timer = null;
+      if (md === shown && !last) return;
+      shown = md;
+      if (loader) { loader.stop(); loader = null; }
+      if (!stream) begin();
+      let part = last ? { done: md, tail: '' } : splitStable(md);
+      // (the text before was changed, or the whole must be set as one: from the start again)
+      if (!part.done.startsWith(stream.done) || (last && stream.done && needsWholeRender(md))) begin();
+      const fresh = part.done.slice(stream.done.length);
+      if (fresh.trim()) this.renderChat(fresh, stream.box.createDiv({ cls: 'lagrange-turn-part' }), sourcePath, comp);
+      stream.done = part.done;
+      stream.tail.setText(part.tail);
+      if (last) { stream.tail.remove(); stream = null; }
       this.scrollDown();
     };
     return {
@@ -6141,7 +7312,8 @@ class LagrangeChatView extends ItemView {
         if (timer) { window.clearTimeout(timer); timer = null; }
         if (status) { status.remove(); status = null; }
         md = text;
-        if (md) render();
+        if (md) render(true);
+        else stream = null;
         if (loader) { loader.stop(); loader = null; }
         if (!md) { body.empty(); if (!keep) el.addClass('is-empty'); }
       },
@@ -6246,8 +7418,11 @@ class LagrangeChatView extends ItemView {
   async send() {
     if (this.pending) return;
     const text = this.inputEl.value.trim();
-    if (!text) return;
+    const attached = this.attachments.slice();
+    if (!text && !attached.length) return;
     this.inputEl.value = '';
+    this.attachments = [];
+    this.renderTray();
     this.fitInput();
     this.stick = true;
 
@@ -6258,11 +7433,11 @@ class LagrangeChatView extends ItemView {
 
     // The checkpoint for "Rewind to here": where the conversation stands, and the note as it is now.
     const checkpoint = {
-      text, historyLength: this.history.length, path: note ? note.path : null, before: note ? note.text : null, after: null,
+      text, attachments: attached, historyLength: this.history.length, path: note ? note.path : null, before: note ? note.text : null, after: null,
       expired: false, clock: this.plugin.editClock,
     };
     this.checkpoints.push(checkpoint);
-    this.addUser(text, checkpoint);
+    this.addUser(text, checkpoint, attached);
     if (clip && clip.clipped && !this.clipNoted.has(note.path)) {
       this.clipNoted.add(note.path);
       this.addAside(`“${note.title}” is long (${clip.total.toLocaleString()} characters), so Lagrange reads the ` +
@@ -6281,15 +7456,42 @@ class LagrangeChatView extends ItemView {
     // of a look are sent once and are not kept. The conversation takes the turn in when it is over.
     // (shown when another model was chosen, perhaps: one that takes no pictures is given the words alone)
     const desktop = !(obsidian.Platform && obsidian.Platform.isDesktopApp === false);
-    const first = !shown ? null
-      : lookMessage(lookSendsPictures(settings, desktop, this.plugin.session) ? shown : Object.assign({}, shown, { pictures: [], more: 0 }), { by: 'writer', text });
+    const lookFor = (words, pictures) => lookMessage(pictures ? shown : Object.assign({}, shown, { pictures: [], more: 0 }), { by: 'writer', text: words });
+    const showPictures = Boolean(shown) && lookSendsPictures(settings, desktop, this.plugin.session);
+    const first = !shown ? null : lookFor(text, showPictures);
     const kept = [{ role: 'user', content: first ? first.kept : text }];
     const sent = [first ? { role: 'user', content: first.content, alt: first.alt } : kept[0]];
     const controller = new AbortController();
     this.setPending({ controller });
     let reply = null, partial = '', raw = '', streaming = false, failed = false, ran = null, typed = false;
     let looksLeft = canLook ? LOOKS_PER_MESSAGE : 0, lastLook = shown;
+    let items = [];              // what was attached, as it was prepared to be sent
     try {
+      if (attached.length) {
+        // What was attached is read now (a file of the vault from the vault), a picture scaled down, a video's
+        // frames taken, a PDF's text taken; then the message is made for the provider in use (attachmentMessage),
+        // and the writer is told whatever did not go as it is. The attachments stay in the conversation (kept),
+        // unlike the pictures of a look: the last few messages keep theirs (recentBinaries).
+        const busy = this.addAside('Reading what you attached…', 'is-quiet');
+        const env = attachmentEnv(window);
+        try {
+          for (const a of attached) items.push(await prepareAttachment(a, env));
+        } finally {
+          busy.remove();
+        }
+        const made = attachmentMessage(text, items, providerInputs(settings, this.plugin.session));
+        for (const n of made.notes) this.addAside(n);
+        const withParts = (parts, words) => (parts.length ? parts.concat([{ type: 'text', text: words }]) : words);
+        if (shown) {
+          const look = lookFor(made.text, showPictures);
+          const pictures = Array.isArray(look.content) ? look.content.filter(p => p.type === 'image') : [];
+          const words = Array.isArray(look.content) ? look.content[look.content.length - 1].text : look.content;
+          sent[0] = { role: 'user', content: withParts(pictures.concat(made.parts), words), alt: lookFor(made.alt, false).alt };
+          kept[0] = { role: 'user', content: withParts(made.parts, look.kept), alt: lookFor(made.alt, showPictures).kept };
+        } else {
+          sent[0] = kept[0] = { role: 'user', content: withParts(made.parts, made.text), alt: made.alt };
+        }
+      }
       for (let round = 0; ; round++) {
         const answer = reply = this.addReply(note && note.path);
         if (!round) this.scrollDown(true);       // the loader has just come in under the message: it is in view
@@ -6305,10 +7507,13 @@ class LagrangeChatView extends ItemView {
         streaming = true;
         const res = await complete(settings, {
           purpose: 'chat',
-          system: chatSystemPrompt(note, clip, agentic, canLook),
-          messages: this.history.concat(sent),
+          system: chatSystemPrompt(note, clip, agentic, canLook, this.plugin.diagramPlugins()),
+          messages: recentBinaries(this.history.concat(sent), ATTACH_KEPT),
           cache: true,
-          demo: () => (round || lastLook ? demoLookReply(lastLook) : demoChatReply(text, note, agentic, canLook)),
+          demo: () => {
+            const said = round || lastLook ? demoLookReply(lastLook) : demoChatReply(text || '(what is attached, with no message)', note, agentic, canLook, this.plugin.diagramPlugins());
+            return items.length && !round ? `${demoAttachmentLine(items)}\n\n${said}` : said;
+          },
         }, {
           signal: controller.signal,
           onText: (d, full) => { raw = full; partial = prose(full); answer.update(partial); },
@@ -6328,8 +7533,10 @@ class LagrangeChatView extends ItemView {
         }
         if (res.picturesRefused) {
           // The provider turned the pictures down and was sent the words: that is what this turn holds from now on.
-          sent.forEach((m, i) => { if (Array.isArray(m.content)) { m.content = m.alt; kept[i].content = m.alt; } });
-          reply.note('This model would not take pictures of the page, so Lagrange was given the page in words instead.', 'is-quiet');
+          sent.forEach((m, i) => { if (Array.isArray(m.content)) { m.content = m.alt; if (kept[i] !== m) kept[i].content = Array.isArray(kept[i].content) ? kept[i].alt : m.alt; } });
+          reply.note(items.length
+            ? 'This model would not take pictures or documents, so Lagrange was given what you attached in words instead (the text of files; of pictures and video, only that they are there).'
+            : 'This model would not take pictures of the page, so Lagrange was given the page in words instead.', 'is-quiet');
         }
         if (editing) {
           const run = await this.plugin.applyChatEdits(target, note, parsed, reply, controller.signal);
@@ -6389,7 +7596,12 @@ class LagrangeChatView extends ItemView {
           if (!partial) reply.el.remove();
         }
         this.addError(err);
-        if (!this.inputEl.value) { this.inputEl.value = text; this.fitInput(); }
+        if (!this.inputEl.value && !this.attachments.length) {
+          this.inputEl.value = text;
+          this.attachments = attached;
+          this.renderTray();
+          this.fitInput();
+        }
       }
     } finally {
       this.setPending(null);
@@ -6861,7 +8073,7 @@ class LagrangeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Loading animation')
       .setDesc('What the chat shows while Lagrange thinks.')
-      .addDropdown(d => d.addOption('random', 'A different plate each time').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('orbit', 'The five Lagrange points')
+      .addDropdown(d => d.addOption('cycle', 'Each plate in turn').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('orbit', 'The five Lagrange points')
         .setValue(s.loaderTheme).onChange(async v => { s.loaderTheme = v; await save(); }));
     new Setting(containerEl)
       .setName('Show the pen')
@@ -7272,6 +8484,63 @@ class LagrangePlugin extends Plugin {
   /* Makes the edits a chat reply asked for (parsed: parseAgentReply's result) in the note the message was about, by
      the same road as the commands: located in the editor's current text, written by the pen, one undo step, listed
      under the reply. */
+  /* What chatMarkdown needs to know of this vault: which diagram plugins are on (as diagramPlugins tells; an
+     Excalidraw embed is shown as soon as Excalidraw is on), which names of code blocks a plugin acts on, and the
+     prefixes Dataview (if it is here) runs inline code by. */
+  chatRenderOptions() {
+    const plugins = this.app.plugins, have = this.diagramPlugins();
+    const on = id => Boolean(plugins && plugins.enabledPlugins && plugins.enabledPlugins.has(id) && plugins.plugins[id]);
+    const acting = (obsidian.MarkdownPreviewRenderer && obsidian.MarkdownPreviewRenderer.codeBlockPostProcessors) || {};
+    const dv = on('dataview') && plugins.plugins.dataview.settings;
+    const inlineRun = dv ? [dv.inlineJsQueryPrefix, dv.inlineQueryPrefix].filter(p => typeof p === 'string' && p) : [];
+    return { tikz: have.tikz, sketch: have.sketch || on('obsidian-excalidraw-plugin'), acts: name => Object.prototype.hasOwnProperty.call(acting, name), inlineRun };
+  }
+
+  /* Which of the two diagram plugins are on in this vault: {tikz, sketch}. */
+  diagramPlugins() {
+    const on = id => Boolean(this.app.plugins && this.app.plugins.enabledPlugins && this.app.plugins.enabledPlugins.has(id) && this.app.plugins.plugins[id]);
+    return { tikz: on('obsidian-tikzjax'), sketch: on('obsidian-excalidraw-plugin') && typeof window.ExcalidrawAutomate === 'object' && window.ExcalidrawAutomate !== null };
+  }
+
+  /* The diagrams among a reply's edits, before the edits are located. A drawing is made as an Excalidraw file next
+     to the note, and its edit becomes the embed of that file; without Excalidraw the edit is left out, and the chat
+     says so. An edit that writes a tikz block is left out likewise when TikZJax is off (it would show as code). */
+  async makeDiagrams(view, ops, reply) {
+    const have = this.diagramPlugins(), out = [];
+    let noTikz = 0, noSketch = 0;
+    for (const o of ops) {
+      const text = o.op === 'replace' ? o.replace : o.text;
+      if (!o.sketch && figureKinds(text).tikz && !have.tikz) { noTikz++; continue; }
+      if (!o.sketch) { out.push(o); continue; }
+      if (!have.sketch) { noSketch++; continue; }
+      try {
+        const ea = window.ExcalidrawAutomate, folder = view.file.parent && view.file.parent.path !== '/' ? view.file.parent.path : '';
+        let name = o.sketch.name;
+        for (let n = 2; this.app.vault.getAbstractFileByPath(`${folder ? folder + '/' : ''}${name}.excalidraw.md`); n++) name = `${o.sketch.name} ${n}`;
+        ea.reset();
+        for (const e of o.sketch.elements) {
+          if (e.type === 'rect') ea.addRect(e.x, e.y, e.w, e.h);
+          else if (e.type === 'ellipse') ea.addEllipse(e.x, e.y, e.w, e.h);
+          else if (e.type === 'diamond') ea.addDiamond(e.x, e.y, e.w, e.h);
+          else if (e.type === 'line') ea.addLine(e.points);
+          else if (e.type === 'arrow') ea.addArrow(e.points);
+          else if (e.type === 'text') ea.addText(e.x, e.y, e.text);
+          if (e.text && e.type !== 'text') ea.addText(e.x + e.w / 2 - Math.min(e.w / 2 - 4, e.text.length * 5), e.y + e.h / 2 - 12, e.text);
+        }
+        await ea.create({ filename: name, foldername: folder, onNewPane: false, silent: true });
+        const embed = `![[${name}.excalidraw]]`;
+        out.push(Object.assign({}, o, { text: o.op === 'append' ? embed : o.after ? `\n\n${embed}` : `${embed}\n\n`, sketch: undefined, reason: o.reason || `a drawing, “${name}”` }));
+        reply.note(`Lagrange made the drawing “${name}” (an Excalidraw file next to the note). Undo takes it out of the note; the file stays in the vault.`, 'is-quiet');
+      } catch (e) {
+        console.error('Lagrange: the drawing could not be made', e);
+        reply.note(`A drawing could not be made: ${String((e && e.message) || e).slice(0, 160)}`, 'is-warn');
+      }
+    }
+    if (noTikz) reply.note(`${noTikz === 1 ? 'A figure' : `${noTikz} figures`} in TikZ ${noTikz === 1 ? 'was' : 'were'} left out: the TikZJax plugin is not installed or not turned on in this vault, so ${noTikz === 1 ? 'it' : 'they'} would show as code. Turn it on in Settings → Community plugins (search for “TikZJax”), then ask again.`, 'is-warn');
+    if (noSketch) reply.note(`${noSketch === 1 ? 'A drawing was' : `${noSketch} drawings were`} left out: the Excalidraw plugin is not installed or not turned on in this vault. Turn it on in Settings → Community plugins (search for “Excalidraw”), then ask again.`, 'is-warn');
+    return out;
+  }
+
   async applyChatEdits(view, note, parsed, reply, signal) {
     const task = {
       el: reply.el,
@@ -7291,16 +8560,44 @@ class LagrangePlugin extends Plugin {
       await this.ensureEditing(view);
       const cm = view.editor && view.editor.cm;
       const docText = cm ? cm.state.doc.toString() : view.editor.getValue();
-      const { located, skipped } = locateOps(docText, parsed.ops);
+      const ops = await this.makeDiagrams(view, parsed.ops, reply);
+      const { located, skipped } = locateOps(docText, ops);
       if (parsed.error) reply.note(`Some of the edits could not be read. ${parsed.error}`, 'is-warn');
       if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
-      return await this.applyEdits(view, located, skipped, task, signal);
+      const tikz = located.some(e => figureKinds(e.replace).tikz) && this.diagramPlugins().tikz;
+      const failedBefore = tikz ? this.noteFigures(view).failed : 0;
+      const result = await this.applyEdits(view, located, skipped, task, signal);
+      if (tikz) this.watchNoteFigures(view, reply, failedBefore);
+      return result;
     } catch (err) {
       this.reportFailure(err, task);
     } finally {
       this.editing = false;
     }
     return null;
+  }
+
+  /* How the TikZ figures of an open note stand: {waiting, drawn, failed} (see tikzState). */
+  noteFigures(view) {
+    const count = { waiting: 0, drawn: 0, failed: 0 };
+    if (view && view.contentEl) for (const b of view.contentEl.querySelectorAll('.block-language-tikz')) count[tikzState(b)]++;
+    return count;
+  }
+
+  /* After an edit that wrote a TikZ figure into the note: when TikZJax gives up on it, or has not drawn it after
+     TIKZ_WAIT, the chat says so (the note itself only shows a broken picture, or a spinner). Not waited for. */
+  async watchNoteFigures(view, reply, failedBefore, wait) {
+    const until = Date.now() + (wait == null ? TIKZ_WAIT : wait);
+    try {
+      for (;;) {
+        await sleep(250);
+        if (!view.containerEl.isConnected) return;
+        const now = this.noteFigures(view);
+        if (now.failed > failedBefore) { reply.note(tikzTrouble('failed', 'note', wait), 'is-warn'); return; }
+        if (!now.waiting) return;
+        if (Date.now() > until) { reply.note(tikzTrouble('late', 'note', wait), 'is-warn'); return; }
+      }
+    } catch (e) { /* the view has gone */ }
   }
 
   chatView() {
@@ -7494,10 +8791,11 @@ class LagrangePlugin extends Plugin {
       try { saved = await scriptorium.addDrawnDropcap({ set: want.set, letter: want.letter, bytes: drawn.bytes, kind: drawn.kind, mono: want.mono }); }
       catch (e) { throw new LagrangeError(`The drawing could not be kept: ${e.message}.`, { reply: drawn.kind === 'svg' ? new TextDecoder().decode(drawn.bytes) : undefined }); }
       await scriptorium.setNoteDropcap(view.file, `set:${saved.set}`);
-      // show it: Reading view is where drop caps are drawn
+      // show it: where drop caps are drawn (Reading view; Live Preview too, if Scriptorium's setting for that is on)
       try {
         const state = view.leaf.getViewState();
-        if (state.state && state.state.mode !== 'preview') { state.state.mode = 'preview'; await view.leaf.setViewState(state); }
+        const live = Boolean(scriptorium.dropcapLive) && state.state && state.state.mode === 'source' && !state.state.source;
+        if (state.state && state.state.mode !== 'preview' && !live) { state.state.mode = 'preview'; await view.leaf.setViewState(state); }
       } catch (e) { /* stays in the editor */ }
       window.setTimeout(() => { try { scriptorium.previewDropcap(view, `set:${saved.set}`); } catch (e) { /* the view has gone */ } }, 350);
       if (task) task.done(`${want.change ? 'Changed' : 'Drawn'}: ${saved.file}. It is this note’s drop cap now (the “dropcap” property), wherever a chapter opens with ${want.letter}.`);
@@ -7552,4 +8850,7 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
+  clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
+  ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
+Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

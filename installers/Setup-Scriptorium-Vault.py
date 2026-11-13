@@ -44,6 +44,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.request
@@ -51,7 +52,7 @@ import zipfile
 from pathlib import Path
 
 PACKAGE_URL = "https://williamliaw.com/assets/downloads/Scriptorium.zip"
-PACKAGE_SHA256 = "d6410e6ce88d497aca0b69d6cb7c1d9d8aa8ba78bbf173c90dc2e42fb9287091"   # the same pin as the installers'
+PACKAGE_SHA256 = "f2d91be389e29b0004cdb59776cb37605f5fc43adcedef2e627d36e0aec92209"   # the same pin as the installers'
 
 OBS = ".obsidian"
 BACKUP_PREFIX = "scriptorium-backup-"
@@ -108,6 +109,111 @@ def download_package():
     if digest != PACKAGE_SHA256:
         raise SetupError(f"The download does not match its pinned SHA-256 (got {digest}); nothing was changed.")
     return data
+
+
+# The two community plugins that draw diagrams (Lagrange writes TikZ figures and Excalidraw drawings). They are not
+# part of Scriptorium: each is downloaded from its own GitHub release, at a pinned version, and every file is checked
+# against its SHA-256 before anything is written. TikZJax is MIT-licensed; the Excalidraw plugin is AGPL-3.0.
+DIAGRAM_PLUGINS = [
+    {"id": "obsidian-tikzjax", "name": "TikZJax", "version": "0.5.2",
+     "base": "https://github.com/artisticat1/obsidian-tikzjax/releases/download/0.5.2/",
+     "files": {"main.js": "cbae1ad4362d44173e56ba512f01e65de1f7cc69a4bf4733bc5711a2de101f41",
+               "manifest.json": "09fbbb05aeffc32bc65365d8526fc2222ee971417dcd4afddeb989498a5e1de1",
+               "styles.css": "d9a7f741ec8fdcbe5e0145152c799238cee8df5a14ddc7dc9feb3bb835ce068d"}},
+    {"id": "obsidian-excalidraw-plugin", "name": "Excalidraw", "version": "2.29.2",
+     "base": "https://github.com/zsviczian/obsidian-excalidraw-plugin/releases/download/2.29.2/",
+     "files": {"main.js": "49dfc5667a7730dbc124cdfc2a4a8e89188100636493a39d6493bf5696a55541",
+               "manifest.json": "8e82828fd9125615e8a361d0f15553e548cac2ee7a303e55387378a53b925fd9",
+               "styles.css": "6c7a9914f83305d09f9957248897ff2f25cf2c2d4b46b2d9ab42f3c7ee1d29f0"}},
+]
+
+
+def version_key(text):
+    key = [int(n) for n in re.findall(r"\d+", str(text))[:4]]
+    return key + [0] * (4 - len(key))   # 0.5 is 0.5.0
+
+
+def fetch_url(url):
+    request = urllib.request.Request(url, headers={"User-Agent": "Setup-Scriptorium-Vault/1.3"})
+    with urllib.request.urlopen(request, timeout=180) as r:   # https only: the addresses are fixed above
+        return r.read()
+
+
+def first_settings(plugin):
+    """The data.json written with a plugin that is installed new, where it has none: None, or its bytes. Excalidraw
+    opens a "Welcome to Excalidraw" window the first time it runs, when its previousRelease is older than the
+    plugin (src/core/main.ts in its source); closing that window sets previousRelease to the plugin's version
+    (src/shared/Dialogs/ReleaseNotes.ts). This writes that one setting, so the window does not open in a vault the
+    writer has just been given; Excalidraw fills in every other setting with its defaults when it loads, and still
+    shows its release notes after a later update (showReleaseNotes is left alone)."""
+    if plugin["id"] != "obsidian-excalidraw-plugin":
+        return None
+    return ('{\n  "previousRelease": "%s"\n}\n' % plugin["version"]).encode("utf-8")
+
+
+def install_diagram_plugins(vault, fetch=fetch_url, log=print):
+    """Adds the diagram plugins to the vault and turns on those it installs new. A plugin the vault already has at
+    the pinned version or a newer one is left exactly as it is (its files and its settings); an older copy's files
+    are replaced. A plugin that was already there is not turned on if it was off: that is the writer's choice. One
+    that cannot be downloaded or does not match its checksum is not installed, the rest of the set-up stands, and
+    the log says how to add it by hand.
+    Returns {id: 'installed' | 'updated' | 'kept' | 'failed'}."""
+    result = {}
+    plugins = vault / OBS / "plugins"
+    for p in DIAGRAM_PLUGINS:
+        folder = plugins / p["id"]
+        had = None
+        try:
+            had = json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("version")
+        except (OSError, ValueError):
+            had = None
+        if had is not None and version_key(had) >= version_key(p["version"]) and (folder / "main.js").is_file():
+            result[p["id"]] = "kept"
+            log(f"{p['name']} {had} is already in this vault: left as it is.")
+        else:
+            try:
+                files = {}
+                for name, digest in p["files"].items():
+                    data = fetch(p["base"] + name)
+                    if hashlib.sha256(data).hexdigest() != digest:
+                        raise OSError(f"{name} does not match its pinned SHA-256")
+                    files[name] = data
+                folder.mkdir(parents=True, exist_ok=True)
+                for name, data in files.items():       # (settings that are there, data.json, are never touched)
+                    tmp = folder / (name + ".scriptorium-tmp")
+                    tmp.write_bytes(data)
+                    os.replace(tmp, folder / name)
+                settings = first_settings(p) if had is None else None
+                if settings is not None and not (folder / "data.json").exists():
+                    (folder / "data.json").write_bytes(settings)
+                result[p["id"]] = "updated" if had is not None else "installed"
+                log(f"{p['name']} {p['version']} {'updated' if had is not None else 'installed'} (from its own release on GitHub).")
+            except (OSError, ValueError) as e:
+                result[p["id"]] = "failed"
+                log(f"{p['name']} was NOT installed ({e}). Scriptorium itself is set up. To add it: in Obsidian, "
+                    f"Settings → Community plugins → Browse, search for “{p['name']}”, Install, then Enable.")
+                continue
+        # Only a plugin installed new is turned on, next to the plugins the vault already has on: one that was
+        # there and is not in the list was turned off by the writer, and stays off. (A list that is not a JSON list is
+        # left as it is.)
+        if result[p["id"]] != "installed":
+            continue
+        listing = vault / OBS / "community-plugins.json"
+        on = []
+        if listing.exists():
+            try:
+                on = json.loads(listing.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                on = None
+            if not isinstance(on, list):
+                log(f"Left community-plugins.json as it was (it is not a valid JSON list): turn {p['name']} on in "
+                    "Settings → Community plugins.")
+                continue
+        if p["id"] not in on:
+            on.append(p["id"])
+            listing.parent.mkdir(parents=True, exist_ok=True)
+            listing.write_text(json.dumps(on, indent=2) + "\n", encoding="utf-8")
+    return result
 
 
 def write_json(value):
@@ -329,6 +435,8 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
     parser.add_argument("--yes", action="store_true", help="do not ask before changing the vault")
     parser.add_argument("--package", help="a Scriptorium.zip, or a Scriptorium vault folder, to take the files from")
+    parser.add_argument("--no-diagram-plugins", action="store_true", help="do not download the TikZJax and Excalidraw plugins")
+    parser.add_argument("--plugins-from", help=argparse.SUPPRESS)   # for the tests: a folder that stands in for the releases
     args = parser.parse_args(argv)
     try:
         vault = Path(args.vault).expanduser().resolve()
@@ -340,10 +448,33 @@ def main(argv=None):
         version = (read_json(package[f"{OBS}/plugins/scriptorium/manifest.json"], dict) or {}).get("version", "?")
         changes, notes = plan(package, vault)
         print(f"Scriptorium {version} in {vault}")
+        def diagrams():
+            # (SCRIPTORIUM_NO_DIAGRAM_PLUGINS: the tests of everything else, which must not need the network)
+            if args.no_diagram_plugins or os.environ.get("SCRIPTORIUM_NO_DIAGRAM_PLUGINS"):
+                return
+            if args.dry_run:
+                for p in DIAGRAM_PLUGINS:
+                    folder = vault / OBS / "plugins" / p["id"]
+                    try:
+                        had = json.loads((folder / "manifest.json").read_text(encoding="utf-8")).get("version")
+                    except (OSError, ValueError, AttributeError):
+                        had = None
+                    if not (had is not None and version_key(had) >= version_key(p["version"]) and (folder / "main.js").is_file()):
+                        print(f"  download {OBS}/plugins/{p['id']}: {p['name']} {p['version']}, from its own release on GitHub"
+                              + (f" (in place of your {had})" if had is not None else ""))
+                return
+            fetch = fetch_url
+            if args.plugins_from:      # <folder>/<plugin id>/<file>
+                def fetch(url):
+                    plugin = next(p for p in DIAGRAM_PLUGINS if url.startswith(p["base"]))
+                    return (Path(args.plugins_from) / plugin["id"] / url[len(plugin["base"]):]).read_bytes()
+            install_diagram_plugins(vault, fetch)
+
         if not changes:
             for line in describe([], notes):
                 print(line)
             print("Scriptorium is already set up here: nothing to change.")
+            diagrams()
             return 0
         replaced = sum(1 for c in changes if c["replaces"])
         print(f"{'Would change' if args.dry_run else 'Changes'}: {len(changes) - replaced} file(s) to add, {replaced} to replace or merge.")
@@ -353,6 +484,7 @@ def main(argv=None):
               (" The .obsidian folder as it is now is copied to .obsidian/scriptorium-backup-<time> first."
                if (vault / OBS).is_dir() else ""))
         if args.dry_run:
+            diagrams()
             return 0
         if not args.yes:
             if not sys.stdin.isatty():
@@ -361,6 +493,7 @@ def main(argv=None):
                 print("Nothing was changed.")
                 return 0
         backup = apply(vault, changes)
+        diagrams()
         print(f"Done: added {len(changes) - replaced} file(s), replaced or merged {replaced}." +
               (f" To undo, put back the files from {backup}." if backup else ""))
         print("Open the vault in Obsidian and, when it asks, choose “Trust author and enable plugins”. "

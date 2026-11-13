@@ -29,8 +29,12 @@ test('the plugin module exports the plugin class and its helpers', () => {
 });
 
 test('settings: defaults, checked values, unknown keys kept', () => {
-  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', marginalia: true, imageFocus: true });
-  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', marginalia: true, imageFocus: true });
+  assert.deepEqual(S.normalizeSettings(undefined), { fancyMode: false, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true });
+  assert.deepEqual(S.normalizeSettings({ fancyMode: true }), { fancyMode: true, initials: 'yinit', liveDropcaps: false, marginalia: true, imageFocus: true });
+  // drop caps while editing: off by default, and off for a vault that was set up before there was such a setting
+  assert.equal(S.normalizeSettings({ fancyMode: false, initials: 'goudy', marginalia: true, imageFocus: true, pdfTitleSet: true }).liveDropcaps, false);
+  assert.equal(S.normalizeSettings({ liveDropcaps: true }).liveDropcaps, true);
+  assert.equal(S.normalizeSettings({ liveDropcaps: 'yes' }).liveDropcaps, false);
   const s = S.normalizeSettings({ initials: 'goudy', marginalia: false, imageFocus: 'no', future: 3 });
   assert.equal(s.initials, 'goudy');
   assert.equal(s.marginalia, false);
@@ -937,4 +941,277 @@ test('aligned text: the plugin registers its commands by id, and everything that
   for (const id of ['align-center', 'align-right', 'align-remove', 'aligned-dropcap-on', 'aligned-dropcap-off']) assert.ok(src.includes(`'${id}'`), id);
   for (const name of ['Centre selection', 'Right-align selection', 'Remove alignment', 'Use a drop cap on this aligned paragraph', 'Remove the drop cap from this aligned paragraph']) assert.ok(src.includes(name), name);
   assert.match(src, /Also on centred and right-aligned text/);
+});
+
+test('Setting up a vault adds the TikZJax and Excalidraw plugins: fresh, already there, and a download that fails', async () => {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto');
+  const S = require(path.join(__dirname, '..', 'vault', '.obsidian', 'plugins', 'scriptorium', 'main.js'));
+  // the same pins as the installers'
+  const py = fs.readFileSync(path.join(__dirname, '..', 'installers', 'Setup-Scriptorium-Vault.py'), 'utf8');
+  for (const p of S.DIAGRAM_PLUGINS) for (const digest of Object.values(p.files)) assert.ok(py.includes(digest), `${p.name}: ${digest.slice(0, 8)} is pinned by the installers too`);
+  assert.ok(S.versionAtLeast('2.29.2', '2.29.2') && S.versionAtLeast('2.30.0', '2.29.2') && S.versionAtLeast('10.0', '9.9.9') && !S.versionAtLeast('2.29.1', '2.29.2') && !S.versionAtLeast('0.5', '0.5.2'));
+  // stand-ins for the two releases
+  const content = new Map();
+  const plugins = S.DIAGRAM_PLUGINS.map(p => {
+    const files = { 'main.js': `// ${p.id}`, 'styles.css': '/* css */', 'manifest.json': JSON.stringify({ id: p.id, version: p.version }) };
+    for (const [name, text] of Object.entries(files)) content.set(p.base + name, Buffer.from(text));
+    return Object.assign({}, p, { files: Object.fromEntries(Object.entries(files).map(([n, t]) => [n, crypto.createHash('sha256').update(t).digest('hex')])) });
+  });
+  const [tikz, ex] = plugins;
+  const fetch = async url => { if (!content.has(url)) throw new Error('offline'); return content.get(url); };
+  const vault = on => { const v = fs.mkdtempSync(path.join(os.tmpdir(), 'scriptorium-diagrams-js-')); fs.mkdirSync(path.join(v, '.obsidian')); fs.writeFileSync(path.join(v, '.obsidian', 'community-plugins.json'), JSON.stringify(on)); return v; };
+  const on = v => JSON.parse(fs.readFileSync(path.join(v, '.obsidian', 'community-plugins.json'), 'utf8'));
+  // fresh
+  let v = vault(['scriptorium']);
+  assert.deepEqual(S.diagramPluginsWanted(fs, path, v, plugins), ['TikZJax', 'Excalidraw']);
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'installed' });
+  assert.deepEqual(on(v), ['scriptorium', tikz.id, ex.id]);
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'main.js'), 'utf8'), `// ${ex.id}`);
+  // Excalidraw, installed new, gets the one setting that keeps its welcome window shut; TikZJax gets none
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json'), 'utf8'), `{\n  "previousRelease": "${ex.version}"\n}\n`);
+  assert.ok(!fs.existsSync(path.join(v, '.obsidian', 'plugins', tikz.id, 'data.json')));
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, async () => { throw new Error('must not download again'); }, plugins), { [tikz.id]: 'kept', [ex.id]: 'kept' });
+  assert.deepEqual(S.diagramPluginsWanted(fs, path, v, plugins), []);
+  // a newer copy and its settings are left alone
+  v = vault([ex.id]);
+  const dir = path.join(v, '.obsidian', 'plugins', ex.id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ id: ex.id, version: '99.0.0' }));
+  fs.writeFileSync(path.join(dir, 'main.js'), '// newer');
+  fs.writeFileSync(path.join(dir, 'data.json'), '{"theirs":true}');
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'kept' });
+  assert.equal(fs.readFileSync(path.join(dir, 'main.js'), 'utf8'), '// newer');
+  assert.equal(fs.readFileSync(path.join(dir, 'data.json'), 'utf8'), '{"theirs":true}');
+  assert.deepEqual(on(v), [ex.id, tikz.id]);
+  // an older copy is replaced, its settings kept; a plugin list that is not a list is left as it is
+  v = vault({ not: 'a list' });
+  const old = path.join(v, '.obsidian', 'plugins', tikz.id);
+  fs.mkdirSync(old, { recursive: true });
+  fs.writeFileSync(path.join(old, 'manifest.json'), JSON.stringify({ id: tikz.id, version: '0.1.0' }));
+  fs.writeFileSync(path.join(old, 'main.js'), '// old');
+  fs.writeFileSync(path.join(old, 'data.json'), '{"mine":1}');
+  assert.deepEqual(S.diagramPluginsWanted(fs, path, v, plugins), ['TikZJax', 'Excalidraw']);
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'updated', [ex.id]: 'installed' });
+  assert.equal(fs.readFileSync(path.join(old, 'main.js'), 'utf8'), `// ${tikz.id}`);
+  assert.equal(fs.readFileSync(path.join(old, 'data.json'), 'utf8'), '{"mine":1}');
+  assert.deepEqual(on(v), { not: 'a list' });
+  // installed and turned off: stays off (an older copy's files are still updated), and gets no settings; settings
+  // that are there without the plugin are kept byte for byte
+  v = vault(['calendar']);
+  for (const [p, version] of [[ex, ex.version], [tikz, '0.1.0']]) {
+    const d = path.join(v, '.obsidian', 'plugins', p.id);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'manifest.json'), JSON.stringify({ id: p.id, version }));
+    fs.writeFileSync(path.join(d, 'main.js'), '// off');
+  }
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'updated', [ex.id]: 'kept' });
+  assert.deepEqual(on(v), ['calendar']);
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', tikz.id, 'main.js'), 'utf8'), `// ${tikz.id}`);
+  assert.ok(!fs.existsSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json')));
+  v = vault([]);
+  fs.mkdirSync(path.join(v, '.obsidian', 'plugins', ex.id), { recursive: true });
+  fs.writeFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json'), '{"previousRelease":"1.0.0",  "mine": true}');
+  assert.deepEqual(await S.installDiagramPlugins(fs, path, crypto, v, fetch, plugins), { [tikz.id]: 'installed', [ex.id]: 'installed' });
+  assert.equal(fs.readFileSync(path.join(v, '.obsidian', 'plugins', ex.id, 'data.json'), 'utf8'), '{"previousRelease":"1.0.0",  "mine": true}');
+  // a failed download, and a file that does not match: nothing of that plugin is written, and it is not turned on
+  v = vault(['scriptorium']);
+  const r = await S.installDiagramPlugins(fs, path, crypto, v, async url => (url.startsWith(tikz.base) ? Promise.reject(new Error('offline')) : url.endsWith('styles.css') ? Buffer.from('tampered') : content.get(url)), plugins);
+  assert.deepEqual(r, { [tikz.id]: 'failed', [ex.id]: 'failed' });
+  assert.ok(!fs.existsSync(path.join(v, '.obsidian', 'plugins')));
+  assert.deepEqual(on(v), ['scriptorium']);
+  assert.match(S.diagramPluginsNote(r), /TikZJax and Excalidraw could not be downloaded: to add them, open the vault and use Settings → Community plugins → Browse\./);
+  assert.equal(S.diagramPluginsNote({ [tikz.id]: 'kept', [ex.id]: 'kept' }), '');
+  assert.match(S.diagramPluginsNote({ [tikz.id]: 'installed', [ex.id]: 'kept' }), /^TikZJax was added for diagrams\.$/);
+});
+
+// ---- Drop caps in Live Preview: which lines of the note open a chapter, and what they are given ----
+
+const openings = text => S.openingPlan(text.split('\n'));
+const openLines = text => openings(text).map(o => o.line);
+
+test('drop caps in Live Preview: the note is read into the blocks Reading view draws', () => {
+  const blocks = text => S.noteBlocks(text.split('\n'), 0).map(b => `${b.type}${b.level || ''}:${b.from}-${b.to}`);
+  assert.deepEqual(blocks('# One\nText under it\nand its second line\n\n> a quote\nlazily continued\n\n> [!note] A callout\n> text'),
+    ['heading1:0-0', 'p:1-2', 'quote:4-5', 'other:7-8']);
+  assert.deepEqual(blocks('Title\n=====\n\nA paragraph\n-----\n\n---\n\n***'), ['heading1:0-1', 'heading2:3-4', 'other:6-6', 'other:8-8'], 'headings underlined, and rules');
+  assert.deepEqual(blocks('```js\n\n# not a heading\n```\nAfter\n\n~~~\nopen to the end'), ['other:0-3', 'p:4-4', 'other:6-7'], 'code, closed or not');
+  assert.deepEqual(blocks('- one\n- two\n\n- three\n\n  set in\n\nAfter the list'), ['other:0-5', 'p:7-7'], 'a list keeps its items and what is set in under them');
+  assert.deepEqual(blocks('Text\n- a list right under it\n\nText\n2. no list: only 1. begins one there'), ['p:0-0', 'other:1-1', 'p:3-4']);
+  assert.deepEqual(blocks('$$\nx\n\ny\n$$\n\n$$x$$\n\n%%\na comment\n\nstill\n%%\n\n%% in a line %% text'), ['other:0-4', 'other:6-6', 'other:8-12', 'p:14-14'], 'mathematics and comments run over blank lines');
+  assert.deepEqual(blocks('| a | b |\n| - | - |\n| 1 | 2 |\n\n<div>\nhtml\n</div>\n\n[^1]: a note\n    set in\n\nAfter it\n\n    code set in'), ['other:0-2', 'other:4-6', 'other:8-9', 'p:11-11', 'other:13-13']);
+  assert.deepEqual(blocks('a | b\nno table without its rule'), ['p:0-1']);
+  assert.deepEqual(S.noteBlocks(['---', 'a: 1', '---', 'Text'], 3).map(b => b.from), [3], 'the properties are no block of the text');
+});
+
+test('drop caps in Live Preview: the paragraphs that open a chapter are the ones Reading view gives a drop cap', () => {
+  assert.deepEqual(openLines('First paragraph.\n\nSecond.'), [0], 'the top of a note without properties');
+  assert.deepEqual(openLines('\n\nFirst paragraph.'), [2]);
+  assert.deepEqual(openLines('---\ntags: [a]\n---\nFirst paragraph.\n\n# One\n\nUnder it.'), [7], 'not under properties: the snippet opens no chapter there either');
+  assert.deepEqual(openLines('# One\nRight under it.\n\n## Two\n\nUnder two.\n\n###### Six\n\nUnder six.\n\nNot this one.'), [1, 5, 9]);
+  assert.deepEqual(openLines('### Three\n\nNo.\n\n#### Four\n\nNo.\n\n##### Five\n\nNo.'), [], 'only headings 1, 2 and 6');
+  assert.deepEqual(openLines('Title\n=====\n\nUnder it.\n\nSub\n---\n\nUnder that.'), [3, 8], 'headings underlined');
+  assert.deepEqual(openLines('## Two\n\n> An epigraph,\n> in two lines.\n\nAfter the epigraph.\n\nNo.'), [5], 'one quotation may stand between');
+  assert.deepEqual(openLines('## Two\n\n> One.\n\n> Two.\n\nNo.'), [], 'one, not two');
+  assert.deepEqual(openLines('## Two\n\n> [!note] A callout\n> text\n\nNo.'), [], 'a callout is no epigraph');
+  for (const between of ['- a list', '1. a list', '```\ncode\n```', '---', '| a | b |\n| - | - |', '$$\nx\n$$', '<div>html</div>', '[^1]: a footnote', '%%\na comment\n%%', '    code set in', '### A smaller heading']) {
+    assert.deepEqual(openLines(`## Two\n\n${between}\n\nNo.`), [], between);
+  }
+  assert.deepEqual(openLines('## Two\n\nA paragraph of\nthree lines\nin the note.\n\nNo.'), [2], 'the paragraph’s first line');
+  assert.deepEqual(openLines('## Two\n- a list right under the heading\n\nNo.'), []);
+  assert.deepEqual(openLines('## Two\n\n```\n## not a heading\n\nNot a paragraph.\n```'), []);
+  // the paragraph is there, and opens the chapter, but has no letter to set
+  for (const lead of ['![[picture.png]]', '![alt](picture.png) text', '$x$ is a number.', '%% a comment %%', '<span>marked up</span> text']) {
+    assert.deepEqual(openLines(`## Two\n\n${lead}\n\nNo.`), [], lead);
+  }
+  const led = text => openings(`## Two\n\n${text}`).map(o => o.led);
+  assert.deepEqual(led('Plain words.'), [false]);
+  assert.deepEqual(led('“Quoted,” she said.'), [false], 'a quotation mark is part of the initial in both views');
+  for (const text of ['**Bold** words.', '*Emphasis* first.', '_Emphasis_ first.', '[[A link]] first.', '[A link](https://example.com) first.', '==Marked== first.', '~~Struck~~ first.', '`code` first.']) assert.deepEqual(led(text), [true], text);
+});
+
+test('drop caps in Live Preview: aligned text has none unless it asks, a standing initial if it does, and the chapter opens after it', () => {
+  const VERSE2 = ['Tyger Tyger, burning bright,', 'In the forests of the night;'];
+  const block = (kind, ...lines) => [`::: ${kind}`, ...lines, ':::', ''];
+  const text = ['## Verse', '', ...block('center', ...VERSE2), ...block('right', '— Blake'), 'The prose after it.', '', 'No.'].join('\n');
+  assert.deepEqual(openings(text).map(o => [o.line, o.standing]), [[11, false]], 'the first paragraph that is not aligned');
+  const asked = ['## Verse', '', ...block('center dropcap', ...VERSE2), 'The prose after it.'].join('\n');
+  assert.deepEqual(openings(asked).map(o => [o.line, o.standing, o.text]), [[3, true, VERSE2.join('\n')]], 'the line after the marker, and not the paragraph after the block');
+  // an initial that is a word by itself: the space after it is marked (Reading view sets none at the head of the line)
+  const gap = line => openings(`## Two\n\n${line}`).map(o => o.gap);
+  assert.deepEqual(gap('A body at rest stays at rest.'), [[1, 2]]);
+  assert.deepEqual(gap('“I” is a word by itself.'), [[3, 4]]);
+  assert.deepEqual(gap('**A** body, in bold.'), [[5, 6]]);
+  assert.deepEqual(gap('At rest a body stays.'), [null]);
+  assert.deepEqual(gap('A'), [null]);
+  assert.deepEqual(gap('::: center dropcap\nA body at rest\n:::'), [null], 'beside a standing initial the space is a space');
+  const note = ['---', 'align: center', '---', '## Verse', '', ...VERSE2, '', 'More.'].join('\n');
+  assert.deepEqual(openLines(note), [], 'a note that is centred as a whole');
+  assert.deepEqual(openings(note.replace('align: center', 'align: center\ndropcap-aligned: true')).map(o => [o.line, o.standing]), [[6, true]]);
+  assert.deepEqual(openLines(['## Verse', '', '::: center dropcap', '', ...VERSE2, '', ':::', '', 'Prose.'].join('\n')), [4], 'markers that stand apart from the stanza');
+  assert.deepEqual(openLines(['## Verse', '', '::: center', ':::', '', 'Prose.'].join('\n')), [5], 'a block of nothing but its markers');
+});
+
+test('drop caps in Live Preview: the note’s own choice is read from its lines, as its properties will say it', () => {
+  const said = (...props) => { const lines = ['---', ...props, '---', 'Text']; return S.linesDropcap(lines, props.length + 2); };
+  assert.equal(said('dropcap: goudy'), 'goudy');
+  assert.equal(said('tags: [a]', 'dropcap: "Goudy Initialen"'), 'goudy');
+  assert.equal(said('dropcap: none'), 'none');
+  assert.equal(said('dropcap: false'), 'none');
+  assert.equal(said('dropcap: Dropcat   # the cats'), 'set:Dropcat');
+  assert.equal(said("drop-cap: 'plain'"), 'plain');
+  assert.equal(said('dropcap:'), null);
+  assert.equal(said('title: dropcap: goudy'), null);
+  assert.equal(said('dropcap: yinit', 'drop-cap: goudy'), 'yinit', 'the same key first as noteDropcap');
+  assert.equal(S.linesDropcap(['dropcap: goudy', 'Text'], 0), null, 'only in the properties');
+  for (const v of ['goudy', 'Plain capital', 'none', 'My initials', 'no']) assert.equal(said(`dropcap: ${v}`), S.noteDropcap({ dropcap: v }), v);
+});
+
+test('drop caps in Live Preview: a line is read as it is shown (its opening words choose a drop cap’s image)', () => {
+  assert.equal(S.shownLine('**Bold** and *emphasis* and _this_ and ==marked== and ~~struck~~ and `code`.'), 'Bold and emphasis and this and marked and struck and code.');
+  assert.equal(S.shownLine('[[A note]] and [[A note|its name]] and [a link](https://example.com/a_b).'), 'A note and its name and a link.');
+  assert.equal(S.shownLine('snake_case stays, 2 * 3 loses its star only'), 'snake_case stays, 2  3 loses its star only');
+  assert.equal(S.shownLine('A note[^1] with %%a comment%% and ![[a picture.png]] and <b>html</b>.'), 'A note with  and  and html.');
+  assert.equal(S.shownLine('\\*not emphasis\\* and \\[no link\\]'), '*not emphasis* and [no link]', 'an escaped mark is a character');
+  assert.equal(openings('## Two\n\n**Tyger** Tyger,\nburning bright.   \n\nNo.')[0].text, 'Tyger Tyger,\nburning bright.');
+});
+
+test('drop caps in Live Preview: an opening line is given the classes and properties a block of Reading view is given', () => {
+  const o = { line: 2, text: 'Tyger Tyger, burning bright', standing: false, led: false };
+  const line = (...args) => S.openingLine(o, ...args);
+  assert.deepEqual(line(null, null, 'yinit', 'a.md'), { classes: 'scriptorium-opening', style: '' }, 'the vault’s: the classes on body do the rest');
+  assert.deepEqual(line('goudy', null, 'yinit', 'a.md'), { classes: 'scriptorium-opening scriptorium-dropcap scriptorium-dropcap-goudy', style: '' });
+  assert.equal(line('none', null, 'yinit', 'a.md'), null, 'the note says none');
+  assert.equal(line(null, null, 'none', 'a.md'), null, 'the vault says none');
+  assert.ok(line('plain', null, 'none', 'a.md'), 'the note’s choice outranks the vault’s None');
+  assert.equal(S.openingLine(Object.assign({}, o, { standing: true }), null, null, 'yinit', 'a.md').classes, 'scriptorium-opening scriptorium-align-dropcap');
+  assert.equal(line(null, null, 'yinit', 'a.md', null, true).classes, 'scriptorium-opening scriptorium-dropcap-inked');
+  const font = { kind: 'font', family: 'Scriptorium Set Kanzlei', size: 3.95, margin: '0.2em 0.12em -0.1em 0' };
+  const f = line('set:Kanzlei', font, 'yinit', 'a.md');
+  assert.equal(f.classes, 'scriptorium-opening scriptorium-dropcap scriptorium-dropcap-font');
+  assert.match(f.style, /--scriptorium-initial-font: "Scriptorium Set Kanzlei", var\(--manuscript-display\); --scriptorium-initial-size: 3\.95em; --scriptorium-initial-margin: 0\.2em 0\.12em -0\.1em 0/);
+  const images = { kind: 'images', mono: true, letters: { T: { light: ['app://x/T-1.png', 'app://x/T-2.png'], dark: ['app://x/T-dark.png'] } } };
+  const i = line('set:Cats', images, 'yinit', 'a.md', url => (url.includes('dark') ? 0 : 1.25));
+  assert.equal(i.classes, 'scriptorium-opening scriptorium-dropcap scriptorium-dropcap-image scriptorium-dropcap-mono');
+  assert.match(i.style, /--scriptorium-dropcap-light: url\("app:\/\/x\/T-[12]\.png"\); --scriptorium-dropcap-dark: url\("app:\/\/x\/T-dark\.png"\); --scriptorium-dropcap-ratio: 1\.25$/);
+  // the same image as Reading view chooses for the same paragraph of the same note
+  const el = { classList: { list: [], add(...c) { this.list.push(...c); }, remove() {}, [Symbol.iterator]: function* () {} }, style: { set: {}, setProperty(k, v) { this.set[k] = v; }, removeProperty() {} },
+    querySelector: () => ({ childNodes: null, textContent: o.text }) };
+  S.markDropcap(el, 'set:Cats', images, 'a.md');
+  assert.ok(i.style.includes(`--scriptorium-dropcap-light: ${el.style.set['--scriptorium-dropcap-light']}`));
+  // a set without the paragraph's letter: the vault's drop cap, or none if the vault has none
+  const noT = { kind: 'images', letters: { B: { light: ['app://x/B.png'] } } };
+  assert.deepEqual(line('set:Cats', noT, 'goudy', 'a.md'), { classes: 'scriptorium-opening', style: '' });
+  assert.equal(line('set:Cats', noT, 'none', 'a.md'), null);
+});
+
+test('drop caps in Live Preview: the snippet sets the editor’s opening line with the rules it has for Reading view, in Live Preview only', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8').replace(/url\("data:[^"]*"\)/g, 'url()');
+  const LP = '.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening';
+  // every rule for the paragraph after an epigraph has the editor's line in its list of selectors (so: the same declarations)
+  const rules = css.split('}').map(r => r.slice(0, r.indexOf('{') < 0 ? r.length : r.indexOf('{'))).filter(sel => /\.el-blockquote \+ \.el-p[^,]*$/.test(sel.trim()) && !/scriptorium-initials-none|@media print|hyphens/.test(sel));
+  assert.ok(rules.length >= 15, String(rules.length));
+  for (const sel of rules) {
+    if (/^\s*(?:@media[^{]*\{\s*)?\.markdown-rendered :is\(/.test(sel) && /-none/.test(sel)) continue;   // "None" is said in the plugin: such a line is not an opening line at all
+    assert.ok(sel.includes(LP), sel.trim().slice(-160));
+  }
+  for (const mode of [':where(body:not(.scriptorium-fancy))', ':where(body.scriptorium-fancy)']) {
+    assert.ok(css.includes(`${mode} ${LP}::first-letter,`), mode);
+    assert.ok(css.includes(`${mode} ${LP}::first-line,`), mode);
+  }
+  assert.ok(css.includes(`:where(body:not(.scriptorium-fancy)) ${LP}:not(.scriptorium-align-dropcap),`), 'the opening paragraph is not justified in normal mode');
+  for (const which of ['goudy', 'plain', 'yinit', 'font', 'image']) assert.ok(css.includes(`.cm-line.scriptorium-dropcap-${which}`), which);
+  // Source mode stays plain: no rule reaches an opening line outside Live Preview
+  for (const line of css.split('\n')) if (line.includes('.cm-line.scriptorium-opening')) assert.ok(line.includes('.is-live-preview '), line.slice(0, 160));
+  assert.match(css, /\.cm-line\.scriptorium-opening \.sc-keep,\s*\.markdown-rendered \.sc-keep \{\s*white-space: nowrap;/);
+});
+
+test('drop caps in Live Preview: the plugin registers the extension, never changes the note for it, and previews in the editor too', () => {
+  const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
+  // a setting, off by default: what is registered is an empty list, and the extension is made only when it is turned on
+  assert.match(src, /this\.liveExtensions = \[\];\s*try \{ this\.registerEditorExtension\(this\.liveExtensions\); \}/);
+  assert.equal(src.split('dropcapExtension(this)').length - 1, 1, 'made in one place only');
+  assert.match(src, /this\.dropcapLive = on \? dropcapExtension\(this\) : null;/);
+  assert.match(src, /'toggle-live-dropcaps'/);
+  assert.match(src, /Show drop caps while editing \(Live Preview\)/);
+  const ext = src.slice(src.indexOf('function dropcapExtension('), src.indexOf('Export to PDF: the page as Reading view sets it'));
+  assert.doesNotMatch(ext, /changes\s*:/, 'decorations only: no change to the text');
+  assert.doesNotMatch(ext, /Decoration\.(?:replace|widget)/, 'the letter stays the note’s own text');
+  assert.match(ext, /Decoration\.line\(/);
+  assert.match(src, /previewDropcap\(view, which, quiet\) \{\s*this\.previewLive\(view, which, quiet\);/);
+  assert.equal(typeof S.dropcapExtension, 'function');
+});
+
+test('drop caps in Live Preview: off, nothing is put into the editors; on and off again takes effect at once', () => {
+  // the plugin's own method, on a stand-in for the plugin: the list Obsidian was given, and whether the editors were told
+  const made = [];
+  const realLoad2 = Module._load;
+  Module._load = function (request, ...rest) {
+    if (request === '@codemirror/state') {
+      const def = { define: () => ({ of: v => v, is: () => false }) };
+      return { StateField: { define: spec => ({ spec }) }, StateEffect: def, RangeSetBuilder: class {}, Prec: { highest: x => x } };
+    }
+    if (request === '@codemirror/view') return { Decoration: { mark: () => ({}), line: () => ({}), none: {} }, EditorView: { decorations: { from: () => ({}) }, domEventHandlers: h => h }, ViewPlugin: { fromClass: c => c } };
+    if (request === 'obsidian') return {};
+    return realLoad2.call(this, request, ...rest);
+  };
+  try {
+    let told = 0;
+    const plugin = { settings: S.normalizeSettings({}), liveExtensions: made, dropcapLive: null, app: { workspace: { updateOptions: () => { told++; } } } };
+    const apply = () => S.prototype.applyLiveDropcaps.call(plugin);
+    apply();
+    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 0], 'off by default: nothing registered, no editor touched');
+    // and with it off the plugin's calls into the editors do nothing
+    S.prototype.refreshEditors.call(plugin);
+    S.prototype.previewLive.call(plugin, { editor: { cm: { dispatch() { throw new Error('an editor was touched'); } } } }, 'goudy');
+    plugin.settings = S.normalizeSettings({ liveDropcaps: true });
+    apply();
+    assert.equal(made.length, 1);
+    assert.ok(plugin.dropcapLive && Array.isArray(made[0]) && made[0].length >= 3);
+    assert.equal(told, 1, 'the editors are told at once');
+    apply();
+    assert.equal(told, 1, 'not again while nothing changed');
+    plugin.settings = S.normalizeSettings({ liveDropcaps: false });
+    apply();
+    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 2], 'off again: taken out of the editors');
+  } finally { Module._load = realLoad2; }
 });
