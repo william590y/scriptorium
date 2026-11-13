@@ -603,6 +603,31 @@
       await frame(); await frame();
       if (measure(liveLine('Energy is never')).has) out.why.push('after “dropcap: none” there is still an initial');
     });
+    await run('the first line’s small capitals reach as far in the editor as in Reading view, at two widths of the window, also with the cursor in the paragraph', async out => {
+      const text = note('', '## A chapter', PARAS.A, SECOND), firsts = [];
+      const width = async w => { try { const win = require('@electron/remote').getCurrentWindow(), b = win.getBounds(); win.setBounds({ x: b.x, y: b.y, width: w, height: b.height }); } catch (e) { out.why.push('the window could not be resized'); } await sleep(700); };
+      try {
+        for (const w of [1180, 820]) {
+          await width(w);
+          const got = await both(out, text, 'A body at rest', 'dropped');
+          if (!got) return;
+          const first = got.a.lines[0].text.replace(/\s+/g, ' ').trim();
+          firsts.push(first);
+          if (got.a.style.caps !== 'small-caps' && got.a.style.caps !== 'all-small-caps') out.why.push(`at ${w} px the editor's first line is not in small capitals (${got.a.style.caps})`);
+          if (got.b.style.caps !== got.a.style.caps) out.why.push(`at ${w} px the first line's capitals differ: ${got.a.style.caps} in the editor, ${got.b.style.caps} in Reading view`);
+          // the same with the cursor in the paragraph (the editor then has the focus)
+          await setMode('live');
+          const cm = cmOf(), at = cm.state.doc.toString().indexOf('A body at rest') + 40;
+          try { const win = require('@electron/remote').getCurrentWindow(); win.focus(); win.webContents.focus(); } catch (e) { /* not the desktop app */ }
+          cm.focus(); cm.dispatch({ selection: { anchor: at } }); await sleep(500);
+          const c = measure(liveLine('A body at rest')), d = compare(c, got.b);
+          for (const y of d.why) out.why.push(`at ${w} px, with the cursor in the paragraph: ${y}`);
+          out.maxPx = Math.max(out.maxPx || 0, Number(d.max.toFixed(2)));
+        }
+        out.firstLines = firsts.map(f => f.split(' ').length).join(' and ') + ' words';
+        if (firsts.length === 2 && firsts[0] === firsts[1]) out.why.push('the first line holds the same words at both widths (the window was not made narrower: the check is blind)');
+      } finally { await width(1180); }
+    });
   } finally {
     await theme(layout.theme !== 'moonstone');
     await plugin.updateSettings({ initials: saved.initials, fancyMode: saved.fancy, liveDropcaps: saved.live });
