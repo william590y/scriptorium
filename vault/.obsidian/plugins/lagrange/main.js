@@ -84,7 +84,7 @@ const LOOK_PICTURES = ['auto', 'on', 'off'];
 
 const PEN_MAX = 4;                    // pens that may write at once, at most (the pen's styles know as many; see penLanes)
 
-const LOADER_THEMES = ['random', 'clockwork', 'alchemy', 'orbit'];
+const LOADER_THEMES = ['cycle', 'clockwork', 'alchemy', 'orbit'];
 // Reasoning effort, where the provider and model take one; '' leaves it to the provider's own default.
 const EFFORTS = ['low', 'medium', 'high'];
 const CLAUDE_CODE_MODELS = ['sonnet', 'opus', 'haiku'];   // Claude Code's aliases for the latest of each
@@ -109,7 +109,7 @@ const DEFAULT_SETTINGS = {
   agenticEdits: true,                 // a chat message may edit the open note with the pen; off: the chat only talks
   lookAtPage: true,                   // Lagrange may look at the note as rendered; off: the page is never rendered or captured
   lookPictures: 'auto',               // 'auto' (pictures where the model takes them) | 'on' | 'off' (a description only)
-  loaderTheme: 'random',              // 'random' | 'clockwork' | 'alchemy' | 'orbit'
+  loaderTheme: 'cycle',               // 'cycle' (each plate in turn, the first by chance) | 'clockwork' | 'alchemy' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
   penTrail: true,                     // a fading line of ink behind the pen's nib as it moves
@@ -127,7 +127,7 @@ function sanitizeSettings(saved) {
     }
   }
   if (!['anthropic', 'claude-code', 'openai-api', 'codex', 'openai', 'demo'].includes(s.provider)) s.provider = DEFAULT_SETTINGS.provider;
-  // A plate that no longer exists (a saved 'trebuchet', from 0.1) falls back to 'random'.
+  // A plate that no longer exists (a saved 'trebuchet', from 0.1), and the 'random' of before 0.5.2, fall back to 'cycle'.
   if (!LOADER_THEMES.includes(s.loaderTheme)) s.loaderTheme = DEFAULT_SETTINGS.loaderTheme;
   if (s.anthropicModel !== 'custom' && !ANTHROPIC_MODELS.some(m => m.id === s.anthropicModel)) {
     s.anthropicModel = DEFAULT_SETTINGS.anthropicModel;
@@ -3013,7 +3013,7 @@ function reviseUserMessage(note, clip, passage, instruction) {
 //
 // Contract
 //   mountLoader(containerEl, theme) -> { stop() }
-//     theme  'random' | 'clockwork' | 'alchemy' | 'orbit' (anything else counts as 'random')
+//     theme  'cycle' | 'clockwork' | 'alchemy' | 'orbit' (anything else counts as 'cycle': see nextPlate)
 //     stop() removes the plate and stops its animation. Called once; calling it again does nothing.
 /* Lagrange's loading plates: three ink engravings drawn into an <svg viewBox="0 0 320 240">.
    drawPlate(svg, name, opts) -> stop(); name is 'clockwork' | 'alchemy' | 'orbit'.
@@ -3326,11 +3326,22 @@ const LOADER_CAPTIONS = {
   alchemy: 'Lagrange is distilling',
   orbit: 'Lagrange is finding the balance',
 };
+/* Which plate the next loader shows when none is chosen in the settings: the first one of a session is taken by
+   chance, and each one after it is the next in order, round and round, so that all of them are seen in turn.
+   (Before 0.5.2 every loader was a separate throw of the dice, and a run of the same plate was common.)
+   names: the plates; last: the one shown before, or null; chance: a function like Math.random. Pure. */
+function nextPlate(names, last, chance) {
+  const i = names.indexOf(last);
+  if (i < 0) return names[Math.min(names.length - 1, Math.floor((chance || Math.random)() * names.length))];
+  return names[(i + 1) % names.length];
+}
+const loaderTurn = { last: null };       // the plate last shown in turn, since the plugin was loaded
+
 function mountLoader(containerEl, theme) {
   const doc = containerEl.ownerDocument || document;
   const win = doc.defaultView || window;
   const names = LagrangePlates.NAMES;
-  const name = names.includes(theme) ? theme : names[Math.floor(Math.random() * names.length)];
+  const name = names.includes(theme) ? theme : (loaderTurn.last = nextPlate(names, loaderTurn.last));
   const el = doc.createElement('div');
   el.className = `lagrange-loader lagrange-loader--${name}`;
   el.setAttribute('role', 'status');
@@ -7073,7 +7084,7 @@ class LagrangeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Loading animation')
       .setDesc('What the chat shows while Lagrange thinks.')
-      .addDropdown(d => d.addOption('random', 'A different plate each time').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('orbit', 'The five Lagrange points')
+      .addDropdown(d => d.addOption('cycle', 'Each plate in turn').addOption('clockwork', 'Clockwork').addOption('alchemy', 'Alchemy').addOption('orbit', 'The five Lagrange points')
         .setValue(s.loaderTheme).onChange(async v => { s.loaderTheme = v; await save(); }));
     new Setting(containerEl)
       .setName('Show the pen')
@@ -7810,4 +7821,4 @@ LagrangePlugin.internals = {
   dropcapRoute, dropcapRouteNote, dropcapLetter, dropcapImagePrompt, dropcapSvgMessage, DROPCAP_SVG_SYSTEM, extractSvg, demoDropcapSvg,
   bytesFromBase64, base64FromBytes, isPng, drawOpenAIImage, drawCodexImage, drawSvg, drawDropcap,
 };
-Object.assign(LagrangePlugin.internals, { sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+Object.assign(LagrangePlugin.internals, { nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

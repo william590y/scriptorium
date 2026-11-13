@@ -81,7 +81,7 @@ class Tool:
 
 def tools(exe):
     py = [sys.executable, str(SCRIPT)]
-    found = [Tool("Setup-Scriptorium-Vault.py", py + ["--dry-run"], py + ["--yes"])]
+    found = [Tool("Setup-Scriptorium-Vault.py", py + ["--dry-run"], py + ["--yes", "--no-diagram-plugins"])]   # (the diagram plugins are downloaded: tools/test_diagram_plugins.py tests that without the network)
     if exe:
         if os.name == "nt":
             run = [str(exe)]

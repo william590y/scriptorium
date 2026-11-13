@@ -1064,6 +1064,120 @@
     chat.clear();
   });
 
+
+  /* ---- Diagrams (TikZJax figures, Excalidraw drawings) and the loader's plates ---- */
+  const figureCase = async (label, has, selector, makeText) => {
+    await extra(`${label}: the pen draws it where the note has it, shapes first and labels last; a key ends it; Undo takes it out`, async (out, fail) => {
+      if (!has()) { out.skipped = true; fail(`${label}: the plugin is not installed and enabled in this vault`); return; }
+      const text = await makeText();
+      const open = async () => {
+        await leaf.openFile(file, { state: { mode: 'source', source: false } });
+        leaf.view.editor.setValue(NOTE);
+        await sleep(options.settle || 500);
+        leaf.view.editor.setCursor(0, 0);
+        const cm = leaf.view.editor.cm;
+        const now = L.locateOps(cm.state.doc.toString(), L.parseAgentReply('```lagrange-edits\n' + JSON.stringify([{ insert_after: 'Short line here.', text }]) + '\n```').ops);
+        return { cm, run: plugin.applyEdits(leaf.view, now.located, now.skipped, null, null) };
+      };
+      const shown = n => getComputedStyle(n).opacity !== '0';
+      const parts = svg => Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text')).filter(n => !n.closest('defs, mask, clipPath, marker, metadata') && (n.getBoundingClientRect().width > 0.3 || n.getBoundingClientRect().height > 0.3));
+      // 1. a whole run
+      let { cm, run } = await open();
+      const seen = { early: 0, frames: 0, away: 0, order: 0, counts: [] };
+      let on = true;
+      const tick = () => {
+        if (!on) return;
+        for (const svg of cm.contentDOM.querySelectorAll(selector)) {
+          if (!svg.hasAttribute('data-lagrange-seen') && shown(svg)) seen.early++;
+          if (!svg.hasAttribute('data-lagrange-drawing')) continue;
+          seen.frames++;
+          const d = Number(svg.getAttribute('data-lagrange-drawn'));
+          if (seen.counts[seen.counts.length - 1] !== d) seen.counts.push(d);
+          const ps = parts(svg), shapesLeft = ps.some(n => n.tagName !== 'text' && !shown(n));
+          if (shapesLeft && ps.filter(n => n.tagName === 'text').some(shown)) seen.order++;
+          // the nib is on the figure (within its box, give or take the flight to the next part)
+          const pen = Array.from(document.querySelectorAll('.lagrange-pen')).find(p => p.style.display !== 'none');
+          const m = pen && /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(pen.getAttribute('transform') || '');
+          if (m) {
+            const sheet = pen.closest('.lagrange-pen-sheet').getBoundingClientRect(), r = svg.getBoundingClientRect();
+            const x = sheet.left + Number(m[1]), y = sheet.top + Number(m[2]);
+            if (x < r.left - 60 || x > r.right + 60 || y < r.top - 60 || y > r.bottom + 60) seen.away++;
+          }
+        }
+        setTimeout(() => requestAnimationFrame(tick), 0);
+      };
+      requestAnimationFrame(tick);
+      let res = await run;
+      await sleep(500);
+      on = false;
+      const svg = cm.contentDOM.querySelector(selector);
+      Object.assign(out, { frames: seen.frames, parts: svg ? parts(svg).length : 0, counts: seen.counts.join(',') });
+      if (!svg) fail('the note did not draw the diagram');
+      if (seen.early) fail(`the diagram was visible before the pen drew it (${seen.early} frames)`);
+      if (seen.frames < 10) fail('the pen did not draw the diagram');
+      if (seen.order) fail(`a label was shown before the shapes were finished (${seen.order} frames)`);
+      if (seen.away > seen.frames * 0.1) fail(`the nib was off the figure in ${seen.away} of ${seen.frames} frames`);
+      if (seen.counts.some((c, i) => i && c !== seen.counts[i - 1] + 1)) fail(`the parts were not drawn one after another: ${seen.counts.join(',')}`);
+      if (svg && (parts(svg).some(n => !shown(n)) || svg.querySelector('[style*="dash"]'))) fail('the pen left the figure half drawn');
+      if (res.applied.length !== 1 || !cm.state.doc.toString().includes(text.trim())) fail('the note does not hold the diagram');
+      if (cm.dom.classList.contains('lagrange-pen-figures')) fail('the editor is still marked as waiting for figures');
+      // Undo takes it out again, in one step
+      plugin.undoEdit(plugin.edits[plugin.edits.length - 1]);
+      await sleep(300);
+      if (cm.state.doc.toString() !== NOTE) fail('Undo did not take the diagram out');
+      document.querySelectorAll('.notice').forEach(n => n.remove());
+      // 2. a key while the pen draws: the figure is whole at once, and the run is over
+      ({ cm, run } = await open());
+      for (let i = 0; i < 1500 && !cm.contentDOM.querySelector(`${selector.split(',')[0].trim()}[data-lagrange-drawing], svg[data-lagrange-drawing]`); i++) await frame();
+      for (let i = 0; i < 20; i++) await frame();
+      cm.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', bubbles: true, cancelable: true }));
+      const cut = cm.contentDOM.querySelector(selector);
+      if (!cut || !cut.hasAttribute('data-lagrange-seen') || cut.hasAttribute('data-lagrange-drawing') || parts(cut).some(n => !shown(n))) fail('after a key the figure is not whole');
+      if (cm.dom.classList.contains('lagrange-pen-figures')) fail('after a key the editor is still marked as waiting for figures');
+      res = await run;
+      if (res.ended !== 'key') fail(`the run reports ended=${res.ended}`);
+      await sleep(300);
+      document.querySelectorAll('.notice').forEach(n => n.remove());
+    });
+  };
+  const has = id => Boolean(app.plugins.enabledPlugins.has(id) && app.plugins.plugins[id]);
+  await figureCase('a TikZ figure', () => has('obsidian-tikzjax'), '.block-language-tikz svg',
+    async () => '\n\n```tikz\n\\begin{document}\n\\begin{tikzpicture}\n\\draw (0,0) circle (1.5);\n\\draw[->, thick] (1.5,0) -- (1.5,1.4) node[right] {$v$};\n\\draw[dashed] (-2.2,0) -- (2.2,0);\n\\draw (0,0) -- (1.5,0) node[midway, below] {$r$};\n\\end{tikzpicture}\n\\end{document}\n```');
+  await figureCase('an Excalidraw drawing', () => has('obsidian-excalidraw-plugin') && Boolean(window.ExcalidrawAutomate), '.excalidraw-embedded-img svg, svg.excalidraw-svg', async () => {
+    let f = app.vault.getFiles().find(x => /Pen position sketch\.excalidraw/.test(x.path));
+    if (!f) {
+      const ea = window.ExcalidrawAutomate;
+      ea.reset();
+      ea.addEllipse(0, 20, 90, 90); ea.addEllipse(300, 45, 40, 40); ea.addArrow([[95, 65], [295, 65]]); ea.addText(28, 55, 'M'); ea.addText(170, 30, 'r');
+      await ea.create({ filename: 'Pen position sketch', foldername: '', onNewPane: false, silent: true });
+      for (let i = 0; i < 40 && !f; i++) { await sleep(100); f = app.vault.getFiles().find(x => /Pen position sketch\.excalidraw/.test(x.path)); }
+    }
+    return `\n\n![[${f.path.replace(/\.md$/, '')}]]`;
+  });
+
+  await extra('the loader’s plates come in turn: three sends show three different plates', async (out, fail) => {
+    const was = plugin.settings.loaderTheme;
+    plugin.settings.loaderTheme = 'cycle';
+    plugin.settings.provider = 'demo';
+    const chat = await plugin.activateView(false);
+    chat.clear();
+    const plates = [];
+    for (const q of ['What is this note about?', 'And how long is it?', 'What does it say about energy?', 'And once more?']) {
+      chat.inputEl.value = q;
+      chat.send();
+      const l = chat.logEl.querySelector('.lagrange-loader');
+      plates.push(l ? (/lagrange-loader--(\w+)/.exec(l.className) || [])[1] : null);
+      for (let i = 0; i < 400 && (chat.pending || plugin.editing); i++) await sleep(50);
+      await sleep(150);
+    }
+    out.plates = plates.join(',');
+    if (plates.some(p => !p)) fail('a send showed no loader');
+    if (new Set(plates.slice(0, 3)).size !== 3) fail(`three sends in a row showed ${plates.slice(0, 3).join(', ')}`);
+    if (plates[3] !== plates[0]) fail(`the fourth send showed ${plates[3]}, not the first plate again (${plates[0]})`);
+    plugin.settings.loaderTheme = was;
+    chat.clear();
+  });
+
   await setPanel(PANEL);
   plugin.settings.penSpeed = saved.speed;
   plugin.settings.severalPens = saved.several;

@@ -509,9 +509,9 @@ test('Defaults: a Claude subscription is the provider, the chat edits with the p
 });
 
 test('The trebuchet is gone: no plate, no caption, no setting; a saved "trebuchet" becomes "random"', () => {
-  assert.deepEqual(L.LOADER_THEMES, ['random', 'clockwork', 'alchemy', 'orbit']);
+  assert.deepEqual(L.LOADER_THEMES, ['cycle', 'clockwork', 'alchemy', 'orbit']);
   assert.deepEqual(Object.keys(L.LOADER_CAPTIONS).sort(), ['alchemy', 'clockwork', 'orbit']);
-  assert.equal(L.sanitizeSettings({ loaderTheme: 'trebuchet' }).loaderTheme, 'random');
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'trebuchet' }).loaderTheme, 'cycle');
   const kept = L.sanitizeSettings({ loaderTheme: 'trebuchet', provider: 'demo', penSpeed: 2 });
   assert.equal(kept.provider, 'demo', 'the rest of the saved settings are kept');
   assert.equal(kept.penSpeed, 2);
@@ -519,7 +519,7 @@ test('The trebuchet is gone: no plate, no caption, no setting; a saved "trebuche
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   // The word survives only in the comment on the fallback.
   assert.deepEqual(js.split('\n').filter(l => /trebuchet/i.test(l)).map(l => l.trim()),
-    ["// A plate that no longer exists (a saved 'trebuchet', from 0.1) falls back to 'random'."]);
+    ["// A plate that no longer exists (a saved 'trebuchet', from 0.1), and the 'random' of before 0.5.2, fall back to 'cycle'."]);
   assert.doesNotMatch(css, /trebuchet/i);
   assert.doesNotMatch(js, /taking aim|\bsling\b/i);
   for (const f of ['README.md', 'THIRD_PARTY.md']) assert.doesNotMatch(fs.readFileSync(path.join(ROOT, f), 'utf8'), /trebuchet/i, f);
@@ -558,8 +558,8 @@ test('Settings: junk is replaced by defaults; the shipped data.json is the defau
   const s = L.sanitizeSettings({ provider: 'gpt', penSpeed: 99, loaderTheme: 'steam', anthropicModel: 'claude-2', showPen: 'yes' });
   assert.equal(s.provider, 'claude-code');
   assert.equal(s.penSpeed, 1);
-  assert.equal(s.loaderTheme, 'random');
-  for (const t of ['clockwork', 'alchemy', 'orbit', 'random']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
+  assert.equal(s.loaderTheme, 'cycle');
+  for (const t of ['clockwork', 'alchemy', 'orbit', 'cycle']) assert.equal(L.sanitizeSettings({ loaderTheme: t }).loaderTheme, t);
   assert.equal(L.sanitizeSettings({ effort: 'extreme' }).effort, '');
   for (const e of ['', 'low', 'medium', 'high']) assert.equal(L.sanitizeSettings({ effort: e }).effort, e);
   assert.equal(L.sanitizeSettings({ agenticEdits: false, penTrail: false }).agenticEdits, false);
@@ -2524,4 +2524,26 @@ test('Diagrams: a drawing in a reply is read and made safe; the prompt says what
   const note = { title: 'N', path: 'N.md', text: 'x' };
   assert.ok(L.chatSystemPrompt(note, { text: 'x' }, true, false, { tikz: true, sketch: false }).includes('Diagrams: '));
   assert.ok(!L.chatSystemPrompt(note, { text: 'x' }, false, false, { tikz: true }).includes('Diagrams: '), 'a chat that only talks draws nothing');
+});
+
+test('The loader’s plates come in turn: the first by chance, then each next one, round and round', () => {
+  const names = ['clockwork', 'alchemy', 'orbit'];
+  assert.equal(L.nextPlate(names, null, () => 0), 'clockwork');
+  assert.equal(L.nextPlate(names, null, () => 0.5), 'alchemy');
+  assert.equal(L.nextPlate(names, null, () => 0.999999), 'orbit');
+  assert.equal(L.nextPlate(names, null, () => 1), 'orbit', 'a chance of exactly 1 is still a plate');
+  assert.equal(L.nextPlate(names, 'clockwork'), 'alchemy');
+  assert.equal(L.nextPlate(names, 'alchemy'), 'orbit');
+  assert.equal(L.nextPlate(names, 'orbit'), 'clockwork');
+  for (const start of [0, 0.4, 0.9]) {
+    const seen = [];
+    let last = null;
+    for (let i = 0; i < 7; i++) seen.push(last = L.nextPlate(names, last, () => start));
+    assert.equal(new Set(seen.slice(0, 3)).size, 3, 'three in a row are three different plates');
+    assert.deepEqual(seen.slice(3, 6), seen.slice(0, 3), 'and then the same round again');
+    assert.equal(seen[6], seen[0]);
+  }
+  assert.equal(L.DEFAULT_SETTINGS.loaderTheme, 'cycle');
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'random' }).loaderTheme, 'cycle', 'the old default becomes the new one');
+  assert.equal(L.sanitizeSettings({ loaderTheme: 'orbit' }).loaderTheme, 'orbit', 'a plate that was chosen stays chosen');
 });

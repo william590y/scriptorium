@@ -1184,3 +1184,5 @@ body.theme-dark {
 svg.excalidraw-svg { background: none; max-width: 100%; height: auto; }
 svg.excalidraw-svg > rect[fill="#FFFFFF"], svg.excalidraw-svg > rect[fill="#ffffff"] { fill: transparent; }
 .excalidraw-embedded-img, .internal-embed .excalidraw-svg { background: none; }
+/* (its lines are black whatever the theme: on dark paper they are turned to the paper's ink) */
+.theme-dark svg.excalidraw-svg { filter: invert(0.9) hue-rotate(180deg); }
