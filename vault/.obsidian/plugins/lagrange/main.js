@@ -7494,10 +7494,11 @@ class LagrangePlugin extends Plugin {
       try { saved = await scriptorium.addDrawnDropcap({ set: want.set, letter: want.letter, bytes: drawn.bytes, kind: drawn.kind, mono: want.mono }); }
       catch (e) { throw new LagrangeError(`The drawing could not be kept: ${e.message}.`, { reply: drawn.kind === 'svg' ? new TextDecoder().decode(drawn.bytes) : undefined }); }
       await scriptorium.setNoteDropcap(view.file, `set:${saved.set}`);
-      // show it: Reading view is where drop caps are drawn
+      // show it: where drop caps are drawn (Reading view; Live Preview too, with a Scriptorium that draws them there)
       try {
         const state = view.leaf.getViewState();
-        if (state.state && state.state.mode !== 'preview') { state.state.mode = 'preview'; await view.leaf.setViewState(state); }
+        const live = Boolean(scriptorium.dropcapLive) && state.state && state.state.mode === 'source' && !state.state.source;
+        if (state.state && state.state.mode !== 'preview' && !live) { state.state.mode = 'preview'; await view.leaf.setViewState(state); }
       } catch (e) { /* stays in the editor */ }
       window.setTimeout(() => { try { scriptorium.previewDropcap(view, `set:${saved.set}`); } catch (e) { /* the view has gone */ } }, 350);
       if (task) task.done(`${want.change ? 'Changed' : 'Drawn'}: ${saved.file}. It is this note’s drop cap now (the “dropcap” property), wherever a chapter opens with ${want.letter}.`);

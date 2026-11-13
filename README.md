@@ -39,8 +39,9 @@ choice is remembered for that vault.
 
 These are set in **Settings → Scriptorium**, and remembered for the vault:
 
-- **Drop cap:** the initial that opens a chapter in Reading view: **Yinit** (ornamental, the default), **Goudy
-  Initialen** (floriated), a **plain capital** in Cormorant Garamond, or **none**. Each is a three-line drop in the
+- **Drop cap:** the initial that opens a chapter, in Reading view and in the editor's Live Preview: **Yinit**
+  (ornamental, the default), **Goudy Initialen** (floriated), a **plain capital** in Cormorant Garamond, or **none**.
+  Each is a three-line drop in the
   accent colour, with the rest of the first line in small capitals; with none, the opening paragraph starts with an
   ordinary letter, without small capitals, justified like the rest. Centred and right-aligned text has no drop cap
   unless you ask for one (see [Centred and right-aligned text](#centred-and-right-aligned-text)).
@@ -49,6 +50,14 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   `none`, or the name of a set, below), which you can also type yourself. Choosing **The vault's drop cap** removes
   the property. A drop cap that is chosen or changed is inked in: laid down from its top left corner as a pen would lay
   it, pale and wet at first (not when your system asks for reduced motion).
+  **In the editor too (new):** Live Preview shows the same drop cap on the same paragraph, in the same face, size and
+  place, with the first line in small capitals and broken where Reading view breaks it, so the text does not move when
+  you switch between the two. The initial is still the letter you typed: nothing is added to the note, the cursor goes
+  before and after it, and selecting, copying, searching and spell-checking see it as any other letter. It stays an
+  initial while you write in its paragraph (delete it and the next letter becomes the initial). One exception: where a
+  paragraph begins with marks that Live Preview shows only by the cursor (`**Bold** beginning`, `[[a link]] first`),
+  its line is plain while the cursor is on it. Source mode stays plain. A paragraph that begins with an HTML tag has
+  its drop cap in Reading view only.
 - **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
   margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
   rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
@@ -69,7 +78,7 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
 Beside the four above, a drop cap can come from a **set**: images, one or several for a letter, or a font of initials.
 Sets appear in the settings' **Drop cap** list and in **Choose the drop cap for this note**, and a note names one in its
 properties (`dropcap: Dropcat`). A set of images shows where it has the paragraph's first letter; other paragraphs keep
-the vault's drop cap. All of this works in Reading view, light and dark, and in **Export to PDF**.
+the vault's drop cap. All of this works in Reading view and Live Preview, light and dark, and in **Export to PDF**.
 
 Every kind of initial [gwern.net uses](https://gwern.net/dropcap) is here:
 
