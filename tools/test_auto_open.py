@@ -410,7 +410,7 @@ def find_obsidian_macos(work):
 def find_obsidian_windows(work):
     print("\nInstall-Scriptorium-Windows.cmd: is Obsidian installed?")
     import winreg
-    code = "function Find-Obsidian {\n" + section(WINDOWS, "    function Find-Obsidian {", "    $exe = Find-Obsidian\r\n    if (!$exe) {")
+    code = "function Find-Obsidian {\n" + section(WINDOWS, "    function Find-Obsidian {", "    $exe = Find-Obsidian\n    if (!$exe) {")
     check("Test-Path -LiteralPath $protocol" not in WINDOWS.read_text(encoding="utf-8"), "the script no longer takes the registry key alone for an installed Obsidian")
 
     def find():
