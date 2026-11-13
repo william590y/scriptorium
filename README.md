@@ -250,6 +250,32 @@ Revise selection** and **Lagrange: Proofread note** do the same for a selected p
 the chat to talk only, turn off **Settings → Lagrange → Edit with the pen from the chat**; the ink trail has a switch
 there too, and neither the trail nor the flying pen is shown when your system asks for reduced motion.
 
+**Looking at the page.** Lagrange reads the note's Markdown, and Markdown does not show how the page comes out: where
+the drop cap sits, what is centred, what went into the margin, whether an equation or a picture fits its column. When
+a question turns on that ("does the chapter open properly?", "is the epigraph centred?"), Lagrange asks to look, and
+the chat says **Lagrange looked at the page**, with a small picture of what it was shown; click it to see all of it,
+and the words that went with it. It can look at the whole note, at what you have on screen, at one section, at a
+passage, or at a range of lines; it can also change the note and then look at the result, to check its own edit. You
+can show it the page yourself: run **Lagrange: Show Lagrange the rendered page**, and the page goes with your next
+message. The page is the note as Reading view sets it (the vault's theme, snippets and fonts, Scriptorium's drop caps
+and marginalia, mathematics, callouts, pictures, at the width of the note's pane), set out of sight in a page of its
+own: your note, its view and the editor are not touched, and nothing is written to the vault. The note's properties
+are left out, and so is a picture that the note takes from the web (a grey box stands in its place; Lagrange does not
+fetch it again).
+
+What Lagrange is given is pictures of the part of the note it asked for and nothing else, each at most 1024 by 1536
+pixels, at most four to a look and two looks to a message of yours, with the measurements of that part: each block's
+kind, alignment, font and size, its lines, its drop cap, its footnotes, its mathematics as you wrote it, and whether
+it is too wide for its column. A model that takes no pictures (many local models; **Settings → Lagrange → Pictures of
+the page** says which, and lets you say otherwise) is given the measurements alone, and so is every model on a phone
+or tablet, where no picture is taken. A look goes to the provider you have chosen, with the conversation, and to no
+one else, and only while Lagrange is answering a message you sent; the pictures are sent once and are not kept in the
+conversation. With a Claude subscription they go to Claude Code on its standard input, with no tool turned on and
+nothing written to disk; with a ChatGPT subscription Codex takes pictures only as files, so they are written to a
+folder of their own in your temporary folder, which only you can read, and deleted when Codex has answered. To keep
+Lagrange from ever rendering or capturing the page, turn off **Settings → Lagrange → Let Lagrange look at the
+rendered page**.
+
 Choose who writes the replies in **Settings → Lagrange**. The default is **your Claude subscription**, through Claude
 Code (install it, run `claude` once in a terminal and sign in; no API key). The others are Anthropic's Claude with an
 API key, your ChatGPT subscription through Codex, OpenAI with an API key, an OpenAI-compatible server such as a local
@@ -717,7 +743,10 @@ Lagrange, the writing companion, sends the open note and what you write to it to
 settings, and only when you send it a message or run one of its commands: your Claude subscription through the Claude
 Code program on your computer (the default), Anthropic's API at `api.anthropic.com`, your ChatGPT subscription through
 the Codex program, OpenAI's API at `api.openai.com`, or the OpenAI-compatible server whose address you enter. It makes
-no other requests, and none in Demo mode. Its handwriting font is inside the plugin; nothing is downloaded.
+no other requests, and none in Demo mode. Its handwriting font is inside the plugin; nothing is downloaded. When it
+**looks at the page** (see [Lagrange](#lagrange)), pictures of the part of the note it asked for, as rendered, and
+their measurements go to that same provider with the conversation, and nowhere else; with the setting **Let Lagrange
+look at the rendered page** off, the page is never rendered or captured.
 **Draw a drop cap** sends the letter and your description (and, to change one, the present image) to the same
 provider: with the OpenAI API, to its Images API at `api.openai.com`; with a ChatGPT subscription, Codex runs in an
 empty temporary folder, the only place it may write.

@@ -230,6 +230,51 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 }
 .lagrange-error a { color: var(--lagrange-rubric); font-style: normal; font-variant: small-caps; letter-spacing: 0.03em; }
 
+/* A look at the page: a small picture of what Lagrange was shown, like a plate tipped into the margin, and a line
+   about it. The picture and "What it was shown" open the whole of it (see the look's dialogue, below). */
+.lagrange-look {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7em;
+  margin: 0.7em 0;
+  padding-left: 1.1em;
+}
+.lagrange-look.is-pending, .lagrange-look.is-failed { font-style: italic; }
+.lagrange-look.is-failed .lagrange-look-detail { color: var(--lagrange-rubric); }
+.lagrange-view button.lagrange-look-thumb {
+  flex: none;
+  display: block;
+  width: 4em;
+  height: 5.2em;
+  padding: 0;
+  overflow: hidden;
+  background: none;
+  box-shadow: none;
+  border: 1px solid var(--lagrange-line);
+  border-radius: 1px;
+  cursor: zoom-in;
+}
+.lagrange-view button.lagrange-look-thumb:is(:hover, :focus-visible) { border-color: var(--lagrange-rubric); }
+/* (the top of the picture fills the plate: a strip of a few lines is shown larger, a whole page smaller) */
+.lagrange-look-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.lagrange-look-words { min-width: 0; }
+.lagrange-look-title { font-variant: small-caps; letter-spacing: 0.05em; color: var(--lagrange-rubric); }
+.lagrange-look-detail { font-size: 0.88em; font-style: italic; color: var(--lagrange-muted); overflow-wrap: anywhere; }
+.lagrange-view button.lagrange-look-open {
+  display: inline;
+  height: auto;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  border: none;
+  font-family: var(--lagrange-serif);
+  font-size: 0.88em;
+  font-style: italic;
+  color: var(--lagrange-rubric);
+  cursor: pointer;
+}
+.lagrange-view button.lagrange-look-open:hover { background: none; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
 /* Tasks: proofreading and revising, with the edits listed as a corrector would mark them. */
 .lagrange-turn--task {
   margin-top: 1.4em;
@@ -539,6 +584,20 @@ body:not(.is-mobile) .lagrange-compose { padding-bottom: 34px; }   /* clear of t
 .lagrange-modal-buttons button { font-family: var(--lagrange-serif); font-variant: small-caps; letter-spacing: 0.05em; font-size: 1.05em; }
 .lagrange-modal-buttons button.mod-cta { background: var(--lagrange-rubric); color: var(--lagrange-paper); }
 .lagrange-modal-buttons button.mod-cta:hover { background: var(--lagrange-rubric-deep); }
+
+/* The look's dialogue: the pictures as they were sent, one under another, and the page in words. */
+.lagrange-look-modal { width: min(92vw, 1100px); }
+.lagrange-look-picture {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto 0.8em;
+  border: 1px solid var(--background-modifier-border);
+}
+.lagrange-look-told summary { cursor: pointer; font-style: italic; color: var(--text-muted); }
+.lagrange-look-told pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.8em; max-height: 24em; overflow: auto; }
+/* The page Lagrange looks at is set far off the screen (main.js, renderPage) and must not be drawn where it is. */
+.lagrange-look-page { z-index: -1; }
 
 /* A slider's value, beside it. */
 .lagrange-slider-value { min-width: 2.6em; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-muted); }
