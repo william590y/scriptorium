@@ -82,6 +82,10 @@ jobs:
         shell: pwsh
         run: python tools/test_setup_vault.py dist/Scriptorium-Setup.exe
 
+      - name: Test adding the TikZJax and Excalidraw plugins (Setup's new vault, update and set-up; the Windows script's PowerShell; the other scripts)
+        shell: pwsh
+        run: python tools/test_diagram_plugins.py dist/Scriptorium-Setup.exe --real
+
       - name: Test adding a vault to Obsidian's vault list (Setup and the Windows script)
         shell: pwsh
         run: python tools/test_auto_open.py dist/Scriptorium-Setup.exe
@@ -160,6 +164,7 @@ jobs:
         run: |
           python3 -m py_compile installers/Setup-Scriptorium-Vault.py
           python3 tools/test_setup_vault.py
+          python3 tools/pin_plugins.py
           python3 tools/test_diagram_plugins.py
       - name: The fonts, face by face (the Linux script with fontconfig; the macOS script with a pretend system_profiler)
         run: |
@@ -178,6 +183,8 @@ jobs:
         run: |
           bash -n installers/Install-Scriptorium-macOS.command
           python3 tools/test_fonts.py
+      - name: The diagram plugins, with this system's bash and shasum
+        run: python3 tools/test_diagram_plugins.py
 
   plugin-tests:
     name: Test the Scriptorium and Lagrange plugins (Node)

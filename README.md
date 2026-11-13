@@ -359,7 +359,8 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   click **Install**. It creates a new vault folder (or fills an empty one; a folder that already has files in it is
   never changed by Install: see [Setting up a vault you already have](#setting-up-a-vault-you-already-have))
   and, if you tick them, installs Obsidian, EB Garamond and Cormorant Garamond for the current user, and downloads the
-  Longform plugin. No administrator rights are needed. With **Open the vault in Obsidian and turn on its plugins**
+  Longform plugin and the two plugins Lagrange draws diagrams with, TikZJax and Excalidraw (see
+  [The diagram plugins](#the-diagram-plugins)). No administrator rights are needed. With **Open the vault in Obsidian and turn on its plugins**
   ticked (the default), it then opens the new vault in Obsidian with its community plugins on, so Obsidian does not ask
   whether to trust the vault's author (see [Opening the vault](#opening-the-vault-with-its-plugins-on)). If Obsidian
   is open at that point, Setup asks you to close it and choose **Retry**, or **Cancel** to skip this.
@@ -370,7 +371,8 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   `README.md`. It keeps everything of yours: your notes, the plugins' settings (`data.json`, such as Fancy mode),
   Obsidian's settings and workspace, and the Lorem Ipsum note; files of the configuration that are missing are added
   back, and nothing is deleted. It turns the `manuscript` snippet and Scriptorium's community plugins back on if they
-  were off, leaving your own snippets and plugins as they are. Every file it replaces is first copied to
+  were off, leaving your own snippets and plugins as they are. With its box ticked, it adds TikZJax and Excalidraw if
+  the vault does not have them (see [The diagram plugins](#the-diagram-plugins)). Every file of Scriptorium's it replaces is first copied to
   `.obsidian\scriptorium-backup-<date>-<time>\`, and if anything fails half-way the vault is put back as it was.
   Restart Obsidian (or reload the vault) afterwards. (An updated vault is one Obsidian already knows, so **Open
   Obsidian when done** only starts Obsidian.)
@@ -381,12 +383,43 @@ See <https://williamliaw.com/scriptorium> for the downloads and instructions.
   and say what they did; if Obsidian is open they say so and leave the vault for **Open folder as vault**. On Linux
   this works with the AppImage (which the script installs if it finds no Obsidian) and with an Obsidian on `PATH` that
   has its `obsidian-cli` next to it (the `.deb`); a Snap or Flatpak Obsidian keeps its vault list elsewhere, so the
-  script only opens Obsidian's vault switcher. The Linux script needs `python3` and `pgrep` for this.
+  script only opens Obsidian's vault switcher. The Linux script needs `python3` and `pgrep` for this. All three add
+  [the diagram plugins](#the-diagram-plugins) to the new vault.
 - **Manual:** extract `Scriptorium.zip` from the latest release, open the folder as a vault in Obsidian, install
   [EB Garamond](https://fonts.google.com/specimen/EB+Garamond) and
   [Cormorant Garamond](https://fonts.google.com/specimen/Cormorant+Garamond), then open **Lorem Ipsum** in Reading
   view. Enable community plugins to use the Fancy mode switch. Longform is enabled in the configuration but not
-  included; install it from **Settings → Community plugins**.
+  included; install it from **Settings → Community plugins**. TikZJax and Excalidraw, which Lagrange draws diagrams
+  with, are not in the zip either: install them from the same place.
+
+### The diagram plugins
+
+Lagrange draws technical figures with the [TikZJax](https://github.com/artisticat1/obsidian-tikzjax) plugin and
+free-form sketches with the [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) plugin. Neither is
+part of Scriptorium, and their code is not in this repository, in `Scriptorium.zip` or in `Scriptorium-Setup.exe`.
+Instead, every way of installing, updating or setting up a vault downloads them at that moment from each plugin's own
+GitHub release, into `.obsidian/plugins/obsidian-tikzjax` and `.obsidian/plugins/obsidian-excalidraw-plugin`, and
+turns on the ones it installs: Scriptorium Setup (a new vault, **Update** and **Set up**, while **Download
+the TikZJax and Excalidraw plugins** is ticked), the three script installers, `Setup-Scriptorium-Vault.py`
+(`--no-diagram-plugins` leaves them out), and **Scriptorium: Set up another vault** / **Set up this vault** in Obsidian.
+
+- The release of each is pinned, and each file (`main.js`, `manifest.json`, `styles.css`) must have the pinned SHA-256;
+  a file that does not match is not installed.
+- A copy the vault already has is left exactly as it is if it is the pinned version or a newer one; an older copy is
+  replaced by the pinned one. A plugin's settings (`data.json`) are never touched, and nothing is deleted.
+- Only a plugin that is installed new is turned on. One the vault already had and you turned off (it is in
+  `.obsidian/plugins` but not in `community-plugins.json`) stays off, also when its older files are replaced.
+- Excalidraw opens a "Welcome to Excalidraw" window the first time it runs. So that a new vault does not open on it,
+  Excalidraw is installed with one setting, `{"previousRelease": "<its version>"}`, which is what closing that window
+  writes; Excalidraw fills in all its other settings with its defaults when it loads, and still shows its release
+  notes after a later update (its **Display Release Notes after update** switch is left on). This file is written
+  only with a new install and only where Excalidraw has no `data.json`; one that is there is never changed.
+- If a plugin cannot be downloaded (no connection, GitHub not answering, a file that does not match), Scriptorium is
+  installed all the same; the installer names the plugin that is missing. To add it by hand: in Obsidian, **Settings →
+  Community plugins → Browse**, search for its name, **Install**, then **Enable**.
+- Run again, nothing is downloaded twice.
+
+The pinned versions and hashes are in `installers/diagram-plugins.json` (see [Building](#building) for changing them).
 
 ### Opening the vault with its plugins on
 
@@ -472,6 +505,8 @@ What setting up does, and does not do:
 - Before anything changes, the whole `.obsidian` folder as it was is copied to
   `.obsidian/scriptorium-backup-<date>-<time>/.obsidian`. If anything fails half-way, every file is put back. To undo
   a setup later, copy the files back from that folder.
+- [The diagram plugins](#the-diagram-plugins), TikZJax and Excalidraw, are downloaded from their own releases and
+  turned on, unless the vault has them already (then they, and their settings, are left as they are).
 - Run again, it changes nothing and makes no second backup.
 
 Close the vault in Obsidian first (Obsidian rewrites some of these files while a vault is open), or reload it
@@ -684,6 +719,8 @@ Everything is built from this repository; the release files are built by GitHub 
 | `installer/fonts/*.ttf` (committed) | `python3 tools/build_fonts.py` | Python 3.9 or later, [fontTools](https://github.com/fonttools/fonttools) |
 | Lagrange's unit tests | `node --test plugins-tests/lagrange.test.js` | Node.js 18 or later |
 | Setting up a vault you already have | `python3 tools/test_setup_vault.py [dist/Scriptorium-Setup.exe]` | Python 3.9 or later; Node.js for the plugin's command; Mono for the exe off Windows |
+| The diagram plugins, by every installer | `python3 tools/test_diagram_plugins.py [dist/Scriptorium-Setup.exe]` | Python 3.9 or later; bash for the macOS and Linux scripts; PowerShell for the Windows script; Mono for the exe off Windows |
+| The diagram plugins' pins | `python3 tools/pin_plugins.py` (`--online` also checks the files on GitHub) | Python 3.9 or later |
 
 The Scriptorium plugin's layout and parsing helpers (sidenote placement and stacking, footnote definitions, image
 captions) are tested with `node --test plugins-tests/scriptorium.test.js` (Node 18 or later); CI runs it on Linux.
@@ -719,6 +756,24 @@ class, the Linux script's Python and the macOS script's JavaScript, the last wit
 scripts' part (`--scripts-only`) on Linux. `Scriptorium-Setup.exe --auto-open-only <vault> <Obsidian.exe>` opens a
 vault in Obsidian as **Install** does and prints each command and Obsidian's answer.
 
+`Scriptorium-Setup.exe --install-only <folder>` makes a new vault as **Install** does and adds the diagram plugins,
+without Obsidian, fonts or Longform; `--update-only` and `--setup-only` add them too. `--plugin-pins <file>` (one line
+per file: `id|name|version|file|SHA-256|address`) stands in for the pinned releases, and
+`SCRIPTORIUM_NO_DIAGRAM_PLUGINS=1` leaves the plugins out. `python3 tools/test_diagram_plugins.py
+dist/Scriptorium-Setup.exe` uses these to test a new vault, an update and a set-up against releases served from the
+same computer: a vault without the plugins, one with a newer and an older copy and settings of their own, a file that
+is missing, a file with the wrong SHA-256, and no connection. It runs the Windows script's PowerShell the same way
+(on Windows), the macOS and Linux scripts with a stand-in `curl`, and `Setup-Scriptorium-Vault.py`.
+
+**Before a release: the pins of the diagram plugins.** `installers/diagram-plugins.json` is the one place the versions
+and SHA-256 hashes of TikZJax and Excalidraw are changed. Each installer is a single file that has to work alone, so
+each carries a copy; `python3 tools/pin_plugins.py` (CI runs it) fails if a copy differs from the file. For every
+release of Scriptorium: run `python3 tools/pin_plugins.py --online`, which downloads the pinned files and checks them,
+and says whether a newer release exists. To move to one, run `python3 tools/pin_plugins.py --bump <id> <version>` (it
+downloads that release, and rewrites the file and all the copies), read the plugin's licence again, update the versions
+in this README and in `THIRD_PARTY.md`, check in Obsidian that Lagrange still draws with it, and run the tests. The
+site's copies of the script installers get the new pins with the release, like the SHA-256 of `Scriptorium.zip`.
+
 To look at the window without installing anything, run `Scriptorium-Setup.exe --render screenshots` on Windows: it
 draws the window offscreen in each of its states (ready, downloading, installing, done, failed, updating a vault, and the
 frames of a whole install) and saves them as PNGs. CI does this on every build and uploads them as the `screenshots` artifact.
@@ -750,11 +805,14 @@ docs/         the pictures in this README (recorded and captured in Obsidian)
 | EB Garamond and Cormorant Garamond subsets, for the installer's window | `installer/fonts` | The EB Garamond Project Authors; the Cormorant Project Authors | SIL OFL 1.1 |
 
 Each license file sits next to its component. These are not part of this repository and not included in the
-installer; they are downloaded from their official sources only when you tick them:
+installer; they are downloaded from their official sources only when you tick them (the script installers, which have
+no boxes, download Obsidian, the fonts and the two diagram plugins):
 
 | Component | Source | License |
 |---|---|---|
 | [Longform](https://github.com/kevboh/longform) 2.1.0 | its official GitHub release | its own license (see its repository) |
+| [TikZJax](https://github.com/artisticat1/obsidian-tikzjax) 0.5.2 | its own GitHub release, into the vault's `.obsidian/plugins` | MIT |
+| [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) 2.29.2 | its own GitHub release, into the vault's `.obsidian/plugins` | AGPL-3.0 |
 | [Obsidian](https://obsidian.md) 1.15.0 | its official GitHub release | proprietary (free to use) |
 | [EB Garamond](https://github.com/google/fonts/tree/main/ofl/ebgaramond), [Cormorant Garamond](https://github.com/google/fonts/tree/main/ofl/cormorantgaramond) | Google Fonts' GitHub repository | SIL Open Font License 1.1 |
 | [rclone](https://rclone.org) 1.76.0 | `downloads.rclone.org` (or its GitHub release), by the Scriptorium plugin, when you agree in the Google Drive sync's window | MIT |
@@ -785,7 +843,9 @@ Scriptorium Setup downloads the following, and only when you tick the matching o
 - Obsidian's official installer, from Obsidian's GitHub releases (`github.com/obsidianmd/obsidian-releases`);
 - the EB Garamond and Cormorant Garamond fonts, from Google Fonts' GitHub repository
   (`raw.githubusercontent.com/google/fonts`);
-- the Longform plugin's official release, from its GitHub releases (`github.com/kevboh/longform`).
+- the Longform plugin's official release, from its GitHub releases (`github.com/kevboh/longform`);
+- the TikZJax and Excalidraw plugins' official releases, from their GitHub releases
+  (`github.com/artisticat1/obsidian-tikzjax`, `github.com/zsviczian/obsidian-excalidraw-plugin`).
 
 Each download is verified against a SHA-256 hash pinned in the installer. Nothing is uploaded, and there is no
 telemetry, analytics or update check. Opening the new vault with its plugins on talks only to Obsidian on the same

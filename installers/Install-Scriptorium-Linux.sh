@@ -48,12 +48,17 @@ diagram_plugin() {   # id, name, version, GitHub repository, then a file name an
   shift 4
   mkdir -p "$dir"
   while [ $# -gt 0 ]; do
-    if ! curl --silent --fail --location --proto '=https' --tlsv1.2 "$base/$1" -o "$dir/$1" 2>/dev/null || ! soft_hash "$dir/$1" "$2"; then ok=0; break; fi
+    if ! curl --silent --fail --location --connect-timeout 30 --proto '=https' --tlsv1.2 "$base/$1" -o "$dir/$1" 2>/dev/null || ! soft_hash "$dir/$1" "$2"; then ok=0; break; fi
     shift 2
   done
   if [ "$ok" = 1 ]; then
     mkdir -p "$work_dir/vault/.obsidian/plugins/$id"
     cp "$dir"/* "$work_dir/vault/.obsidian/plugins/$id/"
+    # Excalidraw opens a "Welcome to Excalidraw" window the first time it runs, until its previousRelease is its own
+    # version: that one setting is written with it (only where it has no settings yet), and Excalidraw fills in the rest.
+    if [ "$id" = obsidian-excalidraw-plugin ] && [ ! -e "$work_dir/vault/.obsidian/plugins/$id/data.json" ]; then
+      printf '{\n  "previousRelease": "%s"\n}\n' "$version" > "$work_dir/vault/.obsidian/plugins/$id/data.json"
+    fi
     list="$work_dir/vault/.obsidian/community-plugins.json"
     current="$(tr -d '\n' < "$list")"
     printf '%s, "%s"]\n' "${current%]*}" "$id" > "$list"

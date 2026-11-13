@@ -2152,7 +2152,8 @@ function describeVaultSetup(plan) {
    and every file is checked against its SHA-256 before anything is written (the same pins as the installers').
    TikZJax is MIT-licensed; the Excalidraw plugin is AGPL-3.0.
    installDiagramPlugins(fs, path, crypto, dir, fetch) -> {id: 'installed' | 'updated' | 'kept' | 'failed'}: a plugin
-   the vault has at the pinned version or a newer one is left exactly as it is, and so are its settings; one that
+   the vault has at the pinned version or a newer one is left exactly as it is, and so are its settings; only a
+   plugin installed new is turned on (one the writer turned off stays off, even if its files are updated); one that
    cannot be downloaded, or does not match, is not installed, and nothing of it is written. fetch(url) resolves to
    the bytes (a Buffer or a Uint8Array). */
 const DIAGRAM_PLUGINS = [
@@ -2175,6 +2176,22 @@ async function fetchRelease(url) {
   if (res.status !== 200) throw new Error(`status ${res.status}`);
   return new Uint8Array(res.arrayBuffer);
 }
+/* The names of the diagram plugins that installDiagramPlugins would download into the vault in dir. */
+function diagramPluginsWanted(fs, path, dir, plugins) {
+  return (plugins || DIAGRAM_PLUGINS).filter(p => {
+    const folder = path.join(dir, '.obsidian', 'plugins', p.id);
+    let had = null;
+    try { had = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8')).version || null; } catch (e) { had = null; }
+    return !(had !== null && versionAtLeast(had, p.version) && fs.existsSync(path.join(folder, 'main.js')));
+  }).map(p => p.name);
+}
+/* The data.json written with a plugin that is installed new, where it has none; null for most. Excalidraw opens a
+   "Welcome to Excalidraw" window the first time it runs, while its previousRelease is older than the plugin, and sets
+   previousRelease to its own version when that window is closed: writing that one setting keeps the window shut.
+   Excalidraw fills in the rest with its defaults, and still shows release notes after a later update. */
+function diagramFirstSettings(p) {
+  return p.id === 'obsidian-excalidraw-plugin' ? `{\n  "previousRelease": "${p.version}"\n}\n` : null;
+}
 async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
   const result = {};
   for (const p of plugins || DIAGRAM_PLUGINS) {
@@ -2191,20 +2208,28 @@ async function installDiagramPlugins(fs, path, crypto, dir, fetch, plugins) {
           files[name] = data;
         }
         fs.mkdirSync(folder, { recursive: true });
-        for (const name of Object.keys(files)) {         // (its settings, data.json, are never touched)
+        for (const name of Object.keys(files)) {         // (settings that are there, data.json, are never touched)
           const tmp = path.join(folder, `${name}.scriptorium-tmp`);
           fs.writeFileSync(tmp, files[name]);
           fs.renameSync(tmp, path.join(folder, name));
         }
         result[p.id] = had !== null ? 'updated' : 'installed';
+        const settings = had === null ? diagramFirstSettings(p) : null;
+        if (settings && !fs.existsSync(path.join(folder, 'data.json'))) fs.writeFileSync(path.join(folder, 'data.json'), settings);
       } catch (e) {
         result[p.id] = 'failed';
         continue;
       }
     }
+    // Only a plugin installed new is turned on: one that was there and is not in the list was turned off by the writer.
+    if (result[p.id] !== 'installed') continue;
     const listing = path.join(dir, '.obsidian', 'community-plugins.json');
+    // (a list that is there but is not a JSON list is left as it is: the plugin is installed, and is turned on in Settings)
     let on = [];
-    try { on = JSON.parse(fs.readFileSync(listing, 'utf8')); if (!Array.isArray(on)) on = []; } catch (e) { on = []; }
+    if (fs.existsSync(listing)) {
+      try { on = JSON.parse(fs.readFileSync(listing, 'utf8').replace(/^\uFEFF/, '')); } catch (e) { on = null; }
+      if (!Array.isArray(on)) continue;
+    }
     if (!on.includes(p.id)) {
       on.push(p.id);
       fs.mkdirSync(path.dirname(listing), { recursive: true });
@@ -2366,7 +2391,22 @@ class SetupVaultModal extends Modal {
     if (!plan.changes.length) {
       el.createEl('p', { text: 'Scriptorium is already set up here: nothing to change.' });
       for (const n of plan.notes) el.createEl('p', { cls: 'scriptorium-setup-note', text: n });
-      buttons().createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
+      // (a vault that was set up while the diagram plugins could not be downloaded can still be given them)
+      const wanted = diagramPluginsWanted(this.fs, this.path, this.target);
+      const row = buttons();
+      if (wanted.length) {
+        const diagrams = el.createEl('p', { cls: 'scriptorium-setup-note', text: `${wanted.join(' and ')}, for diagrams, ${wanted.length === 1 ? 'is' : 'are'} not in this vault: ${wanted.length === 1 ? 'it' : 'they'} can be downloaded from ${wanted.length === 1 ? 'its' : 'their'} own release${wanted.length === 1 ? '' : 's'} on GitHub.` });
+        el.insertBefore(diagrams, row);
+        const add = row.createEl('button', { text: `Add ${wanted.join(' and ')}` });
+        add.addEventListener('click', () => {
+          add.disabled = true;
+          diagrams.setText(`Adding ${wanted.join(' and ')}…`);
+          installDiagramPlugins(this.fs, this.path, require('crypto'), this.target, fetchRelease).then(
+            r => diagrams.setText(diagramPluginsNote(r) || 'TikZJax and Excalidraw are already in the vault.'),
+            () => diagrams.setText('The plugins could not be added; use Settings → Community plugins → Browse in the vault.'));
+        });
+      }
+      row.createEl('button', { cls: 'mod-cta', text: 'Close' }).addEventListener('click', () => this.close());
       return;
     }
     const replaced = plan.changes.filter(c => c.replaces).length, added = plan.changes.length - replaced;
@@ -5034,7 +5074,7 @@ Object.assign(module.exports, {
   normalizeSettings, marginGeometry, stackNotes, footnoteMarkdown, footnoteDefinitions, parseFootnoteDefinitions,
   refLabel, captionFromParts, parseImageEmbed, externalImages, sourceKey,
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
-  DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsNote, versionAtLeast,
+  DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsWanted, diagramPluginsNote, versionAtLeast,
   noteDropcap, dropcapChoices, markDropcap, isPrintPage, dressPrint,
   alignKind, alignMarker, noteAlign, alignPlan, sectionMarks, alignClasses, blockLines, blockMarks, alignEdits, alignDropcapEdits, applyLineEdits, lineAfterEdits, markAligned,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
