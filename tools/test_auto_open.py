@@ -449,6 +449,135 @@ def find_obsidian_windows(work):
                 pass
 
 
+# ---- Asking the open vault for its plugins ----
+# "plugins:restrict off" starts every plugin and reloads the vault ten milliseconds later, which cut Excalidraw off while
+# it wrote its first settings: on the way back it reported "Excalidraw data.json was empty or unreadable". So each
+# installer first marks the vault as trusted through "eval" and reloads it before any plugin has started, and only if
+# Obsidian says that did not take ("=> no") sends "plugins:restrict off". Checked here: the four installers carry the
+# same code; what the code does in a pretend Obsidian; and the order each installer asks in, against scripted answers.
+SETUP_CS = ROOT / "installer" / "ScriptoriumSetup.cs"
+
+
+def quiet_code(path):
+    m = re.search(r"TRUST_QUIETLY_START\r?\n[^\n]*?\"code=([^\"\n]*)\"\s*;?\r?\n\s*(?://|#) TRUST_QUIETLY_END", path.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
+
+
+QUIET_DRIVER = r"""
+const code = process.argv[1], scenario = process.argv[2];
+const store = new Map(scenario === 'refused' ? [['enable-plugin-abc', 'false']] : []);
+let reloads = 0, timers = [];
+const localStorage = { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => { store.set(k, String(v)); }, removeItem: k => { store.delete(k); } };
+const location = { reload: () => { reloads++; } };
+const setTimeout = (f, ms) => { timers.push(ms); f(); };
+const app = { appId: 'abc', plugins: { loaded: 0, isEnabled: () => {
+  if (scenario === 'throws') throw new Error('no such thing');
+  if (scenario === 'trusted') return true;
+  if (scenario === 'elsewhere' || scenario === 'refused') return false;   // a later Obsidian that keeps the answer elsewhere
+  return store.get('enable-plugin-abc') === 'true'; } } };
+const answer = eval(code);
+console.log(JSON.stringify({ answer, reloads, timers, store: [...store], loaded: app.plugins.loaded }));
+"""
+
+
+def trust_quietly():
+    print("\nAsking the open vault for its plugins: the quiet way")
+    codes = {p.name: quiet_code(p) for p in (LINUX, MACOS, WINDOWS, SETUP_CS)}
+    check(all(codes.values()) and len(set(codes.values())) == 1, "the four installers carry the same code for the quiet way")
+    code = codes[LINUX.name] or ""
+    check(not re.search(r"[$`\"\\]", code), "the code has no character that a shell, PowerShell or C# string would change")
+    check("plugins:restrict" in WINDOWS.read_text(encoding="utf-8").split("TRUST_QUIETLY_END")[1].split("$clock.Restart()")[0]
+          and "'eval', $trustQuietly" in WINDOWS.read_text(encoding="utf-8"),
+          "Install-Scriptorium-Windows.cmd: sends the quiet way, and still has \"plugins:restrict off\" to fall back on")
+    if not shutil.which("node"):
+        print("node is not on PATH: what the code does is not tested")
+        return
+
+    def run(scenario):
+        r = subprocess.run(["node", "-e", QUIET_DRIVER, "--", code, scenario], capture_output=True, text=True, timeout=60)
+        try:
+            return json.loads(r.stdout)
+        except ValueError:
+            return {"answer": "FAILED: " + r.stderr[-300:]}
+
+    r = run("new")
+    check(r.get("answer") == "reloading" and r.get("store") == [["enable-plugin-abc", "true"]] and r.get("reloads") == 1 and r.get("timers") == [10],
+          "a new vault: marked as trusted, reloaded once, and Obsidian answers \"reloading\"")
+    r = run("trusted")
+    check(r.get("answer") == "on" and r.get("store") == [] and r.get("reloads") == 0, "a vault that is trusted already: nothing is written, nothing reloads, \"on\"")
+    r = run("elsewhere")
+    check(r.get("answer") == "no" and r.get("store") == [] and r.get("reloads") == 0,
+          "an Obsidian that does not read the mark: the mark is taken back, nothing reloads, \"no\" (so \"plugins:restrict off\" is sent)")
+    r = run("refused")
+    check(r.get("answer") == "no" and r.get("store") == [["enable-plugin-abc", "false"]] and r.get("reloads") == 0,
+          "... and a value that was there before is put back as it was")
+    r = run("throws")
+    check(r.get("answer") == "no" and r.get("reloads") == 0, "an Obsidian without these functions: \"no\", not an error")
+
+
+# The scripted Obsidians: (name, answers in order ("-" = no answer; the last one repeats), commands expected, trusted?)
+QUIET = "eval <quiet>"
+ASK_CASES = [
+    ("Obsidian not up yet, then the quiet way works", ["-", "Error: Command \"eval\" not found.", "=> reloading", "Error: Command \"plugins:restrict\" not found.", "off"],
+     ["vault=ID " + QUIET] * 3 + ["vault=ID plugins:restrict"] * 2, True),
+    ("the vault is trusted already", ["=> on", "off"], ["vault=ID " + QUIET, "vault=ID plugins:restrict"], True),
+    ("the quiet way does not take: \"plugins:restrict off\" as before", ["=> no", "Restricted mode disabled. Reloading...", "on", "off"],
+     ["vault=ID " + QUIET, "vault=ID plugins:restrict off", "vault=ID plugins:restrict", "vault=ID plugins:restrict"], True),
+    ("the interface is not on: given up at once", ["Command line interface is not enabled. Enable it in Settings."], ["vault=ID " + QUIET], False),
+]
+
+ASK_STUB = r"""
+answers="$1"; sent="$2"; vault_id=ID; asked=no; trusted=no; quiet=yes
+sleep() { :; }
+# (ask_obsidian runs in a subshell, so the count of what was asked is the file's length; a script that never stops
+# asking is stopped)
+ask_obsidian() {
+  local n total line
+  shift
+  if [ "$2" = eval ] && [ "$3" = "$trust_quietly" ]; then set -- "$1" eval '<quiet>'; fi
+  printf '%s\n' "$*" >> "$sent"
+  n=$(($(wc -l < "$sent"))); total=$(($(wc -l < "$answers")))
+  if [ "$n" -gt 40 ]; then kill "$$"; fi
+  if [ "$n" -gt "$total" ]; then n="$total"; fi
+  line="$(sed -n "${n}p" "$answers")"
+  [ "$line" = - ] || printf '%s\n' "$line"
+}
+"""
+
+
+def ask_order(work):
+    for path in (LINUX, MACOS):
+        print(f"\n{path.name}: the order it asks the open vault in")
+        quiet = section(path, "# TRUST_QUIETLY_START", "# TRUST_QUIETLY_END")
+        loop = section(path, "  # ASK_START", "  # ASK_END")
+        for k, (what, answers, expected, trusted) in enumerate(ASK_CASES):
+            a, sent = work / f"answers-{path.stem}-{k}", work / f"sent-{path.stem}-{k}"
+            a.write_text("\n".join(answers) + "\n", encoding="utf-8")
+            sent.write_text("")
+            script = quiet + ASK_STUB + "SECONDS=0\n" + loop + '\nprintf \'%s\\n\' "$trusted"\n'
+            r = subprocess.run(["bash", "-c", script, "ask", str(a), str(sent)], capture_output=True, text=True, timeout=120)
+            got = sent.read_text().splitlines()
+            check(r.returncode == 0 and got == expected and r.stdout.strip() == ("yes" if trusted else "no"),
+                  f"{path.name}: {what}" + ("" if got == expected else f" (sent {got}, {r.stderr[-200:]})"))
+
+
+def ask_order_exe(exe, work):
+    print("\nScriptorium-Setup.exe: the order it asks the open vault in")
+    if os.name == "nt":
+        cmd = [str(exe)]
+    else:
+        mono = os.environ.get("MONO")
+        cmd = [os.path.join(mono, "bin", "mono") if mono else "mono", str(exe)]
+    for k, (what, answers, expected, trusted) in enumerate(ASK_CASES):
+        a = work / f"answers-exe-{k}"
+        a.write_text("\n".join(answers) + "\n", encoding="utf-8")
+        r = subprocess.run(cmd + ["--ask-only", str(a)], capture_output=True, text=True, timeout=120)
+        lines = r.stdout.splitlines()
+        want = [e.replace("vault=ID", "vault=0123456789abcdef") for e in expected]
+        check(lines[:-1] == want and (lines[-1:] == ["trusted"]) == trusted and (r.returncode == 0) == trusted,
+              f"Scriptorium-Setup.exe: {what}" + ("" if lines[:-1] == want else f" (sent {lines[:-1]})"))
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: test_auto_open.py Scriptorium-Setup.exe | --scripts-only")
@@ -477,6 +606,12 @@ def main():
         else:
             find_obsidian_linux(Path(tmp))
             find_obsidian_macos(Path(tmp))
+    trust_quietly()
+    with tempfile.TemporaryDirectory(prefix="scriptorium-ask-") as tmp:
+        if os.name != "nt":
+            ask_order(Path(tmp))
+        if sys.argv[1] != "--scripts-only":
+            ask_order_exe(Path(sys.argv[1]).resolve(), Path(tmp))
     print(f"\n{'All auto-open checks passed.' if not failures else f'{len(failures)} check(s) FAILED:'}")
     for f in failures:
         print("  " + f)

@@ -87,7 +87,7 @@ try {
     $archive = Join-Path $tempPath 'Writing.zip'
     Get-ScriptoriumDownload -Uri 'https://williamliaw.com/assets/downloads/Scriptorium.zip' -OutFile $archive
     $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne 'bdee444b38250ef0c846d123aee8def623fd2453b3c1fb7a4877c212356ed8e8') { throw 'Package verification failed. Please download the current installer from the Projects page.' }
+    if ($actualHash -ne '103c21c4b320bd1f2b4f6d41e12ec58e7e8ab11d5adf3e32467961904193b069') { throw 'Package verification failed. Please download the current installer from the Projects page.' }
     $staging = Join-Path $tempPath 'vault'
     Expand-Archive -LiteralPath $archive -DestinationPath $staging
     if (!(Test-Path -LiteralPath (Join-Path $staging '.obsidian/appearance.json'))) { throw 'Invalid configuration archive.' }
@@ -389,7 +389,8 @@ public static class ScriptoriumFonts {
     # while "cli": true is in Obsidian's obsidian.json, which Obsidian reads when it starts and rewrites while it runs. So,
     # with Obsidian closed, this adds the vault to obsidian.json's vault list and turns the interface on, starts Obsidian
     # on the vault, asks it (through its pipe, as Obsidian.com does) to leave Restricted mode, and turns the interface off
-    # again through Obsidian (unless it was on already). If anything fails, Obsidian asks its usual question.
+    # again through Obsidian (unless it was on already). If anything fails, Obsidian asks its usual question. (The same
+    # answer is given a quieter way first, which does not start the plugins twice: see $trustQuietly below.)
     $obsidianSource = @'
 using System;
 using System.Collections.Generic;
@@ -544,11 +545,23 @@ public static class ScriptoriumObsidian {
                 } else {
                     # Until Obsidian is up there is no pipe; then Obsidian answers once the vault has loaded (just after
                     # loading it may not know the command yet, and says so: ask again).
+                    # "plugins:restrict off" turns every plugin on and reloads the vault ten milliseconds later, and a
+                    # plugin that is still writing its settings then is cut off in the middle (Excalidraw, on its first
+                    # start, was left with an empty data.json and said so). So the answer is given the quiet way first:
+                    # through "eval", the vault is marked as trusted, which is all "plugins:restrict off" records, and
+                    # reloaded before any plugin has started. Obsidian itself is asked whether it now counts the vault as
+                    # trusted; if not ("=> no": the mark is taken back), "plugins:restrict off" is used as before.
+                    # TRUST_QUIETLY_START
+                    $trustQuietly = "code=(()=>{try{const p=app.plugins,k='enable-plugin-'+app.appId,was=localStorage.getItem(k);if(p.isEnabled())return 'on';localStorage.setItem(k,'true');if(!p.isEnabled()){if(was===null)localStorage.removeItem(k);else localStorage.setItem(k,was);return 'no'}setTimeout(()=>location.reload(),10);return 'reloading'}catch(e){return 'no'}})()"
+                    # TRUST_QUIETLY_END
                     $asked = $false
+                    $quiet = $true
                     $clock = [Diagnostics.Stopwatch]::StartNew()
                     while (!$asked -and $clock.Elapsed.TotalSeconds -lt 120) {
-                        $answer = [ScriptoriumObsidian]::Send(@("vault=$vaultId", 'plugins:restrict', 'off'), 60000)
-                        if ($answer -like 'Restricted mode disabled*' -or $answer -like 'Restricted mode is already disabled*') { $asked = $true }
+                        if ($quiet) { $answer = [ScriptoriumObsidian]::Send(@("vault=$vaultId", 'eval', $trustQuietly), 60000) }
+                        else { $answer = [ScriptoriumObsidian]::Send(@("vault=$vaultId", 'plugins:restrict', 'off'), 60000) }
+                        if ($answer -eq '=> reloading' -or $answer -eq '=> on' -or $answer -like 'Restricted mode disabled*' -or $answer -like 'Restricted mode is already disabled*') { $asked = $true }
+                        elseif ($answer -eq '=> no') { $quiet = $false }
                         elseif ($answer -like 'Command line interface is not enabled*' -or $answer -like 'Vault not found*') { break }
                         else { Start-Sleep -Milliseconds 500 }
                     }

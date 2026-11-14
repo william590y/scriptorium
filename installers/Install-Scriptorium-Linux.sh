@@ -31,7 +31,7 @@ verify_hash() {
   actual_hash="${actual_hash%% *}"
   [ "$actual_hash" = "$2" ] || { echo "Download verification failed for $1."; exit 1; }
 }
-verify_hash "$work_dir/Writing.zip" 'bdee444b38250ef0c846d123aee8def623fd2453b3c1fb7a4877c212356ed8e8'
+verify_hash "$work_dir/Writing.zip" '103c21c4b320bd1f2b4f6d41e12ec58e7e8ab11d5adf3e32467961904193b069'
 unzip -q "$work_dir/Writing.zip" -d "$work_dir/vault"
 [ -f "$work_dir/vault/.obsidian/appearance.json" ] || { printf 'Invalid configuration archive.\n'; exit 1; }
 # ---- The diagram plugins ----
@@ -246,6 +246,18 @@ vault_path="$(cd "$destination" && pwd)"
 # with Obsidian closed, this adds the vault to obsidian.json's vault list and turns the interface on, starts Obsidian on
 # the vault, asks it to leave Restricted mode, and turns the interface off again through Obsidian (unless it was on
 # already). If anything fails, Obsidian asks its usual question.
+#
+# How it asks. "plugins:restrict off" turns every plugin on and reloads the vault ten milliseconds later, and a plugin
+# that is still writing its settings then is cut off in the middle: Excalidraw, on its first start, was left with an
+# empty data.json and said so when the vault came back ("Excalidraw data.json was empty or unreadable. The last known
+# good settings were restored automatically."). So the answer is given the quiet way first: through the interface's
+# "eval", the vault is marked as trusted, which is all "plugins:restrict off" records, and reloaded before any plugin has
+# started; the plugins then start once, in a vault that stays open. Obsidian itself is asked whether it now counts the
+# vault as trusted (app.plugins.isEnabled()); if it does not, because a later Obsidian keeps the answer elsewhere, the
+# mark is taken back and "plugins:restrict off" is used as before. Either way the reloaded vault confirms.
+# TRUST_QUIETLY_START
+trust_quietly="code=(()=>{try{const p=app.plugins,k='enable-plugin-'+app.appId,was=localStorage.getItem(k);if(p.isEnabled())return 'on';localStorage.setItem(k,'true');if(!p.isEnabled()){if(was===null)localStorage.removeItem(k);else localStorage.setItem(k,was);return 'no'}setTimeout(()=>location.reload(),10);return 'reloading'}catch(e){return 'no'}})()"
+# TRUST_QUIETLY_END
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian"
 obsidian_kind=other   # appimage or native: an Obsidian that keeps its settings in $config_dir
 cli_client=""         # Obsidian's command line client, shipped with Obsidian 1.12 and later
@@ -356,7 +368,7 @@ ask_obsidian() {
 
 # Returns 0 if the vault is open with its plugins on, 2 if it is open without them, 1 if it was not opened.
 open_new_vault() {
-  local registration vault_id prior_cli answer asked=no trusted=no restored=no deadline turn_on=no
+  local registration vault_id prior_cli answer asked=no trusted=no restored=no deadline turn_on=no quiet=yes
   if [ "$obsidian_kind" = other ]; then
     printf 'Scriptorium does not know where this Obsidian (%s) keeps its vault list, so it did not open the vault.\n' "${launcher[*]}"
     return 1
@@ -385,11 +397,17 @@ open_new_vault() {
   fi
   # Until Obsidian is up its client cannot reach it; then Obsidian answers once the vault has loaded (just after loading
   # it may not know the command yet, and says so: ask again).
+  # ASK_START
   deadline=$((SECONDS + 120))
   while [ "$asked" = no ] && [ "$SECONDS" -lt "$deadline" ]; do
-    answer="$(ask_obsidian 60 "vault=$vault_id" plugins:restrict off)"
+    if [ "$quiet" = yes ]; then
+      answer="$(ask_obsidian 60 "vault=$vault_id" eval "$trust_quietly")"
+    else
+      answer="$(ask_obsidian 60 "vault=$vault_id" plugins:restrict off)"
+    fi
     case "$answer" in
-      'Restricted mode disabled'*|'Restricted mode is already disabled'*) asked=yes ;;
+      '=> reloading'|'=> on'|'Restricted mode disabled'*|'Restricted mode is already disabled'*) asked=yes ;;
+      '=> no') quiet=no ;;   # this Obsidian does not keep the answer there: ask the way that turns the plugins on first
       'Command line interface is not enabled'*|'Vault not found'*) break ;;
       *) sleep 1 ;;
     esac
@@ -399,6 +417,7 @@ open_new_vault() {
   while [ "$asked" = yes ] && [ "$trusted" = no ] && [ "$SECONDS" -lt "$deadline" ]; do
     if [ "$(ask_obsidian 60 "vault=$vault_id" plugins:restrict)" = off ]; then trusted=yes; else sleep 1; fi
   done
+  # ASK_END
   if [ "$prior_cli" != on ]; then
     # Turn the interface off again through Obsidian's own setting, which also updates obsidian.json.
     for _ in 1 2 3 4 5 6 7 8 9 10; do
