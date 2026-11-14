@@ -514,10 +514,20 @@ the installers, with Obsidian closed:
 1. add the new vault to the vault list in `obsidian.json` (`%APPDATA%\obsidian`, `~/Library/Application
    Support/obsidian` or `~/.config/obsidian`), keeping every other vault and setting, and set `"cli": true`;
 2. start Obsidian on the vault;
-3. send `vault=<id> plugins:restrict off` until Obsidian answers (it then reloads the vault with the plugins on), and
-   wait for the reloaded vault to report `plugins:restrict` = `off`;
+3. ask the vault to leave Restricted mode until Obsidian answers, and wait for the reloaded vault to report
+   `plugins:restrict` = `off`. `plugins:restrict off` would do, but it starts every plugin and reloads the vault ten
+   milliseconds later, and a plugin that is still writing its settings then is cut off in the middle (Excalidraw, on
+   its first start, was left with an empty `data.json` and said so). So since 1.4.2 the same answer is given a
+   quieter way first: through the interface's `eval`, the vault is marked as trusted, which is all
+   `plugins:restrict off` records, and reloaded before any plugin has started; the plugins then start once. Obsidian
+   itself is asked whether it now counts the vault as trusted, and if it does not, the mark is taken back and
+   `plugins:restrict off` is sent as before;
 4. turn the command line interface off again through Obsidian itself (its own setting switch), unless it was on
    before.
+
+`plugins-tests/first-launch.harness.mjs` makes a vault by each route that runs on Linux, opens it in a real Obsidian
+the way that route does, and fails if anything complains on the first launch or the second (a notice about Excalidraw
+or an unreadable file, a window other than Obsidian's own question, a plugin started in a page that is then reloaded).
 
 They talk to Obsidian the way its own client does: Setup and the Windows script through the pipe
 `\\.\pipe\obsidian-cli-<user>`, the macOS and Linux scripts with the `obsidian-cli` that comes with Obsidian. If

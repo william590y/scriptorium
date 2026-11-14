@@ -166,6 +166,23 @@ namespace ScriptoriumSetup
                 }
                 catch (Exception e) { Console.Error.WriteLine("FAILED: " + e.Message); return 1; }
             }
+            // Headless (used by the tests): how the open vault is asked for its plugins, against scripted answers. Each
+            // line of <file> is Obsidian's answer to the next command ("-" for no answer); when they run out, the last
+            // one repeats. Prints each command sent (the quiet one as "eval <quiet>"), then "trusted" or the problem.
+            if (args.Length == 2 && args[0] == "--ask-only")
+            {
+                string[] answers = File.ReadAllLines(Path.GetFullPath(args[1]), Encoding.UTF8);
+                int next = 0;
+                string problem;
+                bool ok = AutoOpen.Ask("vault=0123456789abcdef", 3000, 1500, 10, CancellationToken.None, (argv, ms) =>
+                {
+                    Console.WriteLine(string.Join(" ", argv).Replace(AutoOpen.QuietCode, "<quiet>"));
+                    string a = answers.Length == 0 ? "-" : answers[Math.Min(next++, answers.Length - 1)];
+                    return a == "-" ? null : a;
+                }, out problem);
+                Console.WriteLine(ok ? "trusted" : "not trusted: " + problem);
+                return ok ? 0 : 1;
+            }
             // Headless (used by the tests): whether Obsidian counts as installed, given what the registry says the
             // obsidian:// links run ("" for no such link) and the folders programs are installed in. Exit code 0 if it is.
             if (args.Length == 1 && args[0] == "--find-obsidian")   // this computer, as the window decides it
@@ -1689,9 +1706,9 @@ namespace ScriptoriumSetup
     // "plugins:restrict off" does what the question's "Trust author and enable plugins" button does, then reloads the vault
     // with its plugins on. The interface answers only while "cli": true is in Obsidian's obsidian.json, which Obsidian
     // reads when it starts and rewrites while it runs. So, with Obsidian closed, setup adds the vault to the vault list in
-    // obsidian.json (keeping every other key and vault) and turns the interface on; starts Obsidian on the vault; sends
-    // "plugins:restrict off" through Obsidian's pipe until Obsidian answers; and turns the interface off again through
-    // Obsidian itself, unless it was already on. If anything fails, Obsidian asks its usual question, and the interface is
+    // obsidian.json (keeping every other key and vault) and turns the interface on; starts Obsidian on the vault; asks
+    // through Obsidian's pipe until Obsidian answers (the same answer given a quieter way first: see TrustQuietly); and
+    // turns the interface off again through Obsidian itself, unless it was already on. If anything fails, Obsidian asks its usual question, and the interface is
     // still turned off: through Obsidian if it answers, otherwise in obsidian.json once Obsidian has closed.
     static class AutoOpen
     {
@@ -1721,6 +1738,19 @@ namespace ScriptoriumSetup
         // The answer that turns the interface off: Obsidian's own setting switch ("cli" over its ipc), which also updates
         // obsidian.json. Obsidian answers "=> false" (the interface's new state).
         const string CliOff = "code=require('electron').ipcRenderer.sendSync('cli',false)";
+        // How setup asks for the plugins. "plugins:restrict off" turns every plugin on and reloads the vault ten
+        // milliseconds later, and a plugin that is still writing its settings then is cut off in the middle: Excalidraw, on
+        // its first start, was left with an empty data.json and said so when the vault came back ("Excalidraw data.json was
+        // empty or unreadable. The last known good settings were restored automatically."). So the answer is given the
+        // quiet way first: through the interface's "eval", the vault is marked as trusted, which is all "plugins:restrict
+        // off" records, and reloaded before any plugin has started; the plugins then start once, in a vault that stays
+        // open. Obsidian itself is asked whether it now counts the vault as trusted (app.plugins.isEnabled()); if it does
+        // not, because a later Obsidian keeps the answer elsewhere, the mark is taken back, Obsidian answers "=> no", and
+        // "plugins:restrict off" is used as before. Obsidian answers "=> reloading", or "=> on" if the vault was trusted.
+        // TRUST_QUIETLY_START
+        const string TrustQuietly = "code=(()=>{try{const p=app.plugins,k='enable-plugin-'+app.appId,was=localStorage.getItem(k);if(p.isEnabled())return 'on';localStorage.setItem(k,'true');if(!p.isEnabled()){if(was===null)localStorage.removeItem(k);else localStorage.setItem(k,was);return 'no'}setTimeout(()=>location.reload(),10);return 'reloading'}catch(e){return 'no'}})()";
+        // TRUST_QUIETLY_END
+        public static string QuietCode { get { return TrustQuietly; } }   // (for the headless --ask-only)
         static readonly object gate = new object();
         static Registration pending;   // setup turned the interface on, and it is not off again yet
         static string pendingFile;
@@ -1991,32 +2021,46 @@ namespace ScriptoriumSetup
             o.Result = Result.Opened;
             if (!cli) { o.Problem = "this Obsidian is older than 1.12 and has no command line interface"; return o; }
 
-            string target = "vault=" + r.Id;
-            bool asked = false, trusted = false;
+            string problem;
+            if (Ask("vault=" + r.Id, timeoutMs, 60000, 500, cancel, Send, out problem)) o.Result = Result.Trusted;
+            else o.Problem = problem;
+            o.CliPending = !Settle(false);
+            return o;
+        }
+
+        // Asks the open vault to leave Restricted mode and waits until the reloaded vault confirms: true if it did, else
+        // the problem. The quiet way first (TrustQuietly), then, if Obsidian answers that it did not take ("=> no"),
+        // "plugins:restrict off". send(arguments, time allowed) is Send; the tests give it scripted answers.
+        public static bool Ask(string target, int timeoutMs, int confirmMs, int pauseMs, CancellationToken cancel,
+                               Func<string[], int, string> send, out string problem)
+        {
+            problem = null;
+            bool asked = false, trusted = false, quiet = true;
             var clock = Stopwatch.StartNew();
-            while (!asked && o.Problem == null && clock.ElapsedMilliseconds < timeoutMs && !cancel.IsCancellationRequested)
+            while (!asked && problem == null && clock.ElapsedMilliseconds < timeoutMs && !cancel.IsCancellationRequested)
             {
                 // Until Obsidian is up there is no pipe; then Obsidian answers once the vault has loaded.
-                string answer = Send(new[] { target, "plugins:restrict", "off" }, timeoutMs - (int)clock.ElapsedMilliseconds);
-                if (answer == null) { Thread.Sleep(500); continue; }
-                if (answer.StartsWith("Restricted mode disabled", StringComparison.Ordinal) ||
+                string answer = send(quiet ? new[] { target, "eval", TrustQuietly } : new[] { target, "plugins:restrict", "off" },
+                                     timeoutMs - (int)clock.ElapsedMilliseconds);
+                if (answer == null) { Thread.Sleep(pauseMs); continue; }
+                if (answer == "=> reloading" || answer == "=> on" ||
+                    answer.StartsWith("Restricted mode disabled", StringComparison.Ordinal) ||
                     answer.StartsWith("Restricted mode is already disabled", StringComparison.Ordinal)) asked = true;
+                else if (answer == "=> no") quiet = false;
                 else if (answer.StartsWith("Command line interface is not enabled", StringComparison.Ordinal) ||
-                         answer.StartsWith("Vault not found", StringComparison.Ordinal)) o.Problem = "Obsidian answered \"" + answer + "\"";
-                else Thread.Sleep(500);
+                         answer.StartsWith("Vault not found", StringComparison.Ordinal)) problem = "Obsidian answered \"" + answer + "\"";
+                else Thread.Sleep(pauseMs);
             }
             // Obsidian reloads the vault after answering; the next answer comes from the reloaded vault.
             clock.Restart();
-            while (asked && !trusted && clock.ElapsedMilliseconds < 60000 && !cancel.IsCancellationRequested)
+            while (asked && !trusted && clock.ElapsedMilliseconds < confirmMs && !cancel.IsCancellationRequested)
             {
-                if (Send(new[] { target, "plugins:restrict" }, 60000 - (int)clock.ElapsedMilliseconds) == "off") trusted = true;
-                else Thread.Sleep(500);
+                if (send(new[] { target, "plugins:restrict" }, confirmMs - (int)clock.ElapsedMilliseconds) == "off") trusted = true;
+                else Thread.Sleep(pauseMs);
             }
-            if (trusted) o.Result = Result.Trusted;
-            else if (o.Problem == null)
-                o.Problem = cancel.IsCancellationRequested ? "setup was stopped" : asked ? "Obsidian did not confirm that the plugins are on" : "Obsidian did not answer in time";
-            o.CliPending = !Settle(false);
-            return o;
+            if (!trusted && problem == null)
+                problem = cancel.IsCancellationRequested ? "setup was stopped" : asked ? "Obsidian did not confirm that the plugins are on" : "Obsidian did not answer in time";
+            return trusted;
         }
 
         // Turns the command line interface off again if setup turned it on: through Obsidian (any open vault; none is
