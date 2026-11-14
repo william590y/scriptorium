@@ -3514,6 +3514,13 @@ function codeLabel(name) {
   return Object.prototype.hasOwnProperty.call(CODE_NAMES, n) ? CODE_NAMES[n] : n[0].toUpperCase() + n.slice(1);
 }
 
+/* The prose that is still open at the end of a streaming reply, as it is shown until its block is whole and is
+   rendered: without the marks that the rendered text hides (plainInline), and without those of emphasis or code
+   that is not closed yet. Pure. */
+function openProse(text) {
+  return plainInline(String(text == null ? '' : text).replace(/\s+$/, '')).replace(/\*\*|__|`/g, '');
+}
+
 /* ---- The list of edits under a reply or a task ----
    Each edit's words are Markdown of the note (a code block, a formula, a figure), and are set in the list as the
    chat sets a reply (renderChat), not as their source.
@@ -3564,10 +3571,10 @@ function mdBlocks(text) {
 /* The beginning of an edit's Markdown, for the list: {head, more}. A text of up to `max` lines (and a little over)
    is whole (more: 0). A longer one is cut to about `max` lines, only where Markdown allows it: between lines of
    prose; inside a code block between its lines, the block being closed again after them; never inside a displayed
-   formula or a figure, which are shown whole or not at all (whole when the text begins with them and they are not
-   longer than EDIT_ATOM lines); a table after its first three lines at the earliest. more is the number of the
+   formula or a figure, which are shown whole or not at all (whole where there is room for EDIT_FIGURE lines, or
+   when the text begins with them, and they are not longer than EDIT_ATOM lines); a table after its first three lines at the earliest. more is the number of the
    text's lines that head does not show. Pure. */
-const EDIT_LINES = 10, EDIT_SLACK = 3, EDIT_ATOM = 40;
+const EDIT_LINES = 10, EDIT_SLACK = 3, EDIT_ATOM = 40, EDIT_FIGURE = 4;
 function editPreview(text, max) {
   const t = String(text == null ? '' : text).replace(/^(?:[ \t]*\n)+/, '').replace(/\s+$/, '');
   const limit = max == null ? EDIT_LINES : max;
@@ -3575,16 +3582,23 @@ function editPreview(text, max) {
   if (total <= limit + EDIT_SLACK) return { head: t, more: 0 };
   const head = [];
   let shown = 0;                       // lines of the text that head shows (a fence put in to close a block is not one)
+  let used = 0;                        // what head takes of the limit: its lines, a figure or a formula for a few
   for (const b of mdBlocks(t)) {
-    const room = limit - shown, n = b.lines.length;
+    const room = limit - used, n = b.lines.length;
+    // A figure takes the room of EDIT_FIGURE lines however long its source (it is a picture in the list), and a
+    // displayed formula no more than that, as long as they are whole and not longer than EDIT_ATOM lines.
+    const atom = (b.kind === 'figure' && b.closed) || b.kind === 'math';
+    const cost = atom && n <= EDIT_ATOM ? Math.min(n, EDIT_FIGURE) : n;
     // (a code block that only its closing fence would be cut from is whole too)
-    if (n <= room || (b.kind === 'code' && b.closed && n === room + 1)) { head.push(...b.lines); shown += n; continue; }
+    if (cost <= room || (b.kind === 'code' && b.closed && n === room + 1)) { head.push(...b.lines); shown += n; used += cost; continue; }
     if (b.kind === 'code' && room >= 3) {
       head.push(...b.lines.slice(0, room), b.indent + b.fence);
       shown += room;
+      used += room;
     } else if (b.kind === 'table' && room >= 3) {
       head.push(...b.lines.slice(0, room));
       shown += room;
+      used += room;
     } else if ((b.kind === 'math' || b.kind === 'figure' || b.kind === 'code' || b.kind === 'table') && !head.join('').trim() && n <= EDIT_ATOM) {
       head.push(...b.lines);
       shown += n;
@@ -7245,7 +7259,8 @@ class LagrangeChatView extends ItemView {
   showOpen(el, tail) {
     const open = openTail(tail);
     el.empty();
-    if (open.text.trim()) el.createDiv({ cls: 'lagrange-open-text', text: open.text.replace(/\s+$/, '') });
+    // (its prose without the Markdown marks the rendered text will not show: no asterisks that come and go)
+    if (open.text.trim()) el.createDiv({ cls: 'lagrange-open-text', text: openProse(open.text) });
     if (open.kind === 'code') {
       const pre = el.createEl('pre', { cls: 'lagrange-open-code' });
       if (codeLabel(open.lang)) pre.setAttribute('data-lang', codeLabel(open.lang));
@@ -9142,5 +9157,5 @@ LagrangePlugin.internals = {
 Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
-Object.assign(LagrangePlugin.internals, { codeLabel, openTail, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
+Object.assign(LagrangePlugin.internals, { codeLabel, openTail, openProse, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

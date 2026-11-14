@@ -3126,13 +3126,21 @@ test('editPreview: a long edit is cut where Markdown allows, and says how many l
   assert.equal(late.more, 22);
   // a displayed formula and a figure are never cut: whole when the edit begins with them, else left for "more"
   const math = `$$\n\\begin{aligned}\n${lines(20, i => `a_${i} &= ${i} \\\\`)}\n\\end{aligned}\n$$`;
-  assert.deepEqual(L.editPreview(`${math}\n\nAfter.`), { head: math, more: 2 });
-  assert.deepEqual(L.editPreview(`Before.\n\n${math}`), { head: 'Before.', more: 25 });
+  assert.deepEqual(L.editPreview(`${math}\n\nAfter.`), { head: `${math}\n\nAfter.`, more: 0 }, 'a formula takes the room of a few lines, however long its source');
+  assert.deepEqual(L.editPreview(`Before.\n\n${math}`), { head: `Before.\n\n${math}`, more: 0 });
+  const para = lines(L.EDIT_LINES - 2, i => `p${i}`);
+  assert.deepEqual(L.editPreview(`${para}\n${math}\nAfter.`), { head: para, more: 25 }, 'with no room left for it, it waits whole for the button');
+  const longMath = `$$\n${lines(L.EDIT_ATOM + 5, i => `a_${i}`)}\n$$`;
+  assert.deepEqual(L.editPreview(`Before.\n\n${longMath}`), { head: 'Before.', more: L.EDIT_ATOM + 8 }, 'a very long formula is not set unasked');
   const tikz = `\`\`\`tikz\n\\begin{document}\n\\begin{tikzpicture}\n${lines(20, i => `\\draw (0,${i}) -- (1,${i});`)}\n\\end{tikzpicture}\n\\end{document}\n\`\`\``;
-  assert.deepEqual(L.editPreview(`${tikz}\n\nThe figure above.`), { head: tikz, more: 2 }, 'a figure is drawn whole');
-  assert.deepEqual(L.editPreview(`The figure:\n\n${tikz}`), { head: 'The figure:', more: 27 }, 'or not at all: half a figure is an error in TeX');
+  assert.deepEqual(L.editPreview(`${tikz}\n\nThe figure above.`), { head: `${tikz}\n\nThe figure above.`, more: 0 }, 'a figure is drawn whole: it is a picture, however long its source');
+  assert.deepEqual(L.editPreview(`The figure:\n\n${tikz}`), { head: `The figure:\n\n${tikz}`, more: 0 });
+  assert.deepEqual(L.editPreview(`${para}\n${tikz}`), { head: para, more: 26 }, 'or not at all: half a figure is an error in TeX');
+  const demo = `The five points, with the two masses:\n\n${L.DEMO_FIGURE}`;
+  assert.deepEqual(L.editPreview(demo), { head: demo, more: 0 }, 'the figure of the demo is drawn in the list');
   const mermaid = `\`\`\`mermaid\ngraph LR\n${lines(20, i => `  a${i} --> b${i}`)}\n\`\`\``;
-  assert.deepEqual(L.editPreview(`x\n\n${mermaid}`), { head: 'x', more: 24 });
+  assert.deepEqual(L.editPreview(`x\n\n${mermaid}\n\n${prose}`), { head: `x\n\n${mermaid}\n\n${lines(L.EDIT_LINES - L.EDIT_FIGURE - 3, i => `Paragraph ${i}.`)}`, more: 30 - (L.EDIT_LINES - L.EDIT_FIGURE - 3) });
+  assert.equal(L.editPreview(`x\n\n\`\`\`tikz\n${lines(20, i => `\\draw ${i};`)}`).head, 'x', 'a figure that does not close is not drawn');
   const huge = `\`\`\`tikz\n${lines(L.EDIT_ATOM + 10, i => `\\draw (0,${i}) -- (1,${i});`)}\n\`\`\``;
   assert.deepEqual(L.editPreview(huge), { head: '', more: L.EDIT_ATOM + 12 }, 'a very long figure waits for the button');
   // a table keeps its head
@@ -3184,6 +3192,14 @@ test('openTail: what is still open at the end of a streaming reply never shows h
     assert.equal((open.text.match(/\$\$/g) || []).length % 2, 0, `at ${i}`);
     if (open.kind === 'code') assert.ok(!/(^|\n)\s*(```|~~~)\s*$/.test(open.body), `at ${i}: ${JSON.stringify(open.body)}`);
   }
+});
+
+test('openProse: prose that is still streaming is shown without the marks its rendering will hide', () => {
+  assert.equal(L.openProse('Here is what the pen will set down in **On Balance**.'), 'Here is what the pen will set down in On Balance.');
+  assert.equal(L.openProse('Here is what the pen will set down in **On Bal'), 'Here is what the pen will set down in On Bal', 'nor the marks of emphasis that is not closed yet');
+  assert.equal(L.openProse('Call `hill_radius()` and then `hill'), 'Call hill_radius() and then hill');
+  assert.equal(L.openProse('## A heading\n\nWith a [link](https://example.org) and $x^2$.  \n'), 'A heading\n\nWith a link and $x^2$.');
+  assert.equal(L.openProse(''), '');
 });
 
 test('codeLabel: the name a code block carries in the chat', () => {
