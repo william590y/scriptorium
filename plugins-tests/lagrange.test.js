@@ -2588,7 +2588,7 @@ test('splitStable: a streaming reply is cut at whole blocks, never inside code o
     for (let i = 0; i <= doc.length; i++) { const d = L.splitStable(doc.slice(0, i)).done; assert.ok(d.startsWith(prev), `at ${i}: ${JSON.stringify(doc.slice(0, i))}`); prev = d; }
   }
   const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
-  assert.match(js, /if \(fresh\.trim\(\)\) this\.renderChat\(fresh, stream\.box\.createDiv\(/, 'only what is new is rendered while a reply streams');
+  assert.match(js, /const set = this\.renderChat\(fresh, mine\.box\.createDiv\(/, 'only what is new is rendered while a reply streams');
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   assert.match(css, /pre \{ max-width: 100%; overflow-x: auto;/);
 });
@@ -3027,4 +3027,174 @@ test('Demo mode: a diagram for the pen where TikZJax is on, and a reply with mat
   assert.equal(L.figureKinds(told).tikz, 1);
   assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true, { tikz: false })).tikz, 0);
   assert.equal(L.figureKinds(L.demoChatReply('Explain the first point', note, true, true)).tikz, 0);
+});
+
+/* ---------- the chat: the list of edits, and what is still open while a reply streams ---------- */
+
+const OWNER_CODE = 'The distance to the first Lagrange point, with `hill_radius(m1, m2, r)`:\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```';
+const OWNER_EQUATION = 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$';
+
+// whether a piece of Markdown is whole: every fence closed by its own kind, every $$ paired
+function wholeMarkdown(md) {
+  let fence = null, math = false;
+  for (const line of md.split('\n')) {
+    const f = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) { if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !f[3].trim()) fence = null; continue; }
+    if (math) { if (((line.match(/\$\$/g) || []).length) % 2) math = false; continue; }
+    if (f) fence = f[2];
+    else if (((line.match(/\$\$/g) || []).length) % 2) math = true;
+  }
+  return !fence && !math;
+}
+
+test('The list of edits: the two edits of the demo are set whole, as Markdown, and not cut by a count of characters', () => {
+  // (0.6.1 and before put excerpt(text, 160) in the list as plain text: the code edit lost the middle of its code
+  // block to " … ", and both showed as their source)
+  const reply = note => L.parseAgentReply(L.demoChatReply(note, { title: 'On Balance', text: 'A note.\n' }, true, false, { tikz: true })).ops[0];
+  for (const [ask, text] of [['Add an equation', OWNER_EQUATION], ['Add some code', OWNER_CODE]]) {
+    const op = reply(ask);
+    assert.equal(op.text.trim(), text, ask);
+    const parts = L.editParts({ insert: true, find: '', matched: '', replace: op.text });
+    assert.equal(parts.kind, 'insert');
+    assert.equal(parts.old, null);
+    assert.equal(parts.fresh, text);
+    assert.equal(parts.stacked, true, 'a code block or a displayed formula is set as a block');
+    assert.equal(parts.source, false);
+    assert.deepEqual(L.editPreview(parts.fresh), { head: text, more: 0 }, 'nothing is left out of it');
+    assert.ok(text.length > 100 && L.excerpt(text, 160) !== text === (text.length > 160));
+  }
+  assert.ok(OWNER_CODE.length > 160 && / … /.test(L.excerpt(OWNER_CODE, 160)), 'the old cut fell inside the code block');
+  assert.ok(wholeMarkdown(L.editPreview(OWNER_CODE).head));
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  const report = js.slice(js.indexOf('  renderReport(el, result, onUndo) {'), js.indexOf('module.exports = LagrangePlugin'));
+  assert.doesNotMatch(report.slice(0, report.indexOf('\n  }\n')), /excerpt\((?:e\.matched|e\.insert|e\.replace)/, 'the list no longer shows an excerpt of an edit as text');
+  assert.match(report, /this\.editText\(line, parts\.fresh, 'ins', parts, sourcePath\)/);
+  assert.match(js, /editText\(parent, text, role, parts, sourcePath\) \{[\s\S]*?this\.renderChat\(cut\.head, short, sourcePath, this\)/, 'an edit goes through the renderer of the chat, which runs and fetches nothing');
+});
+
+test('editParts: how an edit stands in the list', () => {
+  const short = L.editParts({ find: 'teh', matched: 'teh', replace: 'the' });
+  assert.deepEqual(short, { kind: 'replace', old: 'teh', fresh: 'the', stacked: false, source: false });
+  assert.deepEqual(L.editParts({ find: 'x', matched: 'A sentence.', replace: '' }), { kind: 'delete', old: 'A sentence.', fresh: '', stacked: false, source: false });
+  assert.equal(L.editParts({ find: 'a', replace: 'with $x^2$ and `code`' }).stacked, false, 'inline mathematics and code stay in the line');
+  assert.equal(L.editParts({ find: 'a', replace: 'two\nlines' }).stacked, true);
+  assert.equal(L.editParts({ find: 'a', replace: 'An equation: $$x$$' }).stacked, true);
+  assert.equal(L.editParts({ find: '```js\nx\n```', replace: 'y' }).stacked, true, 'a block taken out is a block too');
+  assert.equal(L.editParts({ find: 'a', replace: '# A heading' }).stacked, true);
+  assert.equal(L.editParts({ find: 'a', replace: '| a | b |' }).stacked, true);
+  assert.equal(L.editParts({ find: 'x'.repeat(200), replace: 'y'.repeat(200) }).stacked, true, 'two long passages stand one under the other');
+  assert.equal(L.editParts({ insert: true, find: 'after this', replace: '\n\nA line added.' }).fresh, 'A line added.');
+  assert.equal(L.editParts({ insert: true, replace: ' short' }).stacked, false);
+  assert.equal(L.editParts({ insert: true, replace: 'w '.repeat(100) }).stacked, true);
+  // an edit to the marks themselves would look the same on both sides once rendered: its source is shown
+  assert.equal(L.editParts({ find: '*starred*', replace: '_starred_' }).source, true);
+  assert.equal(L.editParts({ find: '*starred*', replace: '*barred*' }).source, false);
+  assert.equal(L.editParts({ find: 'same', replace: 'same' }).source, false);
+  // plain words go in as they are, white space and all
+  assert.equal(L.hasMarkdown('It has  a doubled'), false);
+  assert.equal(L.hasMarkdown('  '), false);
+  assert.equal(L.hasMarkdown('"a curiosity" - and'), false);
+  assert.equal(L.hasMarkdown('“a curiosity”—and'), false);
+  for (const t of ['`code`', '$x$', '*em*', '_em_', '~~gone~~', '[a](b)', '[[Note]]', '==marked==', '# Heading', '- item', '1. item', 'a\nb', '<b>x</b>', 'a \\* b']) assert.equal(L.hasMarkdown(t), true, t);
+});
+
+test('editPreview: a long edit is cut where Markdown allows, and says how many lines are left', () => {
+  const lines = (n, f) => Array.from({ length: n }, (_, i) => f(i)).join('\n');
+  assert.deepEqual(L.editPreview(''), { head: '', more: 0 });
+  assert.deepEqual(L.editPreview('\n\n  one line  \n\n'), { head: '  one line', more: 0 }, 'the blank lines around it go');
+  const thirteen = lines(L.EDIT_LINES + L.EDIT_SLACK, i => `line ${i}`);
+  assert.deepEqual(L.editPreview(thirteen), { head: thirteen, more: 0 }, 'a little over is still whole: "1 more line" would save nothing');
+  // prose: between lines
+  const prose = lines(30, i => `Paragraph ${i}.`);
+  const p = L.editPreview(prose);
+  assert.equal(p.head, lines(L.EDIT_LINES, i => `Paragraph ${i}.`));
+  assert.equal(p.more, 30 - L.EDIT_LINES);
+  assert.equal(L.editPreview(prose, 4).more, 26);
+  // a code block: cut between its lines, and closed again with its own fence
+  for (const fence of ['```', '~~~~']) {
+    const code = `Intro:\n\n${fence}python\n${lines(40, i => `x${i} = ${i}`)}\n${fence}\n\nAfter.`;
+    const c = L.editPreview(code);
+    assert.equal(c.head, `Intro:\n\n${fence}python\n${lines(L.EDIT_LINES - 3, i => `x${i} = ${i}`)}\n${fence}`);
+    assert.ok(wholeMarkdown(c.head));
+    assert.equal(c.more, 46 - L.EDIT_LINES, 'the fence put in to close the block is not counted as a line of the edit');
+  }
+  const indented = L.editPreview(`- item\n\n  \`\`\`js\n${lines(30, i => `  a${i}`)}\n  \`\`\``);
+  assert.match(indented.head, /\n {2}```$/, 'the closing fence is indented as the opening one');
+  // no room left for a block's first lines: it is cut before the block
+  const late = L.editPreview(`${lines(L.EDIT_LINES - 2, i => `p${i}`)}\n\`\`\`js\n${lines(20, i => `c${i}`)}\n\`\`\``);
+  assert.equal(late.head, lines(L.EDIT_LINES - 2, i => `p${i}`));
+  assert.equal(late.more, 22);
+  // a displayed formula and a figure are never cut: whole when the edit begins with them, else left for "more"
+  const math = `$$\n\\begin{aligned}\n${lines(20, i => `a_${i} &= ${i} \\\\`)}\n\\end{aligned}\n$$`;
+  assert.deepEqual(L.editPreview(`${math}\n\nAfter.`), { head: math, more: 2 });
+  assert.deepEqual(L.editPreview(`Before.\n\n${math}`), { head: 'Before.', more: 25 });
+  const tikz = `\`\`\`tikz\n\\begin{document}\n\\begin{tikzpicture}\n${lines(20, i => `\\draw (0,${i}) -- (1,${i});`)}\n\\end{tikzpicture}\n\\end{document}\n\`\`\``;
+  assert.deepEqual(L.editPreview(`${tikz}\n\nThe figure above.`), { head: tikz, more: 2 }, 'a figure is drawn whole');
+  assert.deepEqual(L.editPreview(`The figure:\n\n${tikz}`), { head: 'The figure:', more: 27 }, 'or not at all: half a figure is an error in TeX');
+  const mermaid = `\`\`\`mermaid\ngraph LR\n${lines(20, i => `  a${i} --> b${i}`)}\n\`\`\``;
+  assert.deepEqual(L.editPreview(`x\n\n${mermaid}`), { head: 'x', more: 24 });
+  const huge = `\`\`\`tikz\n${lines(L.EDIT_ATOM + 10, i => `\\draw (0,${i}) -- (1,${i});`)}\n\`\`\``;
+  assert.deepEqual(L.editPreview(huge), { head: '', more: L.EDIT_ATOM + 12 }, 'a very long figure waits for the button');
+  // a table keeps its head
+  const table = `| a | b |\n|---|---|\n${lines(30, i => `| ${i} | ${i} |`)}`;
+  assert.equal(L.editPreview(table).head.split('\n').length, L.EDIT_LINES);
+  assert.equal(L.editPreview(`${lines(L.EDIT_LINES - 2, i => `p${i}`)}\n${table}`).head, lines(L.EDIT_LINES - 2, i => `p${i}`), 'never a head without a row');
+  // whatever the text, the beginning is whole Markdown and the count is right
+  const mixed = `Intro with $x$.\n\n$$\na = b\n$$\n\n\`\`\`js\n${lines(6, i => `f(${i});`)}\n\`\`\`\n\n- one\n- two\n\n~~~tikz\n\\draw;\n~~~\n\n$$\nc\n$$\n\n${lines(8, i => `tail ${i}`)}`;
+  for (let max = 1; max <= 40; max++) {
+    const r = L.editPreview(mixed, max);
+    assert.ok(wholeMarkdown(r.head), `max ${max}: ${JSON.stringify(r.head)}`);
+    const shown = r.head ? r.head.split('\n').filter((l, i, all) => !(i === all.length - 1 && /^(`{3,}|~{3,})$/.test(l) && !mixed.startsWith(all.join('\n')))).length : 0;
+    assert.equal(r.more, mixed.split('\n').length - shown, `max ${max}`);
+    assert.ok(r.more === 0 ? r.head === mixed : mixed.startsWith(r.head.replace(/\n(`{3,}|~{3,})$/, '')) || mixed.startsWith(r.head), `max ${max}`);
+  }
+  assert.deepEqual(L.mdBlocks('a\n```js\nb\n```\n$$\nc\n$$\n| t |\n| u |\nd $$e$$ f').map(b => [b.kind, b.lines.length]), [['text', 1], ['code', 3], ['math', 3], ['table', 2], ['text', 1]]);
+  assert.equal(L.mdBlocks('```js\nnever closed')[0].closed, false);
+});
+
+test('openTail: what is still open at the end of a streaming reply never shows half a fence', () => {
+  const o = t => L.openTail(t);
+  assert.deepEqual(o('Plain prose, still com'), { text: 'Plain prose, still com', kind: null, lang: '', body: '' });
+  assert.deepEqual(o('With `code` and $x$ in it'), { text: 'With `code` and $x$ in it', kind: null, lang: '', body: '' });
+  // the opening fence as it arrives: nothing of it shows until its line is whole
+  for (const start of ['`', '``', '```', '```py', '```python', '~', '~~~']) assert.deepEqual(o('Look:\n\n' + start), { text: 'Look:\n\n', kind: null, lang: '', body: '' }, start);
+  // then the code that has come, as code, under its language
+  assert.deepEqual(o('Look:\n\n```python\n'), { text: 'Look:\n\n', kind: 'code', lang: 'python', body: '' });
+  assert.deepEqual(o('Look:\n\n```python\ndef f(x):\n    return'), { text: 'Look:\n\n', kind: 'code', lang: 'python', body: 'def f(x):\n    return' });
+  assert.deepEqual(o('```\nno name\n\nstill code'), { text: '', kind: 'code', lang: '', body: 'no name\n\nstill code' });
+  // the closing fence as it arrives is not shown as a line of code
+  for (const end of ['`', '``', '```']) assert.equal(o('```js\na = 1\n' + end).body, 'a = 1', end);
+  assert.equal(o('~~~js\na = 1\n``').body, 'a = 1\n``', 'backticks inside a ~~~ block are code');
+  assert.equal(o('```js\na = `x`\nb').body, 'a = `x`\nb');
+  // a figure and a displayed formula that are open: one line says so, their source is not shown
+  assert.deepEqual(o('The picture:\n\n```tikz\n\\begin{document}\n\\draw (0,0)'), { text: 'The picture:\n\n', kind: 'figure', lang: 'tikz', body: '\\begin{document}\n\\draw (0,0)' });
+  assert.equal(o('```mermaid\ngraph LR').kind, 'figure');
+  assert.deepEqual(o('So:\n\n$$\n\\frac{a}{'), { text: 'So:\n\n', kind: 'math', lang: '', body: '' });
+  assert.deepEqual(o('The equation: $$\\frac{d}{dt}'), { text: 'The equation: ', kind: 'math', lang: '', body: '' });
+  assert.deepEqual(o('Closed $$x$$ and on'), { text: 'Closed $$x$$ and on', kind: null, lang: '', body: '' });
+  assert.deepEqual(o('Text\n\n$'), { text: 'Text\n\n', kind: null, lang: '', body: '' }, 'the first mark of $$');
+  // a block that closed inside the tail (in a list, say) leaves what follows as prose
+  assert.deepEqual(o('- item\n\n  ```js\n  a\n  ```\n\n  more'), { text: '- item\n\n  ```js\n  a\n  ```\n\n  more', kind: null, lang: '', body: '' });
+  // at every point of a reply as it streams: no line of only fence marks is shown, and no $$ is left unpaired
+  const reply = 'First, `inline`.\n\n```python\ndef f(x):\n    return x\n```\n\nThen $$\na = b\n$$ and\n\n~~~tikz\n\\draw (0,0) -- (1,1);\n~~~\n\n- a list\n\n  ```js\n  nested();\n  ```\n\nEnd.';
+  for (let i = 0; i <= reply.length; i++) {
+    const tail = L.splitStable(reply.slice(0, i)).tail, open = L.openTail(tail);
+    const lastLine = open.text.slice(open.text.lastIndexOf('\n') + 1);
+    assert.ok(!/^\s*(`{1,}|~{1,})\w*$/.test(lastLine) || /^\s*$/.test(lastLine), `at ${i}: ${JSON.stringify(open)}`);
+    assert.equal((open.text.match(/\$\$/g) || []).length % 2, 0, `at ${i}`);
+    if (open.kind === 'code') assert.ok(!/(^|\n)\s*(```|~~~)\s*$/.test(open.body), `at ${i}: ${JSON.stringify(open.body)}`);
+  }
+});
+
+test('codeLabel: the name a code block carries in the chat', () => {
+  assert.equal(L.codeLabel('python'), 'Python');
+  assert.equal(L.codeLabel('py'), 'Python');
+  assert.equal(L.codeLabel('JS'), 'JavaScript');
+  assert.equal(L.codeLabel('cpp'), 'C++');
+  assert.equal(L.codeLabel('rust'), 'Rust');
+  for (const none of ['', null, undefined, 'text', 'plain']) assert.equal(L.codeLabel(none), '');
+  const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
+  assert.match(css, /pre\[data-lang\]::before \{\s*content: attr\(data-lang\);/);
+  assert.match(css, /\.lagrange-edit-short \{ max-height: \d+em; overflow: hidden; \}/, 'a long edit is clipped in the list');
+  assert.match(css, /:is\(\.lagrange-turn-body, \.lagrange-turn-text, \.lagrange-edit-md\) pre \{ max-width: 100%; overflow-x: auto;/, 'code in an edit stays inside the panel, as in a reply');
 });
