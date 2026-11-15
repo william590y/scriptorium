@@ -505,7 +505,7 @@
 
   await run('while a reply streams, a code block that is open shows as code, a formula and a figure as one line: never half a fence, and no block goes and comes back', async () => {
     const text = '*Here is the function*, with **bold** words, `inline` code and $x^2$ in a first paragraph that is long enough to be seen as it comes.\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```\n\nAnd the formula:\n\n$$\nr \\approx R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}\n$$\n\nThat is all there is to it.';
-    await queue([{ text, chunk: 3, delay: 12, first: 150 }]);
+    await queue([{ text, chunk: 3, delay: 25, first: 150 }]);   // (slowly enough that each open block is on screen for some frames)
     const seen = { twice: 0, marks: '', fence: '', openCode: 0, label: 0, mathLine: 0, rawMath: '', gap: 0, frames: 0 };
     let watching = true, hadCode = false;
     const watch = () => {
@@ -516,14 +516,15 @@
         const open = b.querySelector('.lagrange-turn-open'), shown = open ? open.innerText : '';
         if (/(^|\n)\s*(`{1,3}|~{1,3})\w*\s*$/.test(shown) || /```/.test(shown)) seen.fence = shown.slice(-60);
         if (/\$\$|\\frac|\\approx/.test(shown)) seen.rawMath = shown.slice(-60);
-        if (/\*\*|`/.test(shown)) seen.marks = shown.slice(-60);
-        const oc = open && open.querySelector('pre.lagrange-open-code');
-        if (oc) { seen.openCode++; if (oc.getAttribute('data-lang') === 'Python') seen.label++; }
-        if (open && /Setting an equation/.test(shown)) seen.mathLine++;
+        const prose = open && open.querySelector('.lagrange-open-text') ? open.querySelector('.lagrange-open-text').innerText : '';   // (not the open code: ** is Python's)
+        if (/\*\*|`/.test(prose)) seen.marks = prose.slice(-60);
         // (a paragraph is shown once: as it came, or set, never both)
         const words = b.innerText;
         if (words.split('Here is the').length > 2 || words.split('And the formula').length > 2 || words.split('That is all').length > 2) seen.twice++;
-        if (/(^|\s)[*_](?=\S)/.test(shown.split('\n')[0])) seen.marks = shown.slice(0, 60);
+        if (/(^|\s)[*_](?=\S)/.test(prose.split('\n')[0])) seen.marks = prose.slice(0, 60);
+        const oc = open && open.querySelector('pre.lagrange-open-code');
+        if (oc) { seen.openCode++; if (oc.getAttribute('data-lang') === 'Python') seen.label++; }
+        if (open && /Setting an equation/.test(shown)) seen.mathLine++;
         const anyCode = Boolean(b.querySelector('pre'));
         if (hadCode && !anyCode) seen.gap++;
         hadCode = hadCode || anyCode;

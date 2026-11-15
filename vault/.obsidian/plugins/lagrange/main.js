@@ -3464,7 +3464,7 @@ function needsWholeRender(md) {
    closes: {text, kind, lang, body}. text is the prose before whatever is open, shown as it is written. kind says
    what is open after it: 'code' (a code block: `body` is the code that has come, set as code under its language
    `lang`, without the fence), 'figure' (a ```tikz or ```mermaid block: a line says a figure is being drawn, its
-   source is not shown), 'math' (a displayed formula between $$: a line says so), or null. A fence that is only
+   source is not shown), 'math' (a displayed formula between $$, open or just closed with nothing after it yet: a line says so), or null. A fence that is only
    beginning (its line is not complete), and a line at the end of a code block that may be the closing fence
    arriving, are left out, so that no stray backticks show. Pure. */
 const OPEN_FIGURES = new Set(['tikz', 'mermaid']);
@@ -3472,13 +3472,14 @@ function openTail(tail) {
   const text = String(tail == null ? '' : tail);
   const lines = text.split('\n');
   let fence = null, math = -1, at = 0, start = -1, from = 0, lang = '';
+  let set = null;                        // {start, end}: the last displayed formula that is whole
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i], whole = i < lines.length - 1;
     const f = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
       if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !f[3].trim() && whole) fence = null;
     } else if (math >= 0) {
-      if (((line.match(/\$\$/g) || []).length) % 2) math = -1;
+      if (((line.match(/\$\$/g) || []).length) % 2) { set = { start: math, end: at + line.length }; math = -1; }
     } else if (f) {
       fence = f[2];
       start = at;
@@ -3486,6 +3487,8 @@ function openTail(tail) {
       lang = whole ? (f[3].trim().split(/[\s{,]/)[0] || '').toLowerCase() : null;   // null: the name is still arriving
     } else if (((line.match(/\$\$/g) || []).length) % 2) {
       math = at + line.lastIndexOf('$$');
+    } else if (/^\s*\$\$.+\$\$\s*$/.test(line)) {
+      set = { start: at, end: at + line.length };
     } else if (!whole && /^\s*(`{1,2}|~{1,2}|\$)$/.test(line)) {
       // (the first marks of a fence, or of a displayed formula, at the start of the last line)
       return { text: text.slice(0, at), kind: null, lang: '', body: '' };
@@ -3501,6 +3504,9 @@ function openTail(tail) {
     return { text: text.slice(0, start), kind: OPEN_FIGURES.has(lang) ? 'figure' : 'code', lang, body: body.replace(/\n$/, '') };
   }
   if (math >= 0) return { text: text.slice(0, math), kind: 'math', lang: '', body: '' };
+  // (a formula that has just closed, with nothing after it yet, is not whole to splitStable until the next block
+  // begins: it is still said, not shown as its source)
+  if (set && !text.slice(set.end).trim()) return { text: text.slice(0, set.start), kind: 'math', lang: '', body: '' };
   return { text, kind: null, lang: '', body: '' };
 }
 

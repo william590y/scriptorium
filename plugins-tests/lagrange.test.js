@@ -3180,6 +3180,12 @@ test('openTail: what is still open at the end of a streaming reply never shows h
   assert.deepEqual(o('So:\n\n$$\n\\frac{a}{'), { text: 'So:\n\n', kind: 'math', lang: '', body: '' });
   assert.deepEqual(o('The equation: $$\\frac{d}{dt}'), { text: 'The equation: ', kind: 'math', lang: '', body: '' });
   assert.deepEqual(o('Closed $$x$$ and on'), { text: 'Closed $$x$$ and on', kind: null, lang: '', body: '' });
+  // a formula that has just closed is still said until what follows it begins (only then is it rendered)
+  assert.deepEqual(o('So:\n\n$$\na = b\n$$'), { text: 'So:\n\n', kind: 'math', lang: '', body: '' });
+  assert.deepEqual(o('So:\n\n$$\na = b\n$$\n\n'), { text: 'So:\n\n', kind: 'math', lang: '', body: '' });
+  assert.deepEqual(o('So:\n\n$$r \\approx R$$\n'), { text: 'So:\n\n', kind: 'math', lang: '', body: '' }, 'on one line too');
+  assert.equal(o('So:\n\n$$\na = b\n$$\n\nT').kind, null);
+  assert.equal(o('So:\n\n$$$$').kind, null, 'an empty pair is no formula');
   assert.deepEqual(o('Text\n\n$'), { text: 'Text\n\n', kind: null, lang: '', body: '' }, 'the first mark of $$');
   // a block that closed inside the tail (in a list, say) leaves what follows as prose
   assert.deepEqual(o('- item\n\n  ```js\n  a\n  ```\n\n  more'), { text: '- item\n\n  ```js\n  a\n  ```\n\n  more', kind: null, lang: '', body: '' });
@@ -3190,6 +3196,7 @@ test('openTail: what is still open at the end of a streaming reply never shows h
     const lastLine = open.text.slice(open.text.lastIndexOf('\n') + 1);
     assert.ok(!/^\s*(`{1,}|~{1,})\w*$/.test(lastLine) || /^\s*$/.test(lastLine), `at ${i}: ${JSON.stringify(open)}`);
     assert.equal((open.text.match(/\$\$/g) || []).length % 2, 0, `at ${i}`);
+    assert.ok(!/\$\$\s*$/.test(open.text), `at ${i}: a formula's source at the end of what is shown: ${JSON.stringify(open.text.slice(-30))}`);
     if (open.kind === 'code') assert.ok(!/(^|\n)\s*(```|~~~)\s*$/.test(open.body), `at ${i}: ${JSON.stringify(open.body)}`);
   }
 });
