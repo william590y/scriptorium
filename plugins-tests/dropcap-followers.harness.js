@@ -379,7 +379,9 @@
         const away = scene('live', 'Under', 0);
         const ed = leaf.view.editor, first = lineOf('Under'), next = first + (f.tight ? 1 : 2), count = f.text.split('\n').length;
         for (const [what, line, ch] of [['at the head of the paragraph', first, 0], ['in the paragraph', first, 9], ['at the end of the paragraph', first, ed.getLine(first).length], ['in the blank line under it', first + 1, 0],
-          ...Array.from({ length: Math.min(count, 4) }, (_, i) => [`in line ${i + 1} of what follows`, next + i, Math.min(3, ed.getLine(next + i).length)])]) {
+          // (not in a table: with the cursor in one Obsidian opens the cell's own editor, and after that the note's editor takes
+          // no typing and no folding from a script until Obsidian is started again; the pen harness's cases with a key fail then too)
+          ...Array.from({ length: /^\|/.test(f.text) ? 0 : Math.min(count, 4) }, (_, i) => [`in line ${i + 1} of what follows`, next + i, Math.min(3, ed.getLine(next + i).length)])]) {
           if (f.tight && what === 'in the blank line under it') continue;
           // (the cursor is put there and the editor is not given the keyboard: with the keyboard in an image's or a formula's
           // line Obsidian takes it for the embed, and the editor does not get it back for the cases that follow)
