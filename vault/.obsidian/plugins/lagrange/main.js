@@ -3088,7 +3088,8 @@ function reviseUserMessage(note, clip, passage, instruction) {
 // The "Lagrange is thinking" plate. The chat shows it from the moment a request is sent until the first words of the
 // reply arrive (or the request fails). Three engravings, drawn in the page's ink: clockwork (gears and a belted
 // flywheel), alchemy (a flask distilling into a receiver), and the Earth-Moon system with its five Lagrange
-// points. Settings → Lagrange → Loading animation picks one, or "random" (the default) draws a new one each time.
+// points. Settings → Lagrange → Loading animation picks one, or "Each plate in turn" (the default): the first of a
+// session by chance, then the next one with each request, round and round (see nextPlate and loaderPlate).
 //
 // Contract
 //   mountLoader(containerEl, theme) -> { stop() }
@@ -4055,13 +4056,22 @@ function nextPlate(names, last, chance) {
 }
 const loaderTurn = { last: null };       // the plate last shown in turn, since the plugin was loaded
 
+/* The plate for a request: the one chosen in the settings, or (theme 'cycle', or anything that is no plate) the
+   next in turn. It is asked once for each request, and what it gives is handed to mountLoader for every loader of
+   that request (a message Lagrange answers in several replies, looking at the page in between, shows one plate, and
+   the request after it the next). turn: {last}, the turn kept (loaderTurn unless given); chance: as for nextPlate. */
+function loaderPlate(theme, turn, chance) {
+  const names = LagrangePlates.NAMES, t = turn || loaderTurn;
+  return names.includes(theme) ? theme : (t.last = nextPlate(names, t.last, chance));
+}
+
 function mountLoader(containerEl, theme) {
   const doc = containerEl.ownerDocument || document;
   const win = doc.defaultView || window;
-  const names = LagrangePlates.NAMES;
-  const name = names.includes(theme) ? theme : (loaderTurn.last = nextPlate(names, loaderTurn.last));
+  const name = loaderPlate(theme);
   const el = doc.createElement('div');
   el.className = `lagrange-loader lagrange-loader--${name}`;
+  el.setAttribute('data-plate', name);
   el.setAttribute('role', 'status');
   el.setAttribute('aria-label', `${LOADER_CAPTIONS[name]}…`);
   const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -7529,11 +7539,12 @@ class LagrangeChatView extends ItemView {
   }
 
   /* A reply in the log: a loader until the first words, then Markdown, rendered block by block as text streams in. */
-  addReply(sourcePath) {
+  addReply(sourcePath, plate) {
     this.clearEmpty();
     const el = this.logEl.createDiv({ cls: 'lagrange-turn lagrange-turn--reply' });
     const body = el.createDiv({ cls: 'lagrange-turn-body markdown-rendered' });
-    let loader = mountLoader(body.createDiv({ cls: 'lagrange-loader-slot' }), this.plugin.settings.loaderTheme);
+    // (plate: the plate of the request this reply belongs to; without one, the setting decides, in turn)
+    let loader = mountLoader(body.createDiv({ cls: 'lagrange-loader-slot' }), plate || this.plugin.settings.loaderTheme);
     this.scrollDown();
     let md = '', shown = null, timer = null, comp = null, status = null;
     // While the reply streams: the whole blocks that have come are rendered once each, as Obsidian renders a note
@@ -7742,6 +7753,8 @@ class LagrangeChatView extends ItemView {
     this.setPending({ controller });
     let reply = null, partial = '', raw = '', streaming = false, failed = false, ran = null, typed = false;
     let looksLeft = canLook ? LOOKS_PER_MESSAGE : 0, lastLook = shown;
+    // One plate for the request, however many replies it takes (see loaderPlate): the next request has the next.
+    const plate = loaderPlate(settings.loaderTheme);
     let items = [];              // what was attached, as it was prepared to be sent
     try {
       if (attached.length) {
@@ -7770,7 +7783,7 @@ class LagrangeChatView extends ItemView {
         }
       }
       for (let round = 0; ; round++) {
-        const answer = reply = this.addReply(note && note.path);
+        const answer = reply = this.addReply(note && note.path, plate);
         if (!round) this.scrollDown(true);       // the loader has just come in under the message: it is in view
         partial = '';
         raw = '';
@@ -9157,5 +9170,5 @@ LagrangePlugin.internals = {
 Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
-Object.assign(LagrangePlugin.internals, { codeLabel, openTail, openProse, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
+Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: LagrangePlates.NAMES, codeLabel, openTail, openProse, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

@@ -16,6 +16,10 @@
 // still open shows as code, never as half a fence. The first of these cases is the one from the demo, as it was
 // reported: "Add an equation" and "Add some code", whose edits 0.6.1 listed as raw LaTeX and a raw, cut code block.
 //
+// And the loader's plates ("Lagrange is thinking"): requests in a row show the three plates in turn, the first by
+// chance, through a server and in demo mode alike; a request answered in several replies shows one plate; a plate
+// chosen in the settings stays; each plate is drawn inside the panel and moves.
+//
 // This cannot run under Node (it needs Obsidian's renderer and the plugins), so it is not part of `node --test`.
 // To run it:
 //   1. start the mock server:  node plugins-tests/mock-chat-server.mjs 48914
@@ -538,6 +542,93 @@
     if (!b.querySelector('pre[data-lang="Python"] code .token') || !b.querySelector('mjx-container[display="true"]')) bad.push('the finished reply is not rendered');
     if (b.querySelector('.lagrange-turn-open, .lagrange-open-code, .lagrange-open-note')) bad.push('what was open is still there at the end');
     if (raw(b)) bad.push('raw Markdown is left in the reply');
+    return bad.join('; ');
+  });
+
+  // ---- the loader's plates ----
+  // The plates the loaders of one request showed (data-plate), in the order they came in.
+  const platesOf = async (ask, replies) => {
+    const seen = [], met = new Set();      // (each loader once, however its parts come into the log)
+    const mo = new MutationObserver(() => { for (const l of view().logEl.querySelectorAll('.lagrange-loader')) if (!met.has(l)) { met.add(l); seen.push(l.getAttribute('data-plate')); } });
+    mo.observe(view().logEl, { childList: true, subtree: true });
+    try { if (replies) await queue(replies); await ask(); await sleep(150); } finally { mo.disconnect(); }
+    return seen;
+  };
+  const NAMES = I.PLATE_NAMES, after = name => NAMES[(NAMES.indexOf(name) + 1) % NAMES.length];
+
+  await run('the loader: nine requests in a row show the three plates in turn, three times round, through a server as in the demo', async () => {
+    const theme = plugin.settings.loaderTheme, bad = [];
+    plugin.settings.loaderTheme = 'cycle';
+    try {
+      const seen = [];
+      for (let i = 0; i < 9; i++) seen.push((await platesOf(() => send(`Question ${i + 1}`), [{ text: 'A short answer.', first: 200 }])).join('+') || 'none');
+      if (!NAMES.includes(seen[0])) bad.push(`the first request showed ${seen[0]}`);
+      const want = seen.map((_, i) => NAMES[(NAMES.indexOf(seen[0]) + i) % NAMES.length]);
+      if (seen.join(',') !== want.join(',')) bad.push(`the plates were ${seen.join(', ')}, not ${want.join(', ')}`);
+      if (new Set(seen).size !== 3) bad.push(`only ${Array.from(new Set(seen)).join(', ')} were seen`);
+      // the demo (no server): the same turn goes on
+      const provider = plugin.settings.provider;
+      plugin.settings.provider = 'demo';
+      const demo = [];
+      for (const q of ['What is this note about?', 'And how long is it?', 'What does it open with?']) demo.push((await platesOf(() => send(q))).join('+') || 'none');
+      plugin.settings.provider = provider;
+      const wantDemo = [after(seen[8]), after(after(seen[8])), seen[8]];
+      if (demo.join(',') !== wantDemo.join(',')) bad.push(`in demo mode the plates were ${demo.join(', ')}, not ${wantDemo.join(', ')}`);
+      // where the turn begins can be told (as the recording of the demo does), and the turn goes on from there
+      I.loaderTurn.last = 'alchemy';
+      const told = (await platesOf(() => send('From here'), [{ text: 'Yes.', first: 200 }])).join('+');
+      if (told !== 'orbit') bad.push(`after alchemy came ${told}`);
+      // a plate chosen in the settings is that plate every time, and takes no turn
+      plugin.settings.loaderTheme = 'clockwork';
+      const chosen = [];
+      for (let i = 0; i < 2; i++) chosen.push((await platesOf(() => send(`Chosen ${i}`), [{ text: 'Yes.', first: 200 }])).join('+'));
+      if (chosen.join(',') !== 'clockwork,clockwork') bad.push(`with Clockwork chosen the plates were ${chosen.join(', ')}`);
+      plugin.settings.loaderTheme = 'cycle';
+      const back = (await platesOf(() => send('In turn again'), [{ text: 'Yes.', first: 200 }])).join('+');
+      if (back !== 'clockwork') bad.push(`in turn again, after orbit came ${back}`);
+    } finally { plugin.settings.loaderTheme = theme; }
+    return bad.join('; ');
+  });
+
+  await run('the loader: a request answered in two replies (a look at the page in between) shows one plate, and a task takes the next', async () => {
+    const theme = plugin.settings.loaderTheme, look = plugin.settings.lookAtPage, bad = [];
+    const md = app.workspace.getLeavesOfType('markdown')[0];
+    if (!md || !md.view.file) return 'no note is open';
+    Object.assign(plugin.settings, { loaderTheme: 'cycle', lookAtPage: true });
+    try {
+      I.loaderTurn.last = 'orbit';
+      const two = await platesOf(() => send('How does the page look?'), ['Let me look.\n\n```lagrange-look\n{"target": "note"}\n```', 'It looks well.']);
+      if (two.length !== 2) bad.push(`the request showed ${two.length} loaders (${two.join(', ')}), so it did not look at the page`);
+      if (two.some(p => p !== 'clockwork')) bad.push(`the request showed ${two.join(', ')}, not clockwork throughout`);
+      const next = (await platesOf(() => send('And now?'), [{ text: 'Yes.', first: 200 }])).join('+');
+      if (next !== 'alchemy') bad.push(`the request after it showed ${next}, not alchemy`);
+      const task = await platesOf(async () => { await plugin.proofread(md.view); for (let i = 0; i < 400 && plugin.editing; i++) await sleep(50); }, ['[]']);
+      if (task.join('+') !== 'orbit') bad.push(`Proofread showed ${task.join(', ') || 'no plate'}, not orbit`);
+    } finally { Object.assign(plugin.settings, { loaderTheme: theme, lookAtPage: look }); }
+    return bad.join('; ');
+  });
+
+  await run('the loader: each of the three plates is drawn, inside the panel, and moves', async () => {
+    const bad = [], root = view().contentEl.getBoundingClientRect(), still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    for (const name of NAMES) {
+      const slot = view().logEl.createDiv({ cls: 'lagrange-loader-slot' });
+      const loader = plugin.constructor.mountLoader(slot, name);
+      await sleep(400);
+      const el = slot.querySelector('.lagrange-loader'), svg = el && el.querySelector('svg.lagrange-plate');
+      if (!svg) { bad.push(`${name}: no plate`); loader.stop(); slot.remove(); continue; }
+      const r = svg.getBoundingClientRect(), cs = getComputedStyle(svg), before = svg.innerHTML;
+      await sleep(600);
+      if (el.getAttribute('data-plate') !== name || !el.classList.contains(`lagrange-loader--${name}`)) bad.push(`${name}: it is marked ${el.getAttribute('data-plate')}`);
+      if (r.width < 120 || r.height < 90) bad.push(`${name}: the plate is ${Math.round(r.width)}×${Math.round(r.height)} px`);
+      if (r.left < root.left - 0.5 || r.right > root.right + 0.5) bad.push(`${name}: the plate sticks out of the panel`);
+      if (cs.display === 'none' || cs.visibility !== 'visible' || Number(cs.opacity) < 0.5) bad.push(`${name}: the plate is hidden`);
+      if (svg.querySelectorAll('path, circle, line, rect, ellipse, polygon, polyline, text').length < 10) bad.push(`${name}: the plate is all but empty`);
+      if (!still && svg.innerHTML === before) bad.push(`${name}: the plate does not move`);
+      if (!/^Lagrange is /.test(el.querySelector('.lagrange-loader-caption').textContent)) bad.push(`${name}: no caption`);
+      loader.stop();
+      if (slot.querySelector('.lagrange-loader')) bad.push(`${name}: the plate stays after it is stopped`);
+      slot.remove();
+    }
     return bad.join('; ');
   });
 

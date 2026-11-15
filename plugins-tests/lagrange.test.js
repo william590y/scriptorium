@@ -3214,3 +3214,48 @@ test('codeLabel: the name a code block carries in the chat', () => {
   assert.match(css, /\.lagrange-edit-short \{ max-height: \d+em; overflow: hidden; \}/, 'a long edit is clipped in the list');
   assert.match(css, /:is\(\.lagrange-turn-body, \.lagrange-turn-text, \.lagrange-edit-md\) pre \{ max-width: 100%; overflow-x: auto;/, 'code in an edit stays inside the panel, as in a reply');
 });
+
+test('loaderPlate: one plate for each request, the first by chance (0, 1 or 2), then round and round whatever the provider', () => {
+  const names = L.PLATE_NAMES;
+  assert.deepEqual(names, ['clockwork', 'alchemy', 'orbit']);
+  // every start the dice can give, with the source of chance put in: nine requests are three turns of the three plates
+  for (const start of [0, 1, 2]) {
+    const turn = { last: null }, seen = [];
+    for (let i = 0; i < 9; i++) seen.push(L.loaderPlate('cycle', turn, () => start / 3 + 0.01));
+    assert.equal(seen[0], names[start], `start ${start}`);
+    assert.deepEqual(seen, Array.from({ length: 9 }, (_, i) => names[(start + i) % 3]), `start ${start}`);
+    assert.equal(new Set(seen.slice(0, 3)).size, 3);
+    assert.equal(turn.last, seen[8]);
+  }
+  // the dice are thrown once: after the first plate, chance has no say
+  const turn = { last: null };
+  L.loaderPlate('cycle', turn, () => 0.5);
+  assert.equal(L.loaderPlate('cycle', turn, () => { throw new Error('thrown again'); }), 'orbit');
+  // over many sessions the first plate is each of the three (Math.random itself)
+  const firsts = new Set();
+  for (let i = 0; i < 200; i++) firsts.add(L.loaderPlate('cycle', { last: null }));
+  assert.equal(firsts.size, 3);
+  // a plate chosen in the settings is that plate, and does not take a turn
+  const kept = { last: 'clockwork' };
+  for (const name of names) assert.equal(L.loaderPlate(name, kept), name);
+  assert.equal(kept.last, 'clockwork');
+  assert.equal(L.loaderPlate('random', kept), 'alchemy', 'anything that is no plate counts as "in turn"');
+  // the turn of the running plugin is one object, which a recording may set so that it begins where it is told to
+  assert.deepEqual(Object.keys(L.loaderTurn), ['last']);
+  const was = L.loaderTurn.last;
+  L.loaderTurn.last = 'alchemy';
+  assert.equal(L.loaderPlate('cycle'), 'orbit');
+  assert.equal(L.loaderPlate('cycle'), 'clockwork');
+  L.loaderTurn.last = was;
+  // a request takes its plate once, and every reply of it (it may look at the page in between) shows that one
+  const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
+  const send = js.slice(js.indexOf('  async send() {'), js.indexOf('  /* A task (proofread, revise) in the log'));
+  assert.equal((send.match(/loaderPlate\(/g) || []).length, 1);
+  assert.ok(send.indexOf('const plate = loaderPlate(settings.loaderTheme);') < send.indexOf('for (let round = 0; ; round++) {'), 'before the replies of the request, not in each');
+  assert.match(send, /this\.addReply\(note && note\.path, plate\)/);
+  assert.match(js, /mountLoader\(body\.createDiv\(\{ cls: 'lagrange-loader-slot' \}\), plate \|\| this\.plugin\.settings\.loaderTheme\)/);
+  assert.match(js, /el\.setAttribute\('data-plate', name\);/);
+  // nothing in the plugin, and nothing it ships, chooses a plate for the writer
+  assert.equal(JSON.parse(fs.readFileSync(path.join(PLUGIN, 'data.json'), 'utf8')).loaderTheme, 'cycle');
+  assert.equal((js.match(/loaderTheme\s*[:=]\s*'(?:clockwork|alchemy|orbit)'/g) || []).length, 0);
+});

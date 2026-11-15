@@ -387,6 +387,16 @@ text until it closes. The chat only shows: it runs no code a reply holds (a bloc
 such as a Dataview query, is shown as its source), and it fetches nothing from the web because a reply says so (a
 picture at a web address becomes a link).
 
+**While Lagrange thinks.** The chat shows one of three ink plates until the first words of a reply come: clockwork,
+alchemy, or the Earth and the Moon with their five Lagrange points. With **Settings → Lagrange → Loading animation**
+on *Each plate in turn* (the default) the first plate of a session is taken by chance and each request after it
+shows the next, round and round, whatever the provider (demo mode too); since Lagrange 0.6.3 a request that is
+answered in several replies (Lagrange looked at the page in between) shows one plate throughout, so the turn moves
+once for each request. Choosing a plate there shows that plate every time. A plate does not change while a request
+waits. With the system's "reduce motion" on, the plate is drawn still. (The recording at the top of this page is
+made with the plates in turn, its first one told so that the recording is the same each time: the Lagrange points,
+then clockwork, then alchemy.)
+
 **The list of edits.** Under a reply that edits the note, and under *Proofread* and *Revise*, each edit is listed:
 what was taken out, struck, → what was put in. Since Lagrange 0.6.2 the words of an edit are set as the chat sets a
 reply (before, they were shown as their source, cut to 160 characters, so that a code block or an equation the pen
