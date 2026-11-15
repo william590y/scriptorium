@@ -31,7 +31,7 @@ verify_hash() {
   actual_hash="${actual_hash%% *}"
   [ "$actual_hash" = "$2" ] || { echo "Download verification failed for $1."; exit 1; }
 }
-verify_hash "$work_dir/Writing.zip" '67153210057c17d586e7aa9cf29d76528cb566dbcc31d35a98415303eb30353a'
+verify_hash "$work_dir/Writing.zip" 'dc47fab85526bce7cf308c565e684979a2b9ec7d15af1b204e5be8f3fbaa2979'
 unzip -q "$work_dir/Writing.zip" -d "$work_dir/vault"
 [ -f "$work_dir/vault/.obsidian/appearance.json" ] || { printf 'Invalid configuration archive.\n'; exit 1; }
 # ---- The diagram plugins ----
