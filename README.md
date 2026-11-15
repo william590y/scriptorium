@@ -387,6 +387,16 @@ text until it closes. The chat only shows: it runs no code a reply holds (a bloc
 such as a Dataview query, is shown as its source), and it fetches nothing from the web because a reply says so (a
 picture at a web address becomes a link).
 
+**While Lagrange thinks.** The chat shows one of three ink plates until the first words of a reply come: clockwork,
+alchemy, or the Earth and the Moon with their five Lagrange points. With **Settings → Lagrange → Loading animation**
+on *Each plate in turn* (the default) the first plate of a session is taken by chance and each request after it
+shows the next, round and round, whatever the provider (demo mode too); since Lagrange 0.6.3 a request that is
+answered in several replies (Lagrange looked at the page in between) shows one plate throughout, so the turn moves
+once for each request. Choosing a plate there shows that plate every time. A plate does not change while a request
+waits. With the system's "reduce motion" on, the plate is drawn still. (The recording at the top of this page is
+made with the plates in turn, its first one told so that the recording is the same each time: the Lagrange points,
+then clockwork, then alchemy.)
+
 **The list of edits.** Under a reply that edits the note, and under *Proofread* and *Revise*, each edit is listed:
 what was taken out, struck, → what was put in. Since Lagrange 0.6.2 the words of an edit are set as the chat sets a
 reply (before, they were shown as their source, cut to 160 characters, so that a code block or an equation the pen
@@ -399,7 +409,10 @@ lines of a code block, never inside a formula or a figure), under a button that 
 the rest is rendered when you ask for it. An edit of plain words keeps its white space (a doubled space shows), and
 one that changes only Markdown marks (`*a*` to `_a_`) shows the marks. While a reply streams, a code block that is
 still open is shown as code, and a formula or a figure that is still open as one line that says so, never as half a
-fence. `plugins-tests/chat-render.harness.js` checks this in a real Obsidian.
+fence; in the paragraph that is still coming, inline mathematics is typeset as soon as each formula has closed (a
+formula that has opened and not closed waits out of sight; `$5 for the lot` is money and is shown as it comes), and
+a code span that has closed is set as code. `plugins-tests/chat-render.harness.js` checks this in a real Obsidian,
+frame by frame.
 
 **Attaching pictures, video and files.** Paste a copied picture, video or file into the box, drop it on the panel
 (from your system, or a file of the vault from Obsidian's file explorer), or pick it with the paperclip. Each shows as
