@@ -112,6 +112,8 @@
   const needTikz = () => (has('obsidian-tikzjax') ? '' : 'the TikZJax plugin is not on in this vault');
 
   // ---- a streaming reply, frame by frame ----
+  const unstyledFrames = [];             // for each watched reply that had any: the frames in which a formula of the open prose stood without its styles
+  const styled = () => { const n = unstyledFrames.splice(0).reduce((a, b) => a + b, 0); return n ? [`a formula stood in the open prose without its styles for ${n} frame${n === 1 ? '' : 's'}`] : []; };
   // The blocks of a reply as they stand in an element, in one string (the parts a streamed reply was set in are
   // taken as one).
   const blocksOf = el => {
@@ -134,7 +136,7 @@
   // what is still open in it (or null) and the open prose in two forms: {text: its words without what is typeset or
   // in a code span, all: innerText, math: how many formulas are typeset in it, code: how many code spans}.
   const frames = async (each, fn) => {
-    let watching = true, n = 0;
+    let watching = true, n = 0, unstyled = 0;
     const watch = () => {
       if (!watching) return;
       const b = body();
@@ -143,12 +145,15 @@
         const open = b.querySelector('.lagrange-turn-open'), box = open ? open.querySelector('.lagrange-open-text') : null;
         let text = '';
         if (box) for (const k of box.childNodes) if (k.nodeType === 3) text += k.nodeValue; else text += '\u0001';
+        // (a letter of a formula whose style MathJax has not made yet has no box: it shows as nothing, or as a stray mark)
+        if (box) for (const c of box.querySelectorAll('mjx-c')) if (getComputedStyle(c).padding === '0px') { unstyled++; break; }
         each(b, open, { text, all: box ? box.innerText : '', math: box ? box.querySelectorAll('mjx-container').length : 0, code: box ? box.querySelectorAll('code').length : 0, box });
       }
       requestAnimationFrame(watch);
     };
     requestAnimationFrame(watch);
     try { await fn(); await sleep(600); } finally { watching = false; }
+    if (unstyled) unstyledFrames.push(unstyled);
     return n;
   };
 
@@ -577,7 +582,7 @@
       if (hadCode && !anyCode) seen.gap++;
       hadCode = hadCode || anyCode;
     }, () => send('Show me.'));
-    const b = body(), bad = [];
+    const b = body(), bad = styled();
     if (seen.frames < 20) bad.push(`only ${seen.frames} frames were watched`);
     if (seen.fence) bad.push(`half a fence was shown: ${JSON.stringify(seen.fence)}`);
     if (seen.marks) bad.push(`marks of emphasis or code were shown: ${JSON.stringify(seen.marks)}`);
@@ -604,14 +609,14 @@
   await run('while a paragraph streams, each inline formula is typeset as it closes; money, dollars in code and escaped dollars are never taken for one', async () => {
     const text = 'The fee is $5 for the lot and $7 more, with \\$3 escaped.\n\n' +
       'Call `cost($x$, $y$)` and then ``a ` $z$`` in code, plainly.\n\n' +
-      'Then $a^2 + b^2 = c^2$ holds, with ($\\alpha$) for the angle and $\\frac{p}{q}$, too; so says the book.\n\n' +
+      'Then $a^2 + b^2 = c^2$ holds, with ($\\alpha$) for the angle and $\\frac{\\beth}{\\gimel}$, too; so says the book.\n\n' +
       'So:\n$$\ns = \\sum_{k} k\n$$\nwhere $k$ runs.\n\n' +
       '- an item with $e^{i\\pi} = -1$ in it\n- and one with **bold $\\beta$ words** at the very end';
     await queue([{ text, chunk: 2, delay: 16, first: 150 }]);
     const seen = { src: '', dollar: '', late: '', twice: 0, raw2: '', max: 0, money: 0, code: 0 };
     const n = await frames((b, open, p) => {
       // (the words of the open prose, without what is typeset and what is in a code span)
-      if (/a\^2|c\^2|\\alpha|\\frac|\\beta|\\sum|e\^\{|\\pi/.test(p.text)) seen.src = p.text.slice(-70);
+      if (/a\^2|c\^2|\\alpha|\\frac|\\beth|\\gimel|\\beta|\\sum|e\^\{|\\pi/.test(p.text)) seen.src = p.text.slice(-70);
       // (a dollar in the prose is money, the escaped one, or code of a span that is still open: never a formula's)
       const left = p.text.replace(/\$5|\$7|\$3/g, '').replace(/cost\(\$?x?\$?,? ?\$?y?\$?\)?/, '').replace(/a  ?\$?z?\$?/, '');
       if (/\$/.test(left)) seen.dollar = p.text.slice(-70);
@@ -624,7 +629,7 @@
       const all = open ? open.innerText : '';
       if (/\$\$|\\sum/.test(all)) seen.raw2 = all.slice(-60);
     }, () => send('Show me.'));
-    const b = body(), bad = [];
+    const b = body(), bad = styled();
     if (n < 40) bad.push(`only ${n} frames were watched`);
     if (seen.src) bad.push(`a formula's source was shown: ${JSON.stringify(seen.src)}`);
     if (seen.dollar) bad.push(`a dollar that is neither money nor code was shown: ${JSON.stringify(seen.dollar)}`);
@@ -661,6 +666,7 @@
       await view().renderChat(md, set, '', view());
       // (with a code block open under it: the paragraph is whole, nothing in it is waited for)
       view().showOpen(open, md + '\n\n```js\nx');
+      await sleep(250);                                       // (a formula comes in when MathJax has its styles ready)
       const a = open.querySelector('.lagrange-open-text') ? read(open.querySelector('.lagrange-open-text')) : '', b = read(set);
       open.remove();
       if (a !== b) bad.push(`${JSON.stringify(md)}: open ${JSON.stringify(a)}, set ${JSON.stringify(b)}`);
@@ -674,38 +680,44 @@
     for (let k = 1; k <= 150; k++) para += one(k);          // about 12 000 characters, 300 formulas
     const open = view().logEl.createDiv({ cls: 'lagrange-turn-open' });
     await wholeOf('$x$');
-    let total = 0, worst = 0, calls = 0, first = null, moved = 0, lastHalf = 0;
-    for (let i = 40; i < para.length + 40; i += 40) {
-      const t0 = performance.now();
-      view().showOpen(open, para.slice(0, i));
-      const dt = performance.now() - t0;
-      total += dt; worst = Math.max(worst, dt); calls++;
-      if (i > para.length / 2) lastHalf += dt;
-      const m = open.querySelector('.math');
-      if (!first) first = m; else if (m !== first) moved++;
-    }
-    const math = open.querySelectorAll('mjx-container').length, codes = open.querySelectorAll('code').length;
-    // the same steps with everything put in again each time, as a measure (what the tail did before, with the mathematics added)
-    const naive = view().logEl.createDiv({ cls: 'lagrange-turn-open' });
-    let naiveTotal = 0;
-    for (let i = 40; i < para.length + 40; i += 40) {
-      const t0 = performance.now();
-      const fresh = createDiv({ cls: 'lagrange-turn-open' });
-      view().showOpen(fresh, para.slice(0, i));
-      naive.replaceChildren(...Array.from(fresh.childNodes));
-      naiveTotal += performance.now() - t0;
-    }
-    open.remove(); naive.remove();
-    info.push(`long paragraph: ${para.length} characters, ${math} formulas, ${calls} steps of 40 characters: ${total.toFixed(0)} ms in all (${(total / calls).toFixed(2)} ms a step, worst ${worst.toFixed(1)} ms, second half ${lastHalf.toFixed(0)} ms); the same with everything set again at each step: ${naiveTotal.toFixed(0)} ms`);
+    // (every call of showOpen is timed, those it makes again itself when a formula's styles are ready too)
+    const showOpen = view().showOpen;
+    let total = 0, worst = 0, calls = 0, first = null, moved = 0, steps = 0;
+    view().showOpen = function (...args) { const t0 = performance.now(); try { return showOpen.apply(this, args); } finally { const dt = performance.now() - t0; total += dt; worst = Math.max(worst, dt); calls++; } };
+    let math = 0, codes = 0, naiveTotal = 0, naiveCalls = 0;
+    try {
+      for (let i = 40; i < para.length + 40; i += 40) {
+        view().showOpen(open, para.slice(0, i));
+        steps++;
+        await sleep(0);
+        const m = open.querySelector('.math');
+        if (!first) first = m; else if (m !== first) moved++;
+      }
+      await sleep(200);
+      math = open.querySelectorAll('mjx-container').length; codes = open.querySelectorAll('code').length;
+      // the same steps with everything put in again each time, as a measure (what the tail did before, with the mathematics added)
+      const mine = { total, calls, worst };
+      for (let i = 40; i < para.length + 40; i += 400) {
+        const fresh = view().logEl.createDiv({ cls: 'lagrange-turn-open' });
+        view().showOpen(fresh, para.slice(0, i));
+        await sleep(30);
+        fresh.remove();
+      }
+      naiveTotal = total - mine.total; naiveCalls = Math.ceil(para.length / 400);
+      total = mine.total; calls = mine.calls; worst = mine.worst;
+    } finally { view().showOpen = showOpen; }
+    open.remove();
+    info.push(`long paragraph: ${para.length} characters, ${math} formulas, ${steps} steps of 40 characters, ${calls} calls: ${total.toFixed(0)} ms in all (${(total / steps).toFixed(2)} ms a step, worst call ${worst.toFixed(1)} ms); with everything set again at each step it would be about ${(naiveTotal / naiveCalls * steps).toFixed(0)} ms (measured at every tenth step: ${(naiveTotal / naiveCalls).toFixed(1)} ms a step on average)`);
     const bad = [];
     if (math !== 300 || codes !== 150) bad.push(`${math} formulas and ${codes} code spans at the end, not 300 and 150`);
     if (moved) bad.push(`the first formula's element was replaced at ${moved} steps`);
-    if (total / calls > 12) bad.push(`a step took ${(total / calls).toFixed(1)} ms on average (${total.toFixed(0)} ms in all)`);
+    if (total / steps > 12) bad.push(`a step took ${(total / steps).toFixed(1)} ms on average (${total.toFixed(0)} ms in all)`);
     // and through the chat itself, fast: the reply ends as the whole
     const text = para + '\n\nThe end.';
     await queue([{ text, chunk: 60, delay: 2, first: 100 }]);
     let most = 0;
     await frames((b, o, p) => { most = Math.max(most, p.math); if (/\$|x_\{|\\ge/.test(p.text)) bad.push(`a formula's source was shown: ${JSON.stringify(p.text.slice(-50))}`); }, () => send('A long one.'));
+    bad.push(...styled());
     if (most < 20) bad.push(`only ${most} formulas were typeset in the open prose while it streamed`);
     const streamed = blocksOf(body()), whole = await wholeOf(text);
     if (streamed !== whole) bad.push(`the reply as it stands is not the reply rendered at once: ${firstDiff(streamed, whole)}`);
@@ -723,7 +735,7 @@
         if (b.innerText.split('A small body between').length > 2) seen.twice++;
         if (/\$\$|\\frac|\\approx/.test(open ? open.innerText : '')) seen.raw2 = open.innerText.slice(-60);
       }, () => send('Explain the first point'));
-      const b = body(), bad = [];
+      const b = body(), bad = styled();
       if (!seen.early) bad.push(`no formula was typeset before the paragraph was whole (${n} frames)`);
       if (seen.src) bad.push(`a formula's source was shown: ${JSON.stringify(seen.src)}`);
       if (seen.twice) bad.push(`the paragraph stood twice for ${seen.twice} frames`);

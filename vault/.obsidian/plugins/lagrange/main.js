@@ -3513,7 +3513,7 @@ function needsWholeRender(md) {
    beginning (its line is not complete), and a line at the end of a code block that may be the closing fence
    arriving, are left out, so that no stray backticks show. Pure. */
 const OPEN_FIGURES = new Set(['tikz', 'mermaid']);
-const OPEN_SHOWN = new WeakMap();   // what showOpen has put in an element: {tail, box, segs, nodes, after, key, code}
+const OPEN_SHOWN = new WeakMap();   // what showOpen has put in an element: {tail, box, segs, nodes, after, key, code, math, waiting}
 function openTail(tail) {
   const text = String(tail == null ? '' : tail);
   const lines = text.split('\n');
@@ -3554,6 +3554,24 @@ function openTail(tail) {
   // begins: it is still said, not shown as its source)
   if (set && !text.slice(set.end).trim()) return { text: text.slice(0, set.start), kind: 'math', lang: '', body: '' };
   return { text, kind: null, lang: '', body: '' };
+}
+
+/* Whether MathJax has the styles of every letter of a typeset formula (`node`, not in the page yet) already: a
+   letter without them has no box. Looked at out of sight inside `el`, and taken out again at once. */
+function styledMath(el, node) {
+  const probe = el.ownerDocument.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
+  try {
+    probe.appendChild(node);
+    el.appendChild(probe);
+    const win = el.ownerDocument.defaultView || window;
+    return Array.from(node.querySelectorAll('mjx-c')).every(c => win.getComputedStyle(c).padding !== '0px');
+  } catch (e) {
+    return false;
+  } finally {
+    if (probe.parentNode) probe.parentNode.removeChild(probe);
+    if (node.parentNode === probe) probe.removeChild(node);
+  }
 }
 
 /* The name a code block is labelled with in the chat, from the name after its fence: the usual spelling of the
@@ -7432,19 +7450,55 @@ class LagrangeChatView extends ItemView {
   showOpen(el, tail) {
     const open = openTail(tail);
     let st = OPEN_SHOWN.get(el);
-    if (!st) { st = { tail: '', box: null, segs: [], nodes: [], after: null, key: '', code: null }; OPEN_SHOWN.set(el, st); }
+    if (!st) { st = { tail: '', box: null, segs: [], nodes: [], after: null, key: '', code: null, math: new Map(), waiting: false }; OPEN_SHOWN.set(el, st); }
     st.tail = tail;
     let segs = open.text.trim() ? tailInline(open.text, open.kind === null) : [];
     const first = segs.findIndex(s => s.kind === 'math');
     if (first >= 0) {
       const math = this.openMath(el);
-      if (math === 'wait') {
-        // (MathJax is still being fetched, the first time in a session: the prose stops before its first formula)
-        segs = segs.slice(0, first);
+      let stop = math === 'wait' ? first : -1;
+      if (math === 'none') {
+        segs = segs.map(s => (s.kind === 'math' ? { kind: 'text', text: s.display ? `$$${s.text}$$` : `$${s.text}$` } : s));
+      } else if (math === 'ready') {
+        // Each formula is typeset once, apart, and comes into the prose when MathJax has the styles of its
+        // letters: put in before that, it would stand for a frame as stray marks. Letters MathJax has set before
+        // in this session have theirs already (styledMath), and the formula comes at once; for new ones Obsidian
+        // makes them a moment after the last formula was typeset (finishRenderMath), so while some are waited
+        // for, no further formula is typeset (it would put the moment off): it waits with them.
+        let fresh = false;
+        for (let i = first; i < segs.length; i++) {
+          const s = segs[i];
+          if (s.kind !== 'math') continue;
+          const key = (s.display ? 'D' : 'I') + s.text;
+          let set = st.math.get(key);
+          if (!set) {
+            if (st.waiting) { if (stop < 0) stop = i; break; }
+            const node = renderPenMath(s.text, s.display, obsidian.renderMath);
+            set = { node, ready: !node || typeof obsidian.finishRenderMath !== 'function' || styledMath(el, node) };
+            st.math.set(key, set);
+            if (!set.ready) fresh = true;
+          }
+          if (!set.ready && stop < 0) stop = i;
+        }
+        if (fresh) {
+          const waiting = Array.from(st.math.values()).filter(m => !m.ready);
+          st.waiting = true;
+          const again = () => {
+            for (const m of waiting) m.ready = true;
+            st.waiting = false;
+            if (OPEN_SHOWN.get(el) === st && el.isConnected) { this.showOpen(el, st.tail); this.scrollDown(); }
+          };
+          let done;
+          try { done = Promise.resolve(obsidian.finishRenderMath()); } catch (e) { done = Promise.resolve(); }
+          done.then(again, again);
+        }
+      }
+      if (stop >= 0) {
+        // (the prose stops before a formula that cannot be shown yet: MathJax is being fetched, the first time in a
+        // session, or is making the formula's styles)
+        segs = segs.slice(0, stop);
         const last = segs[segs.length - 1];
         if (last && last.kind === 'text') { const text = last.text.replace(/\s+$/, ''); if (text) segs[segs.length - 1] = { kind: 'text', text }; else segs.pop(); }
-      } else if (math === 'none') {
-        segs = segs.map(s => (s.kind === 'math' ? { kind: 'text', text: s.display ? `$$${s.text}$$` : `$${s.text}$` } : s));
       }
     }
     if (!segs.length) {
@@ -7453,7 +7507,7 @@ class LagrangeChatView extends ItemView {
     } else {
       if (!st.box || st.box.parentNode !== el) { st.box = createDiv({ cls: 'lagrange-open-text' }); st.segs = []; st.nodes = []; el.prepend(st.box); }
       const same = (a, b) => a.kind === b.kind && a.text === b.text && Boolean(a.display) === Boolean(b.display);
-      let i = 0, typeset = false;
+      let i = 0;
       while (i < segs.length && i < st.segs.length && same(segs[i], st.segs[i])) i++;
       // (words that have only grown, or lost a mark: the same piece of text, with its new words)
       if (i < segs.length && i < st.segs.length && segs[i].kind === 'text' && st.segs[i].kind === 'text') { st.nodes[i].nodeValue = segs[i].text; i++; }
@@ -7462,8 +7516,9 @@ class LagrangeChatView extends ItemView {
         const s = segs[i];
         let node;
         if (s.kind === 'math') {
-          const set = renderPenMath(s.text, s.display, obsidian.renderMath);
-          if (set) { node = createSpan({ cls: `math ${s.display ? 'math-block' : 'math-inline'} is-loaded` }); node.appendChild(set); typeset = true; }
+          // (a copy of the formula as it was typeset: the same formula may stand in the paragraph twice)
+          const set = st.math.get((s.display ? 'D' : 'I') + s.text);
+          if (set && set.node) { node = createSpan({ cls: `math ${s.display ? 'math-block' : 'math-inline'} is-loaded` }); node.appendChild(set.node.cloneNode(true)); }
           else node = el.ownerDocument.createTextNode(s.display ? `$$${s.text}$$` : `$${s.text}$`);
         } else if (s.kind === 'code') {
           node = createEl('code', { text: s.text });
@@ -7474,7 +7529,6 @@ class LagrangeChatView extends ItemView {
         st.nodes.push(node);
       }
       st.segs = segs;
-      if (typeset && typeof obsidian.finishRenderMath === 'function') { try { Promise.resolve(obsidian.finishRenderMath()).catch(() => {}); } catch (e) { /* set as it is */ } }
     }
     const label = open.kind === 'code' ? codeLabel(open.lang) : '';
     const key = open.kind === 'code' ? `code ${label}` : open.kind || '';
@@ -7496,20 +7550,24 @@ class LagrangeChatView extends ItemView {
      (the first formula of a session; what is open in `el` is shown again when it has come); 'none' where there is
      no renderer or MathJax would not load (the formula is then shown as it is written, as before). */
   openMath(el) {
+    // (window.MathJax alone does not say it: while MathJax is being fetched it is there already, as its settings,
+    // and a formula typeset then comes out as nothing. What says it is loadMathJax's promise, kept once.)
     if (typeof obsidian.renderMath !== 'function' || this.mathFailed) return 'none';
-    if (typeof window.MathJax !== 'undefined' && window.MathJax !== null) return 'ready';
-    if (typeof obsidian.loadMathJax !== 'function') return 'none';
+    if (this.mathLoaded) return 'ready';
+    const there = () => typeof window.MathJax !== 'undefined' && window.MathJax !== null;
+    if (typeof obsidian.loadMathJax !== 'function') return there() ? 'ready' : 'none';
     if (!this.mathWaiting) {
       this.mathWaiting = new Set();
-      const again = () => {
+      const again = failed => {
         const waiting = this.mathWaiting;
         this.mathWaiting = null;
-        if (typeof window.MathJax === 'undefined' || window.MathJax === null) this.mathFailed = true;
+        if (failed === true || !there()) this.mathFailed = true;
+        else this.mathLoaded = true;
         for (const w of waiting) { const st = OPEN_SHOWN.get(w); if (st && w.isConnected) { this.showOpen(w, st.tail); this.scrollDown(); } }
       };
       let loading;
       try { loading = Promise.resolve(obsidian.loadMathJax()); } catch (e) { loading = Promise.reject(e); }
-      loading.then(again, again);
+      loading.then(() => again(false), () => again(true));
     }
     this.mathWaiting.add(el);
     return 'wait';
