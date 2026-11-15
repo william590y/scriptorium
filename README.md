@@ -409,7 +409,10 @@ lines of a code block, never inside a formula or a figure), under a button that 
 the rest is rendered when you ask for it. An edit of plain words keeps its white space (a doubled space shows), and
 one that changes only Markdown marks (`*a*` to `_a_`) shows the marks. While a reply streams, a code block that is
 still open is shown as code, and a formula or a figure that is still open as one line that says so, never as half a
-fence. `plugins-tests/chat-render.harness.js` checks this in a real Obsidian.
+fence; in the paragraph that is still coming, inline mathematics is typeset as soon as each formula has closed (a
+formula that has opened and not closed waits out of sight; `$5 for the lot` is money and is shown as it comes), and
+a code span that has closed is set as code. `plugins-tests/chat-render.harness.js` checks this in a real Obsidian,
+frame by frame.
 
 **Attaching pictures, video and files.** Paste a copied picture, video or file into the box, drop it on the panel
 (from your system, or a file of the vault from Obsidian's file explorer), or pick it with the paperclip. Each shows as

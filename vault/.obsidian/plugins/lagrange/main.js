@@ -3417,6 +3417,51 @@ const LOADER_CAPTIONS = {
    opening fence whose name is still arriving and may be one of Lagrange's own blocks (```lagrange-ed…), which are
    never shown. Pure. */
 const INTERNAL_BLOCKS = ['lagrange-edits', 'lagrange-look'];
+/* Where in a line of prose a displayed formula opens and does not close ($$ with no $$ after it), or -1. The line
+   is read as Obsidian reads it (see tailInline): the dollars of inline formulas that stand side by side ($x$$y$),
+   those in a code span and an escaped one open nothing. Pure. */
+function openDisplay(line) {
+  const n = line.length;
+  let i = 0, noCloser = false;
+  while (i < n) {
+    const c = line[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      let k = 1;
+      while (line[i + k] === '`') k++;
+      let j = i + k, close = -1;
+      while (j < n) {
+        if (line[j] !== '`') { j++; continue; }
+        let m = 1;
+        while (line[j + m] === '`') m++;
+        if (m === k) { close = j; break; }
+        j += m;
+      }
+      i = close >= 0 ? close + k : i + k;
+      continue;
+    }
+    if (c === '$') {
+      if (line[i + 1] === '$') {
+        const j = line.indexOf('$$', i + 2);
+        if (j < 0) return i;
+        i = j + 2;
+        continue;
+      }
+      let close = -1;
+      if (!noCloser && i + 1 < n && !/\s/.test(line[i + 1])) {
+        for (let j = i + 1; j < n; j++) {
+          if (line[j] === '\\') { j++; continue; }
+          if (line[j] === '$' && !/\s/.test(line[j - 1]) && !/[0-9]/.test(line[j + 1] || '')) { close = j; break; }
+        }
+        if (close < 0) noCloser = true;
+      }
+      i = close >= 0 ? close + 1 : i + 1;
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
 function splitStable(md) {
   const text = String(md == null ? '' : md);
   let fence = null, margin = false, math = false, at = 0, safe = 0, blank = false, inList = false, hide = -1;
@@ -3444,7 +3489,7 @@ function splitStable(md) {
         margin = !f[1];
         const name = line.slice(f[0].length).trim().toLowerCase();
         if (!whole && INTERNAL_BLOCKS.some(b => b.startsWith(name))) hide = at;
-      } else if (((line.match(/\$\$/g) || []).length) % 2) {
+      } else if (openDisplay(line) >= 0) {
         math = true;
       }
     }
@@ -3468,6 +3513,7 @@ function needsWholeRender(md) {
    beginning (its line is not complete), and a line at the end of a code block that may be the closing fence
    arriving, are left out, so that no stray backticks show. Pure. */
 const OPEN_FIGURES = new Set(['tikz', 'mermaid']);
+const OPEN_SHOWN = new WeakMap();   // what showOpen has put in an element: {tail, box, segs, nodes, after, key, code}
 function openTail(tail) {
   const text = String(tail == null ? '' : tail);
   const lines = text.split('\n');
@@ -3485,8 +3531,8 @@ function openTail(tail) {
       start = at;
       from = whole ? at + line.length + 1 : text.length;
       lang = whole ? (f[3].trim().split(/[\s{,]/)[0] || '').toLowerCase() : null;   // null: the name is still arriving
-    } else if (((line.match(/\$\$/g) || []).length) % 2) {
-      math = at + line.lastIndexOf('$$');
+    } else if (openDisplay(line) >= 0) {
+      math = at + openDisplay(line);
     } else if (/^\s*\$\$.+\$\$\s*$/.test(line)) {
       set = { start: at, end: at + line.length };
     } else if (!whole && /^\s*(`{1,2}|~{1,2}|\$)$/.test(line)) {
@@ -3526,6 +3572,115 @@ function codeLabel(name) {
    that is not closed yet. Pure. */
 function openProse(text) {
   return plainInline(String(text == null ? '' : text).replace(/\s+$/, '')).replace(/\*\*|__|`/g, '').replace(/(^|[\s(“"])[*_](?=[^\s*_])/g, '$1').replace(/(^|[\s(“"])[*_]+$/, '$1');
+}
+
+/* The prose that is still open at the end of a streaming reply, in the pieces the chat shows it in:
+   [{kind: 'text', text} | {kind: 'math', text, display} | {kind: 'code', text}]. Mathematics between dollars
+   that has closed ($x$, and $$x$$ inside a line) is a piece of its own, typeset at once, and so is a code span that
+   has closed; the text between them is openProse's. The rules are those Obsidian sets a note by, read from left to
+   right: an opening $ is followed by something that is not white space, a closing $ follows something that is not
+   white space and is not followed by a digit ("$5 and $10" is money), neither is escaped (\$), a formula does not
+   reach across a blank line, and whichever of a code span and a formula opens first holds the other's marks.
+   \( … \) is not mathematics in Obsidian, and is not here.
+   live: this prose is the end of the reply as it stands, so more is coming. Then a formula that has opened and not
+   closed is held back with what follows it (never shown as its source), unless it reads as money ("$5 for the
+   lot") or has run on for more than OPEN_MATH_HOLD characters without closing (a $ that was never going to
+   close: the words after it are then late by that much); a single $ or \ at the very end
+   waits for what comes after it; and after a code span that is still open nothing is taken for mathematics.
+   Each call reads the text once (a search for a closing $ that fails is not made again in that paragraph). Pure. */
+const OPEN_MATH_HOLD = 120;
+const OPEN_MONEY = /^\d[\d,]*(?:\.\d+)?[.,;:!?)]*\s+[A-Za-z]{2,}/;
+const OPEN_MARK = /([-]+)/;
+function tailInline(text, live) {
+  const src = String(text == null ? '' : text).replace(/[-]/g, '');
+  const n = src.length, spans = [];
+  const space = c => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v' || c === ' ';
+  const blank = /\n[ \t]*\n/g;
+  let paraEnd = -1;                      // where the paragraph being read ends (a blank line, or the end)
+  const endOf = p => {
+    if (paraEnd < p) { blank.lastIndex = p; const m = blank.exec(src); paraEnd = m ? m.index : n; }
+    return paraEnd;
+  };
+  let out = '', from = 0, i = 0, cut = -1, noCloser = -1;   // noCloser: the paragraph end before which no $ closes
+  const put = (span, start, end) => {
+    out += src.slice(from, start) + '' + String(spans.length).replace(/\d/g, d => String.fromCharCode(0xE000 + Number(d))) + '';
+    spans.push(span);
+    from = i = end;
+  };
+  while (i < n) {
+    const c = src[i];
+    if (c === '\\') {
+      if (i + 1 >= n) { if (live) cut = i; break; }
+      i += /[!-\/:-@[-`{-~]/.test(src[i + 1]) ? 2 : 1;
+      continue;
+    }
+    if (c === '`') {
+      let k = 1;
+      while (src[i + k] === '`') k++;
+      const end = endOf(i);
+      let j = i + k, close = -1;
+      while (j < end) {
+        if (src[j] !== '`') { j++; continue; }
+        let m = 1;
+        while (src[j + m] === '`') m++;
+        if (m === k) { close = j; break; }
+        j += m;
+      }
+      if (close >= 0) {
+        let code = src.slice(i + k, close).replace(/\n/g, ' ');
+        if (code.length > 2 && code[0] === ' ' && code[code.length - 1] === ' ' && code.trim()) code = code.slice(1, -1);
+        put({ kind: 'code', text: code }, i, close + k);
+        continue;
+      }
+      if (live && end === n) break;      // (a code span that is still open: what follows is its code)
+      i += k;
+      continue;
+    }
+    if (c === '$') {
+      const end = endOf(i);
+      if (src[i + 1] === '$') {
+        const j = src.indexOf('$$', i + 2);
+        if (j > i + 2 && j < end && src.slice(i + 2, j).trim()) { put({ kind: 'math', text: src.slice(i + 2, j).trim(), display: true }, i, j + 2); continue; }
+        if (live && end === n && j < 0) { cut = i; break; }   // (a displayed formula that is still open)
+        i++;
+        continue;
+      }
+      if (i + 1 >= n) { if (live) cut = i; break; }
+      if (space(src[i + 1])) { i++; continue; }
+      let close = -1;
+      if (noCloser !== end) {
+        for (let j = i + 1; j < end; j++) {
+          const d = src[j];
+          if (d === '\\') { j++; continue; }
+          if (d === '$' && !space(src[j - 1]) && !/[0-9]/.test(src[j + 1] || '')) { close = j; break; }
+        }
+      }
+      if (close >= 0) { put({ kind: 'math', text: src.slice(i + 1, close), display: false }, i, close + 1); continue; }
+      noCloser = end;
+      if (live && end === n) {
+        const body = src.slice(i + 1);
+        if (!OPEN_MONEY.test(body) && body.length <= OPEN_MATH_HOLD) { cut = i; break; }
+      }
+      i++;
+      continue;
+    }
+    i++;
+  }
+  const prose = openProse(out + src.slice(from, cut >= 0 ? cut : n));
+  const segs = [];
+  for (const piece of prose.split(OPEN_MARK)) {
+    // (split with one group: the pieces of text and the numbers of the spans come in turn)
+    if (segs.turn) {
+      const span = spans[Number(piece.replace(/[-]/g, d => String(d.charCodeAt(0) - 0xE000)))];
+      if (span) segs.push(span);
+    } else if (piece) {
+      const text = piece.replace(/[-]/g, '');
+      if (text) segs.push({ kind: 'text', text });
+    }
+    segs.turn = !segs.turn;
+  }
+  delete segs.turn;
+  return segs;
 }
 
 /* ---- The list of edits under a reply or a task ----
@@ -7269,21 +7424,95 @@ class LagrangeChatView extends ItemView {
     }
   }
 
-  /* What is still being written at the end of a streaming reply (see openTail): its prose as it comes; a code
-     block that is open as code, under its language; a figure or a displayed formula that is open as one quiet line,
-     until it is whole and is set. Never half a fence. */
+  /* What is still being written at the end of a streaming reply (see openTail): its prose as it comes, with the
+     mathematics and the code spans that have closed in it set as they will stand (tailInline); a code block that
+     is open as code, under its language; a figure or a displayed formula that is open as one quiet line, until it
+     is whole and is set. Never half a fence, never a formula's source. What is shown already stays as it is: only
+     what has changed since the last time is put in again, so a formula is typeset once and does not flicker. */
   showOpen(el, tail) {
     const open = openTail(tail);
-    el.empty();
-    // (its prose without the Markdown marks the rendered text will not show: no asterisks that come and go)
-    if (open.text.trim()) el.createDiv({ cls: 'lagrange-open-text', text: openProse(open.text) });
-    if (open.kind === 'code') {
-      const pre = el.createEl('pre', { cls: 'lagrange-open-code' });
-      if (codeLabel(open.lang)) pre.setAttribute('data-lang', codeLabel(open.lang));
-      pre.createEl('code', { text: open.body });
-    } else if (open.kind) {
-      el.createDiv({ cls: 'lagrange-open-note', text: open.kind === 'figure' ? 'Drawing a figure…' : 'Setting an equation…' });
+    let st = OPEN_SHOWN.get(el);
+    if (!st) { st = { tail: '', box: null, segs: [], nodes: [], after: null, key: '', code: null }; OPEN_SHOWN.set(el, st); }
+    st.tail = tail;
+    let segs = open.text.trim() ? tailInline(open.text, open.kind === null) : [];
+    const first = segs.findIndex(s => s.kind === 'math');
+    if (first >= 0) {
+      const math = this.openMath(el);
+      if (math === 'wait') {
+        // (MathJax is still being fetched, the first time in a session: the prose stops before its first formula)
+        segs = segs.slice(0, first);
+        const last = segs[segs.length - 1];
+        if (last && last.kind === 'text') { const text = last.text.replace(/\s+$/, ''); if (text) segs[segs.length - 1] = { kind: 'text', text }; else segs.pop(); }
+      } else if (math === 'none') {
+        segs = segs.map(s => (s.kind === 'math' ? { kind: 'text', text: s.display ? `$$${s.text}$$` : `$${s.text}$` } : s));
+      }
     }
+    if (!segs.length) {
+      if (st.box) st.box.remove();
+      st.box = null; st.segs = []; st.nodes = [];
+    } else {
+      if (!st.box || st.box.parentNode !== el) { st.box = createDiv({ cls: 'lagrange-open-text' }); st.segs = []; st.nodes = []; el.prepend(st.box); }
+      const same = (a, b) => a.kind === b.kind && a.text === b.text && Boolean(a.display) === Boolean(b.display);
+      let i = 0, typeset = false;
+      while (i < segs.length && i < st.segs.length && same(segs[i], st.segs[i])) i++;
+      // (words that have only grown, or lost a mark: the same piece of text, with its new words)
+      if (i < segs.length && i < st.segs.length && segs[i].kind === 'text' && st.segs[i].kind === 'text') { st.nodes[i].nodeValue = segs[i].text; i++; }
+      for (const node of st.nodes.splice(i)) node.remove();
+      for (; i < segs.length; i++) {
+        const s = segs[i];
+        let node;
+        if (s.kind === 'math') {
+          const set = renderPenMath(s.text, s.display, obsidian.renderMath);
+          if (set) { node = createSpan({ cls: `math ${s.display ? 'math-block' : 'math-inline'} is-loaded` }); node.appendChild(set); typeset = true; }
+          else node = el.ownerDocument.createTextNode(s.display ? `$$${s.text}$$` : `$${s.text}$`);
+        } else if (s.kind === 'code') {
+          node = createEl('code', { text: s.text });
+        } else {
+          node = el.ownerDocument.createTextNode(s.text);
+        }
+        st.box.appendChild(node);
+        st.nodes.push(node);
+      }
+      st.segs = segs;
+      if (typeset && typeof obsidian.finishRenderMath === 'function') { try { Promise.resolve(obsidian.finishRenderMath()).catch(() => {}); } catch (e) { /* set as it is */ } }
+    }
+    const label = open.kind === 'code' ? codeLabel(open.lang) : '';
+    const key = open.kind === 'code' ? `code ${label}` : open.kind || '';
+    if (st.after && (st.key !== key || st.after.parentNode !== el)) { st.after.remove(); st.after = null; st.code = null; }
+    st.key = key;
+    if (open.kind === 'code') {
+      if (!st.after) {
+        st.after = el.createEl('pre', { cls: 'lagrange-open-code' });
+        if (label) st.after.setAttribute('data-lang', label);
+        st.code = st.after.createEl('code');
+      }
+      if (st.code.textContent !== open.body) st.code.textContent = open.body;
+    } else if (open.kind && !st.after) {
+      st.after = el.createDiv({ cls: 'lagrange-open-note', text: open.kind === 'figure' ? 'Drawing a figure…' : 'Setting an equation…' });
+    }
+  }
+
+  /* Whether mathematics in the open prose can be typeset now: 'ready'; 'wait' while Obsidian's MathJax is fetched
+     (the first formula of a session; what is open in `el` is shown again when it has come); 'none' where there is
+     no renderer or MathJax would not load (the formula is then shown as it is written, as before). */
+  openMath(el) {
+    if (typeof obsidian.renderMath !== 'function' || this.mathFailed) return 'none';
+    if (typeof window.MathJax !== 'undefined' && window.MathJax !== null) return 'ready';
+    if (typeof obsidian.loadMathJax !== 'function') return 'none';
+    if (!this.mathWaiting) {
+      this.mathWaiting = new Set();
+      const again = () => {
+        const waiting = this.mathWaiting;
+        this.mathWaiting = null;
+        if (typeof window.MathJax === 'undefined' || window.MathJax === null) this.mathFailed = true;
+        for (const w of waiting) { const st = OPEN_SHOWN.get(w); if (st && w.isConnected) { this.showOpen(w, st.tail); this.scrollDown(); } }
+      };
+      let loading;
+      try { loading = Promise.resolve(obsidian.loadMathJax()); } catch (e) { loading = Promise.reject(e); }
+      loading.then(again, again);
+    }
+    this.mathWaiting.add(el);
+    return 'wait';
   }
 
   /* One side of an edit in the list (what was taken out, or what was put in), set as the chat sets a reply: code as
@@ -7554,7 +7783,7 @@ class LagrangeChatView extends ItemView {
     this.scrollDown();
     let md = '', shown = null, timer = null, comp = null, status = null;
     // While the reply streams: the whole blocks that have come are rendered once each, as Obsidian renders a note
-    // (renderChat), and what is still being written is shown as plain text under them (splitStable). When the
+    // (renderChat), and what is still being written is shown under them as it comes (splitStable, showOpen). When the
     // reply is complete, what is left of it is rendered; it is rendered again as a whole only if it holds something
     // that reaches across blocks (needsWholeRender) or is not what was streamed, so a diagram is not drawn twice.
     let stream = null;                     // {box, tail, done}
@@ -9179,5 +9408,5 @@ LagrangePlugin.internals = {
 Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
-Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: LagrangePlates.NAMES, codeLabel, openTail, openProse, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
+Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: LagrangePlates.NAMES, codeLabel, openTail, openProse, tailInline, openDisplay, OPEN_MATH_HOLD, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

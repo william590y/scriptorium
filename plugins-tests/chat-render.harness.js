@@ -13,7 +13,10 @@
 // that only changes Markdown marks shows them; a long edit shows its beginning and a button that says how many more
 // lines there are, and the rest (a figure in it too) is only rendered when asked for; what was taken out is told
 // from what was put in; nothing an edit holds is fetched or run; and while a reply streams, a code block that is
-// still open shows as code, never as half a fence. The first of these cases is the one from the demo, as it was
+// still open shows as code, never as half a fence; the inline mathematics of a paragraph that is still coming is
+// typeset as each formula closes, and no frame shows a formula's source, a paragraph twice or a raw $$; money,
+// dollars in code and escaped dollars are left as they are; and what stands when the reply is complete is what the
+// whole reply rendered at once would be. The first of these cases is the one from the demo, as it was
 // reported: "Add an equation" and "Add some code", whose edits 0.6.1 listed as raw LaTeX and a raw, cut code block.
 //
 // And the loader's plates ("Lagrange is thinking"): requests in a row show the three plates in turn, the first by
@@ -26,7 +29,7 @@
 //   2. open a Scriptorium vault in Obsidian with Lagrange on, and TikZJax on for the figure cases (they fail, saying
 //      so, where it is off), with a note open;
 //   3. paste this file into the developer console, or evaluate it with Runtime.evaluate (awaitPromise: true).
-// It answers with a JSON string {ok, failed, cases: [{name, ok, why}]} and prints a table. Options, set first:
+// It answers with a JSON string {ok, failed, cases: [{name, ok, why}], info: [what was measured]} and prints a table. Options, set first:
 // window.chatRenderOptions = {server: 'http://127.0.0.1:48914', only: 'text in a case name'}. It sets Lagrange to
 // the server for the run and puts the settings back afterwards; it clears the chat, and leaves the note as it was.
 // (The model is named "llava-mock" so that Lagrange takes it for one that reads pictures.) Only the mock server is spoken
@@ -39,7 +42,7 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const plugin = app.plugins.plugins.lagrange;
   const I = plugin.constructor.internals;
-  const cases = [];
+  const cases = [], info = [];
   const has = id => app.plugins.enabledPlugins.has(id) && Boolean(app.plugins.plugins[id]);
 
   // ---- the panel ----
@@ -107,6 +110,47 @@
     cases.push(c);
   };
   const needTikz = () => (has('obsidian-tikzjax') ? '' : 'the TikZJax plugin is not on in this vault');
+
+  // ---- a streaming reply, frame by frame ----
+  // The blocks of a reply as they stand in an element, in one string (the parts a streamed reply was set in are
+  // taken as one).
+  const blocksOf = el => {
+    const parts = Array.from(el.querySelectorAll('.lagrange-turn-part'));
+    const kids = parts.length ? parts.flatMap(p => Array.from(p.children)) : Array.from((el.children.length === 1 && el.firstElementChild.tagName === 'DIV' && !el.firstElementChild.className ? el.firstElementChild : el).children);
+    return kids.map(k => k.outerHTML).join('\n');
+  };
+  // The same Markdown rendered at once, as a reply that did not stream is: -> its blocks, as blocksOf gives them.
+  const wholeOf = async md => {
+    const box = view().logEl.createDiv({ cls: 'lagrange-turn-body markdown-rendered' });
+    box.style.cssText = 'position:absolute;left:0;right:0;top:0;visibility:hidden';
+    await view().renderChat(md, box, '', view());
+    await sleep(400);
+    const html = blocksOf(box);
+    box.remove();
+    return html;
+  };
+  const firstDiff = (a, b) => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return `at ${i}: streamed ${JSON.stringify(a.slice(Math.max(0, i - 40), i + 60))}, at once ${JSON.stringify(b.slice(Math.max(0, i - 40), i + 60))}`; };
+  // Watches the last reply at every frame while fn runs: each(body, open, prose) is called with the reply's body,
+  // what is still open in it (or null) and the open prose in two forms: {text: its words without what is typeset or
+  // in a code span, all: innerText, math: how many formulas are typeset in it, code: how many code spans}.
+  const frames = async (each, fn) => {
+    let watching = true, n = 0;
+    const watch = () => {
+      if (!watching) return;
+      const b = body();
+      if (b) {
+        n++;
+        const open = b.querySelector('.lagrange-turn-open'), box = open ? open.querySelector('.lagrange-open-text') : null;
+        let text = '';
+        if (box) for (const k of box.childNodes) if (k.nodeType === 3) text += k.nodeValue; else text += '\u0001';
+        each(b, open, { text, all: box ? box.innerText : '', math: box ? box.querySelectorAll('mjx-container').length : 0, code: box ? box.querySelectorAll('code').length : 0, box });
+      }
+      requestAnimationFrame(watch);
+    };
+    requestAnimationFrame(watch);
+    try { await fn(); await sleep(600); } finally { watching = false; }
+    return n;
+  };
 
   // ---- the cases ----
   await run('a reply with code, mathematics, a table, Mermaid and TikZ is set as a note would set it, inside the panel', async () => {
@@ -504,51 +548,190 @@
   }));
 
   await run('while a reply streams, a code block that is open shows as code, a formula and a figure as one line: never half a fence, and no block goes and comes back', async () => {
-    const text = '*Here is the function*, with **bold** words, `inline` code and $x^2$ in a first paragraph that is long enough to be seen as it comes.\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```\n\nAnd the formula:\n\n$$\nr \\approx R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}\n$$\n\nThat is all there is to it.';
+    const text = '*Here is the function*, with **bold** words, `inline` code and $x^2$ in a first paragraph: for a small $M_2$, its distance $r$ from the smaller mass is long enough to be seen as it comes.\n\n```python\ndef hill_radius(m1, m2, r):\n    # where a small body between two masses can rest\n    return r * (m2 / (3 * m1)) ** (1 / 3)\n```\n\nAnd the formula:\n\n$$\nr \\approx R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}\n$$\n\nThat is all there is to it, with $\\alpha$ last.';
     await queue([{ text, chunk: 3, delay: 25, first: 150 }]);   // (slowly enough that each open block is on screen for some frames)
-    const seen = { twice: 0, marks: '', fence: '', openCode: 0, label: 0, mathLine: 0, rawMath: '', gap: 0, frames: 0 };
-    let watching = true, hadCode = false;
-    const watch = () => {
-      if (!watching) return;
-      const b = body();
-      if (b) {
-        seen.frames++;
-        const open = b.querySelector('.lagrange-turn-open'), shown = open ? open.innerText : '';
-        if (/(^|\n)\s*(`{1,3}|~{1,3})\w*\s*$/.test(shown) || /```/.test(shown)) seen.fence = shown.slice(-60);
-        if (/\$\$|\\frac|\\approx/.test(shown)) seen.rawMath = shown.slice(-60);
-        const prose = open && open.querySelector('.lagrange-open-text') ? open.querySelector('.lagrange-open-text').innerText : '';   // (not the open code: ** is Python's)
-        if (/\*\*|`/.test(prose)) seen.marks = prose.slice(-60);
-        // (a paragraph is shown once: as it came, or set, never both)
-        const words = b.innerText;
-        if (words.split('Here is the').length > 2 || words.split('And the formula').length > 2 || words.split('That is all').length > 2) seen.twice++;
-        if (/(^|\s)[*_](?=\S)/.test(prose.split('\n')[0])) seen.marks = prose.slice(0, 60);
-        const oc = open && open.querySelector('pre.lagrange-open-code');
-        if (oc) { seen.openCode++; if (oc.getAttribute('data-lang') === 'Python') seen.label++; }
-        if (open && /Setting an equation/.test(shown)) seen.mathLine++;
-        const anyCode = Boolean(b.querySelector('pre'));
-        if (hadCode && !anyCode) seen.gap++;
-        hadCode = hadCode || anyCode;
-      }
-      requestAnimationFrame(watch);
-    };
-    requestAnimationFrame(watch);
-    await send('Show me.');
-    await sleep(600);
-    watching = false;
+    const seen = { twice: 0, marks: '', fence: '', openCode: 0, label: 0, mathLine: 0, rawMath: '', rawInline: '', openMath: 0, early: 0, late: '', codeSpan: 0, gap: 0, frames: 0 };
+    let hadCode = false;
+    seen.frames = await frames((b, open, p) => {
+      const shown = open ? open.innerText : '';
+      if (/(^|\n)\s*(`{1,3}|~{1,3})\w*\s*$/.test(shown) || /```/.test(shown)) seen.fence = shown.slice(-60);
+      if (/\$\$|\\frac|\\approx/.test(shown)) seen.rawMath = shown.slice(-60);
+      const prose = p.all;                                  // (not the open code: ** is Python's)
+      if (/\*\*|`/.test(prose)) seen.marks = prose.slice(-60);
+      // (no formula's source in the open prose, closed or still open: no dollar at all in this reply's prose)
+      if (/\$|x\^2|M_2|\\alpha/.test(p.text)) seen.rawInline = p.text.slice(-60);
+      if (/\$[^$\n]+\$/.test(b.innerText)) seen.rawInline = seen.rawInline || 'in the reply: ' + /\$[^$\n]+\$/.exec(b.innerText)[0];
+      // (a formula is typeset as soon as it has closed: before the words after it, not when the paragraph is whole)
+      if (p.math) seen.openMath++;
+      if (p.math && /first paragraph/.test(p.all) && !/long enough/.test(p.all)) seen.early++;
+      for (const [word, n] of [['first paragraph', 1], ['its distance', 2], ['from the smaller', 3]]) if (p.all.includes(word) && p.math < n) seen.late = `${JSON.stringify(word)} was shown with ${p.math} formula${p.math === 1 ? '' : 's'} typeset before it, not ${n}`;
+      if (p.code) seen.codeSpan++;
+      // (a paragraph is shown once: as it came, or set, never both)
+      const words = b.innerText;
+      if (words.split('Here is the').length > 2 || words.split('And the formula').length > 2 || words.split('That is all').length > 2) seen.twice++;
+      if (/(^|\s)[*_](?=\S)/.test(prose.split('\n')[0])) seen.marks = prose.slice(0, 60);
+      const oc = open && open.querySelector('pre.lagrange-open-code');
+      if (oc) { seen.openCode++; if (oc.getAttribute('data-lang') === 'Python') seen.label++; }
+      if (open && /Setting an equation/.test(shown)) seen.mathLine++;
+      const anyCode = Boolean(b.querySelector('pre'));
+      if (hadCode && !anyCode) seen.gap++;
+      hadCode = hadCode || anyCode;
+    }, () => send('Show me.'));
     const b = body(), bad = [];
     if (seen.frames < 20) bad.push(`only ${seen.frames} frames were watched`);
     if (seen.fence) bad.push(`half a fence was shown: ${JSON.stringify(seen.fence)}`);
     if (seen.marks) bad.push(`marks of emphasis or code were shown: ${JSON.stringify(seen.marks)}`);
     if (seen.rawMath) bad.push(`the formula's source was shown: ${JSON.stringify(seen.rawMath)}`);
+    if (seen.rawInline) bad.push(`an inline formula's source was shown: ${JSON.stringify(seen.rawInline)}`);
+    if (!seen.early) bad.push(`no inline formula was typeset while its paragraph was still coming (${seen.openMath} frames with one in the open prose)`);
+    if (seen.late) bad.push(seen.late);
+    if (!seen.codeSpan) bad.push('the code span that had closed was never shown as code in the open prose');
     if (!seen.openCode) bad.push('the open code block was never shown as code');
     else if (seen.label < seen.openCode) bad.push('the open code block had no language');
     if (!seen.mathLine) bad.push('the open formula was never said');
     if (seen.twice) bad.push(`a paragraph stood in the reply twice for ${seen.twice} frame${seen.twice === 1 ? '' : 's'} (as it came, and set)`);
     if (seen.gap) bad.push(`the code block was gone for ${seen.gap} frame${seen.gap === 1 ? '' : 's'} between streaming and rendering`);
     if (!b.querySelector('pre[data-lang="Python"] code .token') || !b.querySelector('mjx-container[display="true"]')) bad.push('the finished reply is not rendered');
-    if (b.querySelector('.lagrange-turn-open, .lagrange-open-code, .lagrange-open-note')) bad.push('what was open is still there at the end');
+    if (b.querySelectorAll('mjx-container:not([display="true"])').length !== 4) bad.push(`the finished reply has ${b.querySelectorAll('mjx-container:not([display="true"])').length} inline formulas, not 4`);
+    if (b.querySelector('.lagrange-turn-open, .lagrange-open-code, .lagrange-open-note, .lagrange-open-text')) bad.push('what was open is still there at the end');
     if (raw(b)) bad.push('raw Markdown is left in the reply');
+    const streamed = blocksOf(b), whole = await wholeOf(text);
+    if (streamed !== whole) bad.push(`the reply as it stands is not the reply rendered at once: ${firstDiff(streamed, whole)}`);
+    info.push(`streaming case: ${seen.frames} frames, ${seen.openMath} with a formula typeset in the open prose, ${seen.early} of them before its paragraph was whole`);
     return bad.join('; ');
+  });
+
+  await run('while a paragraph streams, each inline formula is typeset as it closes; money, dollars in code and escaped dollars are never taken for one', async () => {
+    const text = 'The fee is $5 for the lot and $7 more, with \\$3 escaped.\n\n' +
+      'Call `cost($x$, $y$)` and then ``a ` $z$`` in code, plainly.\n\n' +
+      'Then $a^2 + b^2 = c^2$ holds, with ($\\alpha$) for the angle and $\\frac{p}{q}$, too; so says the book.\n\n' +
+      'So:\n$$\ns = \\sum_{k} k\n$$\nwhere $k$ runs.\n\n' +
+      '- an item with $e^{i\\pi} = -1$ in it\n- and one with **bold $\\beta$ words** at the very end';
+    await queue([{ text, chunk: 2, delay: 16, first: 150 }]);
+    const seen = { src: '', dollar: '', late: '', twice: 0, raw2: '', max: 0, money: 0, code: 0 };
+    const n = await frames((b, open, p) => {
+      // (the words of the open prose, without what is typeset and what is in a code span)
+      if (/a\^2|c\^2|\\alpha|\\frac|\\beta|\\sum|e\^\{|\\pi/.test(p.text)) seen.src = p.text.slice(-70);
+      // (a dollar in the prose is money, the escaped one, or code of a span that is still open: never a formula's)
+      const left = p.text.replace(/\$5|\$7|\$3/g, '').replace(/cost\(\$?x?\$?,? ?\$?y?\$?\)?/, '').replace(/a  ?\$?z?\$?/, '');
+      if (/\$/.test(left)) seen.dollar = p.text.slice(-70);
+      if (/\$5 for/.test(p.text)) seen.money++;
+      if (p.code) seen.code++;
+      seen.max = Math.max(seen.max, p.math);
+      for (const [word, k] of [['holds', 1], ['for the angle', 2], ['too', 3]]) if (p.all.includes(word) && p.all.includes('Then') && p.math < k) seen.late = `${JSON.stringify(word)} was shown with ${p.math} typeset, not ${k}`;
+      const words = b.innerText;
+      for (const w of ['The fee is', 'Call', 'Then', 'So:', 'where', 'an item']) if (words.split(w).length > 2) seen.twice++;
+      const all = open ? open.innerText : '';
+      if (/\$\$|\\sum/.test(all)) seen.raw2 = all.slice(-60);
+    }, () => send('Show me.'));
+    const b = body(), bad = [];
+    if (n < 40) bad.push(`only ${n} frames were watched`);
+    if (seen.src) bad.push(`a formula's source was shown: ${JSON.stringify(seen.src)}`);
+    if (seen.dollar) bad.push(`a dollar that is neither money nor code was shown: ${JSON.stringify(seen.dollar)}`);
+    if (seen.late) bad.push(seen.late);
+    if (seen.max < 3) bad.push(`at most ${seen.max} formulas were typeset in the open prose at once, not 3`);
+    if (!seen.money) bad.push('the money was not shown as it came');
+    if (!seen.code) bad.push('no closed code span was shown as code in the open prose');
+    if (seen.twice) bad.push(`a paragraph stood twice for ${seen.twice} frame${seen.twice === 1 ? '' : 's'}`);
+    if (seen.raw2) bad.push(`a displayed formula's source was shown: ${JSON.stringify(seen.raw2)}`);
+    const t = b.innerText;
+    for (const w of ['$5 for the lot and $7 more, with $3 escaped.', 'cost($x$, $y$)', 'a ` $z$']) if (!t.includes(w)) bad.push(`the finished reply lacks ${JSON.stringify(w)}`);
+    if (b.querySelectorAll('mjx-container').length !== 7 || b.querySelectorAll('mjx-container[display="true"]').length !== 1) bad.push(`the finished reply has ${b.querySelectorAll('mjx-container').length} formulas (${b.querySelectorAll('mjx-container[display="true"]').length} displayed), not 7 (1)`);
+    if (b.querySelector('.lagrange-turn-open, .lagrange-open-text')) bad.push('what was open is still there at the end');
+    const streamed = blocksOf(b), whole = await wholeOf(text);
+    if (streamed !== whole) bad.push(`the reply as it stands is not the reply rendered at once: ${firstDiff(streamed, whole)}`);
+    return bad.join('; ');
+  });
+
+  await run('the open prose is what Obsidian will set: for each of the hard cases, the same formulas, code spans and words as the rendered paragraph', async () => {
+    const hard = ['a $x$ b', 'cost $5 and $10 more', 'cost $5 and$ 10', 'a $ x$ b', 'a $x $ b', 'a $x$1 b', 'a $x$, b', 'a ($x$) b', 'a $x$$y$ b', 'a \\$x$ b $y$', 'a $x\\$y$ b',
+      'a `$x$` b $y$', 'a ``$x` $y$`` b', 'a \\(x\\) b', 'a \\[x\\] b', 'a $x\ny$ b', 'a $$x$$ b', 'a $x$$ b', 'a $1$2$ b', 'a $x$y$z$ b', 'it is 5$ and 6$ so',
+      'a $x_1$ and *b $y$ c* and **d $z$**', 'a [l $x$](http://e.org) b', 'a $<b>x</b>$ c', 'a $x<y$ and $y>x$ c', 'a $`x`$ b', 'a `c` $x` y$ `d` b', 'a 2$x$ b', 'a $\\$$ b',
+      'a $x\\\\$ b', 'a \\\\$x$ b', 'costs $5, or $6.', 'a $x$ `c $y$` $z$ b', 'a %%c $x$ d%% $y$ b', 'a ==$x$== and ~~$y$~~ b', 'a $x \\text{ if $y$ }$ b', 'a $\\frac{a}{b}$. Next'];
+    const read = el => {
+      const c = el.cloneNode(true);
+      for (const m of Array.from(c.querySelectorAll('.math'))) m.replaceWith(`⟦${m.classList.contains('math-block') ? 'D' : 'M'}:${(m.querySelector('mjx-math') || m).getAttribute('data-latex') || m.textContent}⟧`);
+      for (const k of Array.from(c.querySelectorAll('code'))) k.replaceWith(`⟨${k.textContent}⟩`);
+      return c.textContent.replace(/\s+/g, ' ').trim();
+    };
+    const bad = [];
+    await wholeOf('$x$');                                     // (MathJax is there)
+    for (const md of hard) {
+      const set = createDiv(), open = view().logEl.createDiv({ cls: 'lagrange-turn-open' });
+      await view().renderChat(md, set, '', view());
+      // (with a code block open under it: the paragraph is whole, nothing in it is waited for)
+      view().showOpen(open, md + '\n\n```js\nx');
+      const a = open.querySelector('.lagrange-open-text') ? read(open.querySelector('.lagrange-open-text')) : '', b = read(set);
+      open.remove();
+      if (a !== b) bad.push(`${JSON.stringify(md)}: open ${JSON.stringify(a)}, set ${JSON.stringify(b)}`);
+    }
+    return bad.slice(0, 6).join('; ');
+  });
+
+  await run('a very long paragraph streams without being set again at every step: a formula is typeset once and its element stays', async () => {
+    const one = k => `With $x_{${k}}$ and \`c${k}\` and **bold** words it holds for every $n \\ge ${k}$, as was said. `;
+    let para = '';
+    for (let k = 1; k <= 150; k++) para += one(k);          // about 12 000 characters, 300 formulas
+    const open = view().logEl.createDiv({ cls: 'lagrange-turn-open' });
+    await wholeOf('$x$');
+    let total = 0, worst = 0, calls = 0, first = null, moved = 0, lastHalf = 0;
+    for (let i = 40; i < para.length + 40; i += 40) {
+      const t0 = performance.now();
+      view().showOpen(open, para.slice(0, i));
+      const dt = performance.now() - t0;
+      total += dt; worst = Math.max(worst, dt); calls++;
+      if (i > para.length / 2) lastHalf += dt;
+      const m = open.querySelector('.math');
+      if (!first) first = m; else if (m !== first) moved++;
+    }
+    const math = open.querySelectorAll('mjx-container').length, codes = open.querySelectorAll('code').length;
+    // the same steps with everything put in again each time, as a measure (what the tail did before, with the mathematics added)
+    const naive = view().logEl.createDiv({ cls: 'lagrange-turn-open' });
+    let naiveTotal = 0;
+    for (let i = 40; i < para.length + 40; i += 40) {
+      const t0 = performance.now();
+      const fresh = createDiv({ cls: 'lagrange-turn-open' });
+      view().showOpen(fresh, para.slice(0, i));
+      naive.replaceChildren(...Array.from(fresh.childNodes));
+      naiveTotal += performance.now() - t0;
+    }
+    open.remove(); naive.remove();
+    info.push(`long paragraph: ${para.length} characters, ${math} formulas, ${calls} steps of 40 characters: ${total.toFixed(0)} ms in all (${(total / calls).toFixed(2)} ms a step, worst ${worst.toFixed(1)} ms, second half ${lastHalf.toFixed(0)} ms); the same with everything set again at each step: ${naiveTotal.toFixed(0)} ms`);
+    const bad = [];
+    if (math !== 300 || codes !== 150) bad.push(`${math} formulas and ${codes} code spans at the end, not 300 and 150`);
+    if (moved) bad.push(`the first formula's element was replaced at ${moved} steps`);
+    if (total / calls > 12) bad.push(`a step took ${(total / calls).toFixed(1)} ms on average (${total.toFixed(0)} ms in all)`);
+    // and through the chat itself, fast: the reply ends as the whole
+    const text = para + '\n\nThe end.';
+    await queue([{ text, chunk: 60, delay: 2, first: 100 }]);
+    let most = 0;
+    await frames((b, o, p) => { most = Math.max(most, p.math); if (/\$|x_\{|\\ge/.test(p.text)) bad.push(`a formula's source was shown: ${JSON.stringify(p.text.slice(-50))}`); }, () => send('A long one.'));
+    if (most < 20) bad.push(`only ${most} formulas were typeset in the open prose while it streamed`);
+    const streamed = blocksOf(body()), whole = await wholeOf(text);
+    if (streamed !== whole) bad.push(`the reply as it stands is not the reply rendered at once: ${firstDiff(streamed, whole)}`);
+    return Array.from(new Set(bad)).slice(0, 4).join('; ');
+  });
+
+  await run('in demo mode too: the explanation\'s inline mathematics is typeset while its paragraph is still coming', async () => {
+    const was = plugin.settings.provider;
+    plugin.settings.provider = 'demo';
+    try {
+      const seen = { early: 0, src: '', twice: 0, raw2: '' };
+      const n = await frames((b, open, p) => {
+        if (p.math && !/Hill radius/.test(p.all)) seen.early++;
+        if (/\$|M_2/.test(p.text)) seen.src = p.text.slice(-60);
+        if (b.innerText.split('A small body between').length > 2) seen.twice++;
+        if (/\$\$|\\frac|\\approx/.test(open ? open.innerText : '')) seen.raw2 = open.innerText.slice(-60);
+      }, () => send('Explain the first point'));
+      const b = body(), bad = [];
+      if (!seen.early) bad.push(`no formula was typeset before the paragraph was whole (${n} frames)`);
+      if (seen.src) bad.push(`a formula's source was shown: ${JSON.stringify(seen.src)}`);
+      if (seen.twice) bad.push(`the paragraph stood twice for ${seen.twice} frames`);
+      if (seen.raw2) bad.push(`the displayed formula's source was shown: ${JSON.stringify(seen.raw2)}`);
+      if (b.querySelectorAll('mjx-container:not([display="true"])').length < 2 || !b.querySelector('mjx-container[display="true"]')) bad.push('the finished reply is not typeset');
+      if (b.querySelector('.lagrange-turn-open')) bad.push('what was open is still there at the end');
+      return bad.join('; ');
+    } finally { plugin.settings.provider = was; }
   });
 
   // ---- the loader's plates ----
@@ -645,5 +828,5 @@
   await plugin.saveSettings();
   const failed = cases.filter(c => !c.ok).length;
   console.table(cases);
-  return JSON.stringify({ ok: !failed, failed, cases });
+  return JSON.stringify({ ok: !failed, failed, cases, info });
 })()

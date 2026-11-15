@@ -3212,6 +3212,139 @@ test('openProse: prose that is still streaming is shown without the marks its re
   assert.equal(L.openProse(''), '');
 });
 
+test('openDisplay: where a line opens a displayed formula, and what does not', () => {
+  const d = L.openDisplay;
+  assert.equal(d('$$'), 0);
+  assert.equal(d('So: $$ x = 1'), 4);
+  assert.equal(d('  $$x'), 2);
+  assert.equal(d('$$ a $$ and $$ b'), 12);
+  for (const none of ['', 'plain', '$$x$$', 'a $$x$$ b $$y$$', 'a $x$ b', 'a $x$$y$ b', 'a $x$$', 'a `$$` b', 'a ``$$ ` $$`` b', 'a \\$$ b', 'cost $5 and $10', 'a $x$$y$$z$ b']) assert.equal(d(none), -1, none);
+  // the formulas of a line side by side are not a displayed formula left open: the reply is cut after their paragraph
+  assert.deepEqual(L.splitStable('a $x$$y$ b\n\nNext'), { done: 'a $x$$y$ b\n\n', open: 'Next', tail: 'Next' });
+  assert.deepEqual(L.splitStable('say `$$` here\n\nNext'), { done: 'say `$$` here\n\n', open: 'Next', tail: 'Next' });
+  assert.deepEqual(L.openTail('a $x$$y$ b'), { text: 'a $x$$y$ b', kind: null, lang: '', body: '' });
+  assert.deepEqual(L.openTail('a $x$$'), { text: 'a $x$$', kind: null, lang: '', body: '' });
+  assert.equal(pieces('a $x$$', true), 'a ⟦x⟧');
+  // as before for a formula that is open
+  assert.deepEqual(L.splitStable('So:\n\n$$\nx\n\ny'), { done: 'So:\n\n', open: '$$\nx\n\ny', tail: '$$\nx\n\ny' });
+  assert.deepEqual(L.openTail('So: $$ x = 1'), { text: 'So: ', kind: 'math', lang: '', body: '' });
+});
+
+// tailInline's pieces in one line: mathematics as ⟦source⟧ (⟦⟦source⟧⟧ when displayed), a code span as ⟨code⟩
+const pieces = (text, live) => L.tailInline(text, live).map(s => (s.kind === 'math' ? (s.display ? `⟦⟦${s.text}⟧⟧` : `⟦${s.text}⟧`) : s.kind === 'code' ? `⟨${s.text}⟩` : s.text)).join('');
+
+test('tailInline: mathematics that has closed in streaming prose is a piece of its own, by Obsidian\'s rules', () => {
+  const t = x => pieces(x, true);
+  assert.deepEqual(L.tailInline('for a small $M_2$, its distance $r$ from the smaller mass', true), [
+    { kind: 'text', text: 'for a small ' }, { kind: 'math', text: 'M_2', display: false }, { kind: 'text', text: ', its distance ' },
+    { kind: 'math', text: 'r', display: false }, { kind: 'text', text: ' from the smaller mass' }]);
+  assert.equal(t('a $x$, b ($y$) c $z$. And $\\frac{a}{b}$!'), 'a ⟦x⟧, b (⟦y⟧) c ⟦z⟧. And ⟦\\frac{a}{b}⟧!', 'several, each followed at once by punctuation');
+  assert.equal(t('$x$'), '⟦x⟧');
+  assert.equal(t('a $x$$y$ b'), 'a ⟦x⟧⟦y⟧ b');
+  assert.equal(t('a 2$x$ and w$y$z b'), 'a 2⟦x⟧ and w⟦y⟧z b');
+  assert.equal(t('a $x\ny$ b'), 'a ⟦x\ny⟧ b', 'a formula may reach over a line break');
+  assert.equal(t('a $x\n\ny$ b'), 'a $x\n\ny$ b', 'not over a blank line');
+  // money
+  assert.equal(t('cost $5 and $10 more'), 'cost $5 and $10 more');
+  assert.equal(t('costs $5, or $6. Then'), 'costs $5, or $6. Then');
+  assert.equal(t('it is 5$ and 6$ so'), 'it is 5$ and 6$ so');
+  assert.equal(pieces('a $x$1 b and', false), 'a $x$1 b and', 'a closing $ is not followed by a digit');
+  assert.equal(t('a $1$2$ b'), 'a ⟦1$2⟧ b');
+  assert.equal(pieces('a $ x$ b $x $ c', false), 'a $ x$ b $x $ c', 'white space inside the dollars');
+  // escapes
+  assert.equal(t('a \\$x$ b $y$'), 'a $x$ b ⟦y⟧', 'an escaped $ opens nothing and is shown as the sign');
+  assert.equal(t('a $x\\$y$ b'), 'a ⟦x\\$y⟧ b', 'nor does it close');
+  assert.equal(t('a $x\\\\$ b'), 'a ⟦x\\\\⟧ b');
+  assert.equal(t('a \\\\$x$ b'), 'a \\⟦x⟧ b');
+  assert.equal(t('a \\(x\\) and \\[y\\] b'), 'a (x) and [y] b', '\\( \\) is not mathematics in Obsidian');
+  // code
+  assert.equal(t('a `$x$` b $y$'), 'a ⟨$x$⟩ b ⟦y⟧', 'dollars in a code span are code');
+  assert.equal(t('a ``$x` $y$`` b'), 'a ⟨$x` $y$⟩ b');
+  assert.equal(t('a $`x`$ b'), 'a ⟦`x`⟧ b', 'whichever opens first');
+  assert.equal(t('a `c` $x` y$ `d` b'), 'a ⟨c⟩ ⟦x` y⟧ ⟨d⟩ b');
+  assert.equal(t('a $x$ `c $y$` $z$ b'), 'a ⟦x⟧ ⟨c $y$⟩ ⟦z⟧ b');
+  assert.equal(t('pay `$5` and `$6` now'), 'pay ⟨$5⟩ and ⟨$6⟩ now');
+  // displayed mathematics inside a line, and under prose without a blank line
+  assert.equal(t('a $$x$$ b'), 'a ⟦⟦x⟧⟧ b');
+  assert.equal(t('So:\n$$\nr = 1\n$$\nwhere $r$ is'), 'So:\n⟦⟦r = 1⟧⟧\nwhere ⟦r⟧ is');
+  assert.equal(pieces('a $$x$ b c', false), 'a $⟦x⟧ b c');
+  assert.equal(pieces('a $$$ b', false), 'a $$$ b');
+  // the other marks are openProse's, over the pieces
+  assert.equal(t('a $x_1$ and *b $y$ c* and **d $z$**'), 'a ⟦x_1⟧ and b ⟦y⟧ c and d ⟦z⟧');
+  assert.equal(t('**Bold $x$ and'), 'Bold ⟦x⟧ and');
+  assert.equal(t('a [l $x$](http://e.org) b'), 'a l ⟦x⟧ b');
+  assert.equal(t('a $<b>x</b>$ c, $x<y$ and $y>x$ d'), 'a ⟦<b>x</b>⟧ c, ⟦x<y⟧ and ⟦y>x⟧ d');
+  assert.equal(t('a %%c $x$ d%% $y$ b'), 'a  ⟦y⟧ b', 'a formula in a comment goes with the comment, and the next is still the next');
+  assert.equal(t('a \uE000\uE0FE\uE001\uE0FF $x$ b'), 'a  ⟦x⟧ b', 'the private signs it works with are not taken from the text');
+  assert.deepEqual(L.tailInline('', true), []);
+  assert.deepEqual(L.tailInline('   \n', true), []);
+  assert.deepEqual(L.tailInline('Plain words, no marks.', true), [{ kind: 'text', text: 'Plain words, no marks.' }]);
+});
+
+test('tailInline: a formula that has opened and not closed is held back, never shown as its source; money is not held', () => {
+  const t = x => pieces(x, true);
+  assert.equal(t('its distance $'), 'its distance', 'a $ at the very end waits for what follows it');
+  assert.equal(t('its distance $r'), 'its distance');
+  assert.equal(t('its distance $\\frac{M_2}{3 M'), 'its distance');
+  assert.equal(t('its distance $\\frac{M_2}{3 M_1}$'), 'its distance ⟦\\frac{M_2}{3 M_1}⟧', 'typeset as soon as it closes');
+  assert.equal(t('first $a$ then $b'), 'first ⟦a⟧ then');
+  assert.equal(t('a \\'), 'a', 'a backslash at the very end may be escaping what comes');
+  assert.equal(t('a $$x$$ and $$y'), 'a ⟦⟦x⟧⟧ and', 'nor a displayed one');
+  // money: said as soon as a word follows the number
+  assert.equal(t('It costs $5'), 'It costs');
+  assert.equal(t('It costs $5 for'), 'It costs $5 for');
+  assert.equal(t('It costs $1,200.50, and then $3 more for the $x$ of it'), 'It costs ⟦1,200.50, and then $3 more for the $x⟧ of it', 'as Obsidian reads it');
+  assert.equal(t('It costs $5 for the lot and $y'), 'It costs $5 for the lot and');
+  // a formula that runs on without closing is given up
+  const long = 'x + '.repeat(40);
+  assert.ok(long.length > L.OPEN_MATH_HOLD);
+  assert.equal(t('a $' + long), 'a $' + long.trimEnd());
+  assert.equal(t('a $' + long + 'y$ b'), 'a ⟦' + long + 'y⟧ b');
+  // a code span that is still open: nothing after it is mathematics yet, and its mark is not shown
+  assert.equal(t('call `f($x$, $y'), 'call f($x$, $y');
+  assert.equal(t('call `f($x$, $y$)` now'), 'call ⟨f($x$, $y$)⟩ now');
+  // not the end of the reply (a code block has opened under it): nothing more is coming, so nothing is held
+  assert.equal(pieces('its distance $r', false), 'its distance $r');
+  assert.equal(pieces('a \\', false), 'a \\');
+  // only the paragraph that is being written is held
+  assert.equal(t('- one $a\n\n- two $b$ and $c'), '- one $a\n\n- two ⟦b⟧ and');
+});
+
+test('tailInline: however a reply is cut into chunks, no formula\'s source is ever shown, and the whole is the same', () => {
+  const para = 'For a small $M_2$, its distance $r$ from the smaller mass is about $R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}$; with `m_2 = $M_2$` in code, \\$5 escaped, $\\alpha$, $\\beta$ and *then $\\gamma$*. Call `hill_radius($x$)` with $x_{1}$.';
+  const whole = pieces(para, true);
+  assert.equal(whole, 'For a small ⟦M_2⟧, its distance ⟦r⟧ from the smaller mass is about ⟦R \\left( \\frac{M_2}{3 M_1} \\right)^{1/3}⟧; with ⟨m_2 = $M_2$⟩ in code, $5 escaped, ⟦\\alpha⟧, ⟦\\beta⟧ and then ⟦\\gamma⟧. Call ⟨hill_radius($x$)⟩ with ⟦x_{1}⟧.');
+  let before = [];
+  for (let i = 0; i <= para.length; i++) {
+    const segs = L.tailInline(para.slice(0, i), true);
+    const text = segs.filter(s => s.kind === 'text').map(s => s.text).join('\u0000');
+    // (inside a code span that is still open, what has come is its code, shown as it is; the one dollar that may
+    // show otherwise is the escaped one)
+    if ((para.slice(0, i).match(/`/g) || []).length % 2 === 0) {
+      assert.ok(!/\\(?:frac|left|right|alpha|beta|gamma)|[_^{}]/.test(text), `at ${i}: a formula's source in the prose: ${JSON.stringify(text.slice(-50))}`);
+      assert.ok((text.match(/\$/g) || []).length <= 1 && !/\$(?!5|$)/.test(text), `at ${i}: a dollar in the prose: ${JSON.stringify(text.slice(-50))}`);
+    }
+    assert.ok(!/`/.test(text), `at ${i}: a backtick in the prose`);
+    // a formula that has been typeset stays: the formulas so far begin with those of the step before
+    const math = segs.filter(s => s.kind === 'math').map(s => s.text);
+    assert.deepEqual(math.slice(0, before.length), before, `at ${i}: a formula that was set has changed`);
+    before = math;
+  }
+  assert.equal(before.length, 7);
+});
+
+test('tailInline: a very long paragraph is read once (no search made again for each dollar)', () => {
+  const money = 'It costs $5 for the lot, then $7 more. '.repeat(5000);      // 195 000 characters, 10 000 dollars, none closes
+  const math = 'With $x_i$ and `c` and **b** it holds. '.repeat(5000);
+  const time = text => { const t0 = process.hrtime.bigint(); const segs = L.tailInline(text, true); return { ms: Number(process.hrtime.bigint() - t0) / 1e6, segs }; };
+  time(money.slice(0, 2000));
+  const a = time(money), b = time(math);
+  assert.equal(a.segs.length, 1);
+  assert.equal(b.segs.filter(s => s.kind === 'math').length, 5000);
+  assert.ok(a.ms < 1500 && b.ms < 1500, `took ${a.ms.toFixed(0)} ms and ${b.ms.toFixed(0)} ms`);
+  console.log(`      (tailInline: 195 000 characters in ${a.ms.toFixed(1)} ms without a formula, ${b.ms.toFixed(1)} ms with 5000)`);
+});
+
 test('codeLabel: the name a code block carries in the chat', () => {
   assert.equal(L.codeLabel('python'), 'Python');
   assert.equal(L.codeLabel('py'), 'Python');
