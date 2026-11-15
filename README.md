@@ -64,6 +64,17 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   and in an exported PDF only. A vault that comes from 1.4.0, where this was off unless turned on, is brought to the
   new default once, and Scriptorium says so with where the switch is (what 1.4.0 saved does not tell a vault where it
   was turned off from one where it was never touched); turned off after that, it stays off.
+- **What follows a short opening paragraph** (since 1.4.5): an initial is three lines deep, and a paragraph of one line
+  or two ("Under **Settings → Scriptorium**:") is not, so what comes next is beside the initial. In both views:
+  a **paragraph** goes round the initial, as the opening paragraph's own lines do; a **list** (bullets, numbers, tasks)
+  goes round it item by item: an item beside the initial is set in past it with its bullet, number or checkbox, its
+  further lines and the items under it hang from it, and the items below the initial are back at the margin; and
+  **everything else begins below the initial**, on the fourth line: a quotation, a callout, code, a table, a heading,
+  an image, mathematics, a rule, centred or right-aligned text, and the end of the note. (Before, a list's markers were
+  drawn on the initial in Reading view, a quotation's bar ran under it, and in the editor the words of a list or a
+  quotation were drawn through it.) A list after an opening paragraph now stands one line below it in Reading view, as
+  the blank line sets it in the editor, so that the same items are beside the initial in both.
+  `plugins-tests/dropcap-followers.harness.js` checks all of this in a real Obsidian, in both views.
 - **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
   margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
   rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
@@ -167,6 +178,16 @@ are known and left as they are in this version (measured at a 22 px text size in
     only; Arrow Down from the initial goes to the line under it, not to the second line; beside a picture initial the
     cursor before and after the hidden letter stands in the same place; and a short opening paragraph is followed by
     the blank line beside the initial, so the next paragraph starts one line lower than in Reading view.
+11. **After a short opening paragraph** (since 1.4.5 both views keep what follows clear of the initial, by the same
+    rules; the opening paragraph and its initial are the same within a pixel, and the same items of a list are set in
+    past the initial by the same amount within 2 px): what begins below the initial begins on the fourth line in both,
+    and from there the views differ by what they differ by after any paragraph (the editor shows the blank line
+    between blocks, Reading view each block's own margin: for instance a quotation stands 14 px lower in the editor, a
+    callout 32 px, code 3 px). A list written right under the paragraph's line, with no blank line, has no space above
+    it in the editor and a line of space in Reading view, so with a paragraph of one line its second item can be
+    beside the initial in the editor only. Inside an item the two views keep their own indents (difference 5 above).
+    Where two paragraphs of one line follow one another, what comes after the second begins below the initial in
+    Reading view; the editor's blank lines have already taken it there.
 
 ### Marginalia
 

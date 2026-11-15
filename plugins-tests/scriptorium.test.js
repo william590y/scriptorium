@@ -1176,6 +1176,70 @@ test('drop caps in Live Preview: the snippet sets the editor’s opening line wi
   assert.match(css, /\.cm-line\.scriptorium-opening \.sc-keep,\s*\.markdown-rendered \.sc-keep \{\s*white-space: nowrap;/);
 });
 
+test('what follows a short opening paragraph: a paragraph and a list go round the initial, everything else begins below it', () => {
+  const after = text => openings(text).map(o => o.after);
+  const P = '## Two\n\nUnder the settings:';
+  assert.deepEqual(after(`${P}\n\nA second paragraph.`), ['text']);
+  assert.deepEqual(after(`${P}\nand its second line\n\nA second paragraph.`), ['text']);
+  for (const list of ['- one\n- two', '* one', '+ one', '1. one\n2. two', '3) three', '- [ ] a task\n- [x] done', '- one\n    - set in']) {
+    assert.deepEqual(after(`${P}\n\n${list}\n\nAfter.`), ['list'], list);
+  }
+  assert.deepEqual(after(`${P}\n- a list right under the paragraph’s line`), ['list']);
+  for (const block of ['> a quotation', '> [!note] A callout\n> text', '```js\ncode\n```', '| a | b |\n| - | - |\n| 1 | 2 |', '### A smaller heading', '![[picture.png]]', '![alt](picture.png)',
+    '$$\nx^2\n$$', '---', '***', '::: center\nverse\n:::', '<div>html</div>', '[^1]: a footnote’s text', '%%\na comment\n%%', '    code set in']) {
+    assert.deepEqual(after(`${P}\n\n${block}\n\nAfter.`), ['clear'], block);
+  }
+  assert.deepEqual(after(P), ['clear'], 'the end of the note');
+  assert.deepEqual(after(`${P}\n\nSub\n---\n\n- a list under a heading that is underlined`), ['clear'], 'a heading underlined');
+  assert.deepEqual(after(`${P}\n\n## Three\n\nUnder three.\n`), ['clear', 'clear'], 'a heading that opens the next chapter, and the end');
+  assert.deepEqual(after('---\nalign: center\ndropcap-aligned: true\n---\n## Two\n\nCentred, with its initial.\n\nAnd more.'), ['clear'], 'aligned text that follows is set below');
+  // where the paragraph ends, and which lines of the list are which
+  const o = openings(`${P}\nin two lines\n\n- one\n  goes on\n    - set in\n\n- two\n    1. numbered\n- three\n- four\n- five\n- six\n- seven\n\nAfter.`)[0];
+  assert.equal(o.line, 2);
+  assert.equal(o.end, 3, 'the paragraph’s last line');
+  assert.deepEqual(o.list, [5, 15]);
+  assert.deepEqual(o.items, [{ line: 5, under: [6, 7] }, { line: 9, under: [10] }], 'the items that begin in the list’s first lines, and the lines under each');
+  assert.deepEqual(S.besideItems(['  - one', '  - two', '      - under two', '   - three'], 0, 3), [{ line: 0, under: [] }, { line: 1, under: [2] }, { line: 3, under: [] }], 'the list’s own indent is its first level');
+  assert.deepEqual(S.besideItems(['- one', '\tunder it', '', '- two'], 0, 3), [{ line: 0, under: [1] }, { line: 3, under: [] }]);
+  assert.equal(openings(`${P}\n\n- one`)[0].standing, false);
+});
+
+test('what follows a short opening paragraph: the snippet keeps it clear of the initial in both views, by the same rules', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8').replace(/url\("data:[^"]*"\)/g, 'url()');
+  const OPEN = '.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align)';
+  const LP = '.markdown-source-view.mod-cm6.is-live-preview .cm-line';
+  // below the initial: one rule for Reading view's paragraph and the editor's line, three lines deep and never less than the float
+  const rule = css.slice(css.indexOf(`${OPEN} > p::after,\n${LP}.scriptorium-opening-end::after {`));
+  assert.ok(rule.startsWith(OPEN), 'the rule that makes the paragraph three lines deep');
+  const body = rule.slice(0, rule.indexOf('}'));
+  assert.match(body, /clear: left;/);
+  assert.match(body, /height: max\(0px, calc\(3lh - var\(--scriptorium-initial-depth, 3\.96em\)\)\);/);
+  assert.match(body, /margin-top: min\(0px, calc\(var\(--scriptorium-initial-depth, 3\.96em\) - 3lh\)\);/, 'taken back where no float is beside it: a long paragraph is not changed');
+  assert.ok(css.includes(`${OPEN}:has(+ .el-p:not(.scriptorium-align), + .el-ul, + .el-ol) > p::after {\n  content: none;`), 'not where a paragraph or a list follows');
+  assert.ok(css.includes(`${OPEN}:has(+ .el-p > p > :is(.internal-embed, img):first-child) > p::after {\n  content: "";`), 'an image is no paragraph');
+  // how deep each initial's float is: size × (1 + top margin + bottom margin), as the rules above it say
+  const depth = (size, top, bottom) => Math.round(size * (1 + top + bottom) * 1000) / 1000;
+  for (const [which, d] of [['goudy', depth(4.43, 0.088, -0.15)], ['plain', depth(5.68, -0.118, -0.13)], ['yinit', depth(3.667, 0.18, -0.1)]]) {
+    const at = css.indexOf(`.cm-line.scriptorium-dropcap-${which} {`), block = css.slice(at, css.indexOf('}', at));
+    assert.match(block, new RegExp(`--scriptorium-initial-depth: ${String(d).replace('.', '\\.')}em;`), `${which}: ${d}`);
+  }
+  assert.match(css, /--scriptorium-initial-depth: 4\.43em;\s*\/\* dropped: 4\.15 em of image under 0\.28 em of margin \*\//);
+  // a list: each item a box of its own with its indent inside, the number inside too; the editor's lines the same
+  assert.ok(css.includes(`${OPEN} + :is(.el-ul, .el-ol) > :is(ul, ol) > li {\n  display: flow-root list-item;\n  margin-inline-start: 0;\n  padding-inline-start: 3ch;`));
+  assert.ok(css.includes(`${OPEN} + :is(.el-ul, .el-ol) > :is(ul, ol) {\n  margin-block-start: 1lh;`), 'a line below the paragraph, as the editor’s blank line');
+  assert.ok(css.includes(`${OPEN} + .el-ol > ol > li::before {\n  content: counter(list-item) ". ";`));
+  assert.ok(css.includes(`${LP}.scriptorium-beside-initial {\n  display: flow-root;`));
+  // an exported PDF has the browser's own bullets, outside the item's box: drawn inside the item there (not a task's checkbox)
+  assert.ok(css.includes(`${OPEN} + .el-ul > ul:not(.has-list-bullet) > li:not(.task-list-item)::before {\n  content: "";\n  float: inline-start;`));
+  assert.ok(css.includes(`${OPEN} + .el-p:not(.scriptorium-align):not(:has(+ .el-p:not(.scriptorium-align))) > p::after,`), 'what follows a second short paragraph');
+  assert.match(css, /\.cm-line\.scriptorium-under-initial \{\s*margin-left: var\(--scriptorium-beside-shift, 0px\) !important;/);
+  // nothing here gives the editor's lines a margin above or below, or a clearance between lines: the editor does not measure those
+  for (const line of css.split('\n')) if (/scriptorium-(?:opening-end|beside-initial|under-initial)/.test(line) && /[{,]\s*$/.test(line)) assert.ok(line.includes('.is-live-preview '), line.slice(0, 160));
+  const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
+  for (const cls of ['scriptorium-opening-end', 'scriptorium-beside-initial', 'scriptorium-under-initial']) assert.ok(src.includes(`'${cls}'`), cls);
+  assert.match(src, /if \(o\.standing\) continue;/, 'a standing initial has nothing beside it');
+});
+
 test('drop caps in Live Preview: the plugin registers the extension, never changes the note for it, and previews in the editor too', () => {
   const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
   // a setting, off by default: what is registered is an empty list, and the extension is made only when it is turned on
