@@ -381,7 +381,9 @@
         for (const [what, line, ch] of [['at the head of the paragraph', first, 0], ['in the paragraph', first, 9], ['at the end of the paragraph', first, ed.getLine(first).length], ['in the blank line under it', first + 1, 0],
           ...Array.from({ length: Math.min(count, 4) }, (_, i) => [`in line ${i + 1} of what follows`, next + i, Math.min(3, ed.getLine(next + i).length)])]) {
           if (f.tight && what === 'in the blank line under it') continue;
-          ed.setCursor(line, ch); ed.focus();
+          // (the cursor is put there and the editor is not given the keyboard: with the keyboard in an image's or a formula's
+          // line Obsidian takes it for the embed, and the editor does not get it back for the cases that follow)
+          ed.setCursor(line, ch);
           await quiet(); await sleep(120);
           const s = scene('live', 'Under', 0);
           // with the cursor in it a callout, a table's cell, mathematics and an image show the note's own lines: nothing may touch the initial, and the paragraph stays as deep
@@ -389,7 +391,9 @@
           for (const g of s.gaps) out.why.push(`${what}: a gap the editor has not measured: ${g}`);
           if (s.missing || !s.ink) { out.why.push(`${what}: the initial is gone`); continue; }
           if (Math.abs((s.open.bottom - s.open.top) - (away.open.bottom - away.open.top)) > NEAR) out.why.push(`${what}: the paragraph is ${(s.open.bottom - s.open.top).toFixed(1)} px deep, ${(away.open.bottom - away.open.top).toFixed(1)} with the cursor away`);
-          if (f.kind === 'list' && snapshot(s) !== snapshot(away)) out.why.push(`${what}: the list moved: ${snapshot(s)} against ${snapshot(away)}`);
+          // (an item with the cursor in it shows its marks, ** and the like, and can take a line more: where each item begins is compared, not how far down)
+          const place = sc => JSON.stringify([sc.ink && [sc.ink.left, sc.ink.right].map(Math.round), sc.rows.map(r => Math.round(r.edge)), sc.rows[0] && Math.round(sc.rows[0].top - sc.open.top)]);
+          if (f.kind === 'list' && place(s) !== place(away)) out.why.push(`${what}: the list moved: ${place(s)} against ${place(away)}`);
         }
       });
     }
