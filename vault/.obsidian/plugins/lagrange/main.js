@@ -3519,7 +3519,7 @@ function codeLabel(name) {
    rendered: without the marks that the rendered text hides (plainInline), and without those of emphasis or code
    that is not closed yet. Pure. */
 function openProse(text) {
-  return plainInline(String(text == null ? '' : text).replace(/\s+$/, '')).replace(/\*\*|__|`/g, '');
+  return plainInline(String(text == null ? '' : text).replace(/\s+$/, '')).replace(/\*\*|__|`/g, '').replace(/(^|[\s(“"])[*_](?=[^\s*_])/g, '$1').replace(/(^|[\s(“"])[*_]+$/, '$1');
 }
 
 /* ---- The list of edits under a reply or a task ----
@@ -7576,8 +7576,11 @@ class LagrangeChatView extends ItemView {
       // not go from the log and come back, it changes in place from the code as it came to the block as rendered)
       const mine = stream, turn = ++mine.turn;
       if (fresh.trim()) {
-        const set = this.renderChat(fresh, mine.box.createDiv({ cls: 'lagrange-turn-part' }), sourcePath, comp);
-        mine.ready = mine.ready.then(() => set);
+        // (the new blocks are set out of sight, and take their place in the same moment as what was open gives it
+        // up: until then the reader sees them as they came, once, and never both)
+        const part = mine.box.createDiv({ cls: 'lagrange-turn-part is-setting' });
+        const set = this.renderChat(fresh, part, sourcePath, comp);
+        mine.ready = mine.ready.then(() => set).then(() => { part.removeClass('is-setting'); });
       }
       mine.done = part.done;
       mine.ready.then(() => {

@@ -2588,7 +2588,7 @@ test('splitStable: a streaming reply is cut at whole blocks, never inside code o
     for (let i = 0; i <= doc.length; i++) { const d = L.splitStable(doc.slice(0, i)).done; assert.ok(d.startsWith(prev), `at ${i}: ${JSON.stringify(doc.slice(0, i))}`); prev = d; }
   }
   const js = fs.readFileSync(path.join(PLUGIN, 'main.js'), 'utf8');
-  assert.match(js, /const set = this\.renderChat\(fresh, mine\.box\.createDiv\(/, 'only what is new is rendered while a reply streams');
+  assert.match(js, /const set = this\.renderChat\(fresh, part, sourcePath, comp\);/, 'only what is new is rendered while a reply streams');
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
   assert.match(css, /pre \{ max-width: 100%; overflow-x: auto;/);
 });
@@ -3199,6 +3199,9 @@ test('openProse: prose that is still streaming is shown without the marks its re
   assert.equal(L.openProse('Here is what the pen will set down in **On Bal'), 'Here is what the pen will set down in On Bal', 'nor the marks of emphasis that is not closed yet');
   assert.equal(L.openProse('Call `hill_radius()` and then `hill'), 'Call hill_radius() and then hill');
   assert.equal(L.openProse('## A heading\n\nWith a [link](https://example.org) and $x^2$.  \n'), 'A heading\n\nWith a link and $x^2$.');
+  assert.equal(L.openProse('*Demo mode: a canned reply, written'), 'Demo mode: a canned reply, written', 'nor the one mark of emphasis that is still open');
+  assert.equal(L.openProse('It is _not'), 'It is not');
+  assert.equal(L.openProse('* an item\n- another, 2 * 3 and a_b'), '* an item\n- another, 2 * 3 and a_b', 'a list and plain signs are left');
   assert.equal(L.openProse(''), '');
 });
 
