@@ -3459,6 +3459,180 @@ function needsWholeRender(md) {
   return /^ {0,3}(?:\[[^\]\n]+\]:|<\/?[a-zA-Z][^>\n]*>[ \t]*$)/m.test(String(md || ''));
 }
 
+/* What is still being written at the end of a streaming reply (splitStable's tail), as the chat shows it until it
+   closes: {text, kind, lang, body}. text is the prose before whatever is open, shown as it is written. kind says
+   what is open after it: 'code' (a code block: `body` is the code that has come, set as code under its language
+   `lang`, without the fence), 'figure' (a ```tikz or ```mermaid block: a line says a figure is being drawn, its
+   source is not shown), 'math' (a displayed formula between $$: a line says so), or null. A fence that is only
+   beginning (its line is not complete), and a line at the end of a code block that may be the closing fence
+   arriving, are left out, so that no stray backticks show. Pure. */
+const OPEN_FIGURES = new Set(['tikz', 'mermaid']);
+function openTail(tail) {
+  const text = String(tail == null ? '' : tail);
+  const lines = text.split('\n');
+  let fence = null, math = -1, at = 0, start = -1, from = 0, lang = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i], whole = i < lines.length - 1;
+    const f = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (f && f[2][0] === fence[0] && f[2].length >= fence.length && !f[3].trim() && whole) fence = null;
+    } else if (math >= 0) {
+      if (((line.match(/\$\$/g) || []).length) % 2) math = -1;
+    } else if (f) {
+      fence = f[2];
+      start = at;
+      from = whole ? at + line.length + 1 : text.length;
+      lang = whole ? (f[3].trim().split(/[\s{,]/)[0] || '').toLowerCase() : null;   // null: the name is still arriving
+    } else if (((line.match(/\$\$/g) || []).length) % 2) {
+      math = at + line.lastIndexOf('$$');
+    } else if (!whole && /^\s*(`{1,2}|~{1,2}|\$)$/.test(line)) {
+      // (the first marks of a fence, or of a displayed formula, at the start of the last line)
+      return { text: text.slice(0, at), kind: null, lang: '', body: '' };
+    }
+    at += line.length + 1;
+  }
+  if (fence) {
+    if (lang === null) return { text: text.slice(0, start), kind: null, lang: '', body: '' };
+    let body = text.slice(from);
+    // (a last line of nothing but fence marks may be the closing fence, still arriving)
+    const last = body.slice(body.lastIndexOf('\n') + 1);
+    if (last && /^\s*[`~]+$/.test(last) && last.trim()[0] === fence[0]) body = body.slice(0, body.length - last.length);
+    return { text: text.slice(0, start), kind: OPEN_FIGURES.has(lang) ? 'figure' : 'code', lang, body: body.replace(/\n$/, '') };
+  }
+  if (math >= 0) return { text: text.slice(0, math), kind: 'math', lang: '', body: '' };
+  return { text, kind: null, lang: '', body: '' };
+}
+
+/* The name a code block is labelled with in the chat, from the name after its fence: the usual spelling of the
+   common ones, otherwise the name with a capital; '' for a block with no name, or of plain text. Pure. */
+const CODE_NAMES = { py: 'Python', python: 'Python', js: 'JavaScript', javascript: 'JavaScript', ts: 'TypeScript', typescript: 'TypeScript',
+  sh: 'Shell', bash: 'Bash', zsh: 'Zsh', c: 'C', cpp: 'C++', 'c++': 'C++', cs: 'C#', csharp: 'C#', tex: 'TeX', latex: 'LaTeX', json: 'JSON',
+  html: 'HTML', css: 'CSS', yaml: 'YAML', yml: 'YAML', sql: 'SQL', md: 'Markdown', markdown: 'Markdown', xml: 'XML', toml: 'TOML', r: 'R' };
+function codeLabel(name) {
+  const n = String(name == null ? '' : name).trim().toLowerCase();
+  if (!n || n === 'text' || n === 'plain' || n === 'plaintext' || n === 'none') return '';
+  return Object.prototype.hasOwnProperty.call(CODE_NAMES, n) ? CODE_NAMES[n] : n[0].toUpperCase() + n.slice(1);
+}
+
+/* The prose that is still open at the end of a streaming reply, as it is shown until its block is whole and is
+   rendered: without the marks that the rendered text hides (plainInline), and without those of emphasis or code
+   that is not closed yet. Pure. */
+function openProse(text) {
+  return plainInline(String(text == null ? '' : text).replace(/\s+$/, '')).replace(/\*\*|__|`/g, '');
+}
+
+/* ---- The list of edits under a reply or a task ----
+   Each edit's words are Markdown of the note (a code block, a formula, a figure), and are set in the list as the
+   chat sets a reply (renderChat), not as their source.
+
+   mdBlocks(text) -> [{kind, lines}], the text's lines grouped so that it can be cut between groups: 'code' (a
+   fenced block; `fence` is its marks, `closed` whether it ends), 'figure' (a fenced block that is drawn: tikz,
+   mermaid), 'math' (the lines of a displayed formula, from the line that opens $$ to the one that closes it),
+   'table' (a run of lines that begin with |) and 'text' (one line). Pure. */
+function mdBlocks(text) {
+  const out = [];
+  let open = null, math = null, table = null;
+  for (const line of String(text == null ? '' : text).split('\n')) {
+    const f = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (open) {
+      open.lines.push(line);
+      if (f && f[2][0] === open.fence[0] && f[2].length >= open.fence.length && !f[3].trim()) { open.closed = true; open = null; }
+      continue;
+    }
+    if (math) {
+      math.lines.push(line);
+      if (((line.match(/\$\$/g) || []).length) % 2) math = null;
+      continue;
+    }
+    if (f) {
+      const name = (f[3].trim().split(/[\s{,]/)[0] || '').toLowerCase();
+      open = { kind: OPEN_FIGURES.has(name) ? 'figure' : 'code', lines: [line], fence: f[2], indent: f[1], closed: false };
+      out.push(open);
+      table = null;
+      continue;
+    }
+    if (((line.match(/\$\$/g) || []).length) % 2) {
+      math = { kind: 'math', lines: [line] };
+      out.push(math);
+      table = null;
+      continue;
+    }
+    if (/^\s*\|/.test(line)) {
+      if (table) table.lines.push(line);
+      else { table = { kind: 'table', lines: [line] }; out.push(table); }
+      continue;
+    }
+    table = null;
+    out.push({ kind: 'text', lines: [line] });
+  }
+  return out;
+}
+
+/* The beginning of an edit's Markdown, for the list: {head, more}. A text of up to `max` lines (and a little over)
+   is whole (more: 0). A longer one is cut to about `max` lines, only where Markdown allows it: between lines of
+   prose; inside a code block between its lines, the block being closed again after them; never inside a displayed
+   formula or a figure, which are shown whole or not at all (whole where there is room for EDIT_FIGURE lines, or
+   when the text begins with them, and they are not longer than EDIT_ATOM lines); a table after its first three lines at the earliest. more is the number of the
+   text's lines that head does not show. Pure. */
+const EDIT_LINES = 10, EDIT_SLACK = 3, EDIT_ATOM = 40, EDIT_FIGURE = 4;
+function editPreview(text, max) {
+  const t = String(text == null ? '' : text).replace(/^(?:[ \t]*\n)+/, '').replace(/\s+$/, '');
+  const limit = max == null ? EDIT_LINES : max;
+  const total = t ? t.split('\n').length : 0;
+  if (total <= limit + EDIT_SLACK) return { head: t, more: 0 };
+  const head = [];
+  let shown = 0;                       // lines of the text that head shows (a fence put in to close a block is not one)
+  let used = 0;                        // what head takes of the limit: its lines, a figure or a formula for a few
+  for (const b of mdBlocks(t)) {
+    const room = limit - used, n = b.lines.length;
+    // A figure takes the room of EDIT_FIGURE lines however long its source (it is a picture in the list), and a
+    // displayed formula no more than that, as long as they are whole and not longer than EDIT_ATOM lines.
+    const atom = (b.kind === 'figure' && b.closed) || b.kind === 'math';
+    const cost = atom && n <= EDIT_ATOM ? Math.min(n, EDIT_FIGURE) : n;
+    // (a code block that only its closing fence would be cut from is whole too)
+    if (cost <= room || (b.kind === 'code' && b.closed && n === room + 1)) { head.push(...b.lines); shown += n; used += cost; continue; }
+    if (b.kind === 'code' && room >= 3) {
+      head.push(...b.lines.slice(0, room), b.indent + b.fence);
+      shown += room;
+      used += room;
+    } else if (b.kind === 'table' && room >= 3) {
+      head.push(...b.lines.slice(0, room));
+      shown += room;
+      used += room;
+    } else if ((b.kind === 'math' || b.kind === 'figure' || b.kind === 'code' || b.kind === 'table') && !head.join('').trim() && n <= EDIT_ATOM) {
+      head.push(...b.lines);
+      shown += n;
+    }
+    break;
+  }
+  while (head.length && !head[head.length - 1].trim()) { head.pop(); shown--; }
+  return { head: head.join('\n'), more: total - shown };
+}
+
+/* How an edit is set in the list: {kind, old, fresh, stacked, source}.
+   kind: 'insert' (old is null), 'delete' (fresh is '') or 'replace'. stacked: what was taken out and what was put
+   in stand one under the other, each a block of Markdown (one of them has several lines, a code block or a
+   displayed formula, or they are long); otherwise they stand in one line, old → fresh. source: the two differ only
+   in their Markdown marks (*a* for _a_), so they are shown as they are written, or neither could be told from the
+   other. Pure. */
+const EDIT_INLINE_CHARS = 160;
+function editParts(e) {
+  const old = e.insert ? null : String(e.matched || e.find || '');
+  const fresh = String(e.insert ? String(e.replace || '').trim() : (e.replace || ''));
+  const block = t => /\n|\$\$|^\s*(?:`{3,}|~{3,}|#{1,6}\s|>|\|)/.test(String(t == null ? '' : t).trim());
+  const stacked = block(old) || block(fresh) || (old || '').length + fresh.length > EDIT_INLINE_CHARS * 2 || Boolean(e.insert && fresh.length > EDIT_INLINE_CHARS);
+  const source = old !== null && Boolean(fresh) && old !== fresh && plainInline(old) === plainInline(fresh);
+  return { kind: e.insert ? 'insert' : fresh ? 'replace' : 'delete', old, fresh, stacked, source };
+}
+
+/* Whether a short piece of an edit holds anything Markdown would set otherwise than as it is written (code, a
+   formula, emphasis, a link, a heading, a list). Plain words are put in the list as they are, white space and
+   all: an edit that takes out a doubled space must show it. Pure. */
+function hasMarkdown(text) {
+  const t = String(text == null ? '' : text);
+  return Boolean(t.trim()) && /[`$*_~[\]<>|\\=]|!\[|^\s*(?:#{1,6}\s|[-+]\s|\d{1,9}[.)]\s)|\n/.test(t);
+}
+
 /* The Markdown of a chat message as it is given to Obsidian's renderer. The chat only ever shows a reply; it runs
    nothing a reply holds. So:
    - a ```tikz block where TikZJax is off, and an Excalidraw embed where Excalidraw is off, are shown as their source
@@ -7025,7 +7199,8 @@ class LagrangeChatView extends ItemView {
 
   /* A message's Markdown set in the log as Obsidian sets a note (code with its colours and its copy button,
      mathematics, Mermaid, TikZ and Excalidraw where the vault has them, pictures and video of the vault), after
-     chatMarkdown has made it safe to show. */
+     chatMarkdown has made it safe to show. -> a promise that is kept when it is set (never broken: what
+     cannot be rendered is shown as it is written). */
   renderChat(md, el, sourcePath, component) {
     try {
       // (a message with a TikZ figure comes into the log whole, and the figure is watched until it is drawn: see
@@ -7033,10 +7208,22 @@ class LagrangeChatView extends ItemView {
       const opts = this.plugin.chatRenderOptions(), apart = Boolean(opts.tikz && figureKinds(md).tikz);
       const rendered = (apart ? renderApart : renderMarkdown)(this.app, chatMarkdown(md, opts), el, sourcePath || '', component);
       const done = apart ? rendered.then(figures => { this.watchFigures(figures); }) : rendered;
-      Promise.resolve(done).then(() => this.scrollDown(), e => { console.error('Lagrange: rendering a message', e); });
+      return Promise.resolve(done).then(() => { this.labelCode(el); this.scrollDown(); }, e => { console.error('Lagrange: rendering a message', e); });
     } catch (e) {
       console.error('Lagrange: rendering a message', e);
       el.setText(md);
+      return Promise.resolve();
+    }
+  }
+
+  /* Each code block of a rendered message is given its language's name (shown in its corner, as the editor shows
+     it in a note; Obsidian's renderer itself puts none). */
+  labelCode(el) {
+    for (const pre of el.querySelectorAll('pre:not([data-lang])')) {
+      const code = pre.querySelector(':scope > code');
+      const m = code && /(?:^|\s)language-(\S+)/.exec(code.className || '');
+      const label = m ? codeLabel(m[1]) : '';
+      if (label) pre.setAttribute('data-lang', label);
     }
   }
 
@@ -7064,6 +7251,81 @@ class LagrangeChatView extends ItemView {
         return false;
       });
     }
+  }
+
+  /* What is still being written at the end of a streaming reply (see openTail): its prose as it comes; a code
+     block that is open as code, under its language; a figure or a displayed formula that is open as one quiet line,
+     until it is whole and is set. Never half a fence. */
+  showOpen(el, tail) {
+    const open = openTail(tail);
+    el.empty();
+    // (its prose without the Markdown marks the rendered text will not show: no asterisks that come and go)
+    if (open.text.trim()) el.createDiv({ cls: 'lagrange-open-text', text: openProse(open.text) });
+    if (open.kind === 'code') {
+      const pre = el.createEl('pre', { cls: 'lagrange-open-code' });
+      if (codeLabel(open.lang)) pre.setAttribute('data-lang', codeLabel(open.lang));
+      pre.createEl('code', { text: open.body });
+    } else if (open.kind) {
+      el.createDiv({ cls: 'lagrange-open-note', text: open.kind === 'figure' ? 'Drawing a figure…' : 'Setting an equation…' });
+    }
+  }
+
+  /* One side of an edit in the list (what was taken out, or what was put in), set as the chat sets a reply: code as
+     code, mathematics typeset, a figure drawn where the chat draws figures, and nothing run or fetched (renderChat).
+     Plain words, and words shown as their source, are put in as they are. A long text shows its beginning
+     (editPreview, and no more of that than a box of some height holds) under a button that says how many more lines there are, or "Show more"; the whole is rendered the first time it
+     is asked for, and only then (a figure in it is not compiled before). role: 'del' | 'ins'. */
+  editText(parent, text, role, parts, sourcePath) {
+    const box = parent.createEl(role === 'del' ? 'del' : 'ins', { cls: `lagrange-${role} lagrange-edit-md` });
+    if (parts.source) { box.addClass('is-source'); box.setText(text); return box; }
+    if (!parts.stacked) {
+      if (!hasMarkdown(text)) { box.setText(text); return box; }
+      box.addClass('markdown-rendered');
+      box.addClass('is-inline');
+      this.renderChat(text, box, sourcePath, this);
+      return box;
+    }
+    box.addClass('markdown-rendered');
+    box.addClass('is-block');
+    const cut = editPreview(text);
+    const short = box.createDiv({ cls: 'lagrange-edit-short' });
+    if (figureKinds(cut.head).tikz || figureKinds(cut.head).sketch || /^\s*(?:`{3,}|~{3,})\s*mermaid\b/m.test(cut.head)) short.addClass('has-figure');
+    else if (!mdBlocks(cut.head).some(b => b.kind !== 'text')) short.addClass('is-prose');     // (prose alone is clipped sooner than code or a formula)
+    this.renderChat(cut.head, short, sourcePath, this);
+    const more = box.createEl('button', { cls: 'lagrange-edit-more', attr: { type: 'button', 'aria-expanded': 'false' } });
+    const closed = () => (cut.more ? `${cut.more} more line${cut.more === 1 ? '' : 's'}` : 'Show more');
+    let full = null, open = false;
+    // (shown when lines are left out, or when what is shown is taller than its box: long lines of prose, a tall figure)
+    const fit = () => {
+      const clipped = !open && short.scrollHeight > short.clientHeight + 2;
+      short.toggleClass('is-clipped', clipped);
+      more.toggleClass('is-hidden', !open && !cut.more && !clipped);
+    };
+    more.setText(closed());
+    more.addEventListener('click', () => {
+      open = !open;
+      if (open && !full) {
+        full = box.createDiv({ cls: 'lagrange-edit-full' });
+        box.insertBefore(full, more);
+        this.renderChat(text, full, sourcePath, this);
+      }
+      short.toggleClass('is-hidden', open);
+      if (full) full.toggleClass('is-hidden', !open);
+      more.setText(open ? 'Show less' : closed());
+      more.setAttribute('aria-expanded', String(open));
+      fit();
+    });
+    fit();
+    try {
+      const win = box.ownerDocument.defaultView || window;
+      const watch = new win.ResizeObserver(fit);
+      watch.observe(short);
+      for (const k of short.children) watch.observe(k);
+      const kids = new win.MutationObserver(() => { for (const k of short.children) watch.observe(k); fit(); });
+      kids.observe(short, { childList: true, subtree: true });
+      this.register(() => { watch.disconnect(); kids.disconnect(); });
+    } catch (e) { /* the button stays as it is */ }
+    return box;
   }
 
   fitInput() {
@@ -7287,7 +7549,7 @@ class LagrangeChatView extends ItemView {
       body.appendChild(box);
       if (comp) this.removeChild(comp);
       comp = next;
-      stream = { box, tail: body.createDiv({ cls: 'lagrange-turn-open' }), done: '' };
+      stream = { box, tail: body.createDiv({ cls: 'lagrange-turn-open' }), done: '', ready: Promise.resolve(), turn: 0 };
     };
     const render = last => {
       timer = null;
@@ -7299,10 +7561,21 @@ class LagrangeChatView extends ItemView {
       // (the text before was changed, or the whole must be set as one: from the start again)
       if (!part.done.startsWith(stream.done) || (last && stream.done && needsWholeRender(md))) begin();
       const fresh = part.done.slice(stream.done.length);
-      if (fresh.trim()) this.renderChat(fresh, stream.box.createDiv({ cls: 'lagrange-turn-part' }), sourcePath, comp);
-      stream.done = part.done;
-      stream.tail.setText(part.tail);
-      if (last) { stream.tail.remove(); stream = null; }
+      // (what is open is shown anew only once the blocks before it are set: a code block that has just closed does
+      // not go from the log and come back, it changes in place from the code as it came to the block as rendered)
+      const mine = stream, turn = ++mine.turn;
+      if (fresh.trim()) {
+        const set = this.renderChat(fresh, mine.box.createDiv({ cls: 'lagrange-turn-part' }), sourcePath, comp);
+        mine.ready = mine.ready.then(() => set);
+      }
+      mine.done = part.done;
+      mine.ready.then(() => {
+        if (mine.turn !== turn) return;
+        if (last) mine.tail.remove();
+        else this.showOpen(mine.tail, part.tail);
+        this.scrollDown();
+      });
+      if (last) stream = null;
       this.scrollDown();
     };
     return {
@@ -7664,18 +7937,45 @@ class LagrangeChatView extends ItemView {
       ? `${n} edit${n === 1 ? '' : 's'} made${m ? `, ${m} skipped` : ''}.`
       : (m ? `No edits made; ${m} skipped.` : 'Nothing to correct.');
     el.createDiv({ cls: 'lagrange-task-summary', text: summary });
+    // Each edit: what was taken out (struck) → what was put in, in one line when both are short; else one under the
+    // other, "−" before what went and "+" before what came, each set as Markdown (see editText).
+    const target = this.plugin.targetMarkdownView();
+    const sourcePath = (target && target.file && target.file.path) || '';
     const item = (list, e, why) => {
-      const li = list.createEl('li');
-      const line = li.createDiv({ cls: 'lagrange-edit-line' });
-      if (e.insert) line.createSpan({ cls: 'lagrange-arrow', text: '+ ' });       // an insertion: nothing is struck
-      else {
-        line.createEl('del', { cls: 'lagrange-del', text: excerpt(e.matched || e.find, 160) });
-        line.createSpan({ cls: 'lagrange-arrow', text: ' → ' });
+      const parts = editParts(e);
+      const li = list.createEl('li', { cls: `is-${parts.kind}` });
+      const mark = (line, sign, label) => line.createSpan({ cls: 'lagrange-arrow lagrange-edit-mark', text: `${sign} `, attr: { 'aria-label': label } });
+      if (!parts.stacked) {
+        const line = li.createDiv({ cls: 'lagrange-edit-line' });
+        if (parts.kind === 'insert') mark(line, '+', 'put in');           // an insertion: nothing is struck
+        else {
+          if (parts.kind === 'delete') mark(line, '−', 'taken out');
+          this.editText(line, parts.old, 'del', parts, sourcePath);
+          if (parts.kind === 'replace') line.createSpan({ cls: 'lagrange-arrow', text: ' → ' });
+        }
+        if (parts.fresh) this.editText(line, parts.fresh, 'ins', parts, sourcePath);
+        else line.createEl('span', { cls: 'lagrange-ins is-deletion', text: ' deleted' });
+      } else {
+        if (parts.old !== null) {
+          const line = li.createDiv({ cls: 'lagrange-edit-line is-stacked is-old' });
+          mark(line, '−', 'taken out');
+          this.editText(line, parts.old, 'del', parts, sourcePath);
+        }
+        if (parts.fresh) {
+          const line = li.createDiv({ cls: 'lagrange-edit-line is-stacked is-new' });
+          mark(line, '+', 'put in');
+          this.editText(line, parts.fresh, 'ins', parts, sourcePath);
+        } else {
+          li.createDiv({ cls: 'lagrange-edit-line' }).createEl('span', { cls: 'lagrange-ins is-deletion', text: 'deleted' });
+        }
       }
-      if (e.replace) line.createEl('ins', { cls: 'lagrange-ins', text: excerpt(e.insert ? e.replace.trim() : e.replace, 160) });
-      else line.createEl('span', { cls: 'lagrange-ins is-deletion', text: 'deleted' });
       const reason = why ? `${e.reason ? e.reason + '; ' : ''}skipped: ${why}${e.insert && e.find ? ` (“${excerpt(e.find, 60)}”)` : ''}` : e.reason;
-      if (reason) li.createDiv({ cls: 'lagrange-reason', text: reason });
+      if (reason) {
+        const said = li.createDiv({ cls: 'lagrange-reason' });
+        // (a reason is the model's own words, and may name code or a formula)
+        if (!why && hasMarkdown(reason) && !/\n/.test(reason)) { said.addClass('markdown-rendered'); said.addClass('is-inline'); this.renderChat(reason, said, sourcePath, this); }
+        else said.setText(reason);
+      }
     };
     if (n) {
       const list = el.createEl('ol', { cls: 'lagrange-edits' });
@@ -8857,4 +9157,5 @@ LagrangePlugin.internals = {
 Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERNAL_BLOCKS, attachmentKind, formatBytes, attachmentLabel, admitAttachments, fitWithin,
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
+Object.assign(LagrangePlugin.internals, { codeLabel, openTail, openProse, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

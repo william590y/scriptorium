@@ -387,6 +387,20 @@ text until it closes. The chat only shows: it runs no code a reply holds (a bloc
 such as a Dataview query, is shown as its source), and it fetches nothing from the web because a reply says so (a
 picture at a web address becomes a link).
 
+**The list of edits.** Under a reply that edits the note, and under *Proofread* and *Revise*, each edit is listed:
+what was taken out, struck, → what was put in. Since Lagrange 0.6.2 the words of an edit are set as the chat sets a
+reply (before, they were shown as their source, cut to 160 characters, so that a code block or an equation the pen
+had just written stood in the list as raw Markdown): a code block as code, with its colours and its language in the
+corner, inline code, inline and displayed mathematics, a list, and a figure where the chat draws figures; nothing an
+edit holds is fetched or run, as in a reply. A short change stays in one line; a longer one, or one with a code
+block or a displayed formula, stands as two blocks, what went under a − (greyed, with a rule down its side) and what
+came under a +. A long edit shows its beginning, cut only where Markdown allows (between lines of prose, between the
+lines of a code block, never inside a formula or a figure), under a button that says how many more lines there are;
+the rest is rendered when you ask for it. An edit of plain words keeps its white space (a doubled space shows), and
+one that changes only Markdown marks (`*a*` to `_a_`) shows the marks. While a reply streams, a code block that is
+still open is shown as code, and a formula or a figure that is still open as one line that says so, never as half a
+fence. `plugins-tests/chat-render.harness.js` checks this in a real Obsidian.
+
 **Attaching pictures, video and files.** Paste a copied picture, video or file into the box, drop it on the panel
 (from your system, or a file of the vault from Obsidian's file explorer), or pick it with the paperclip. Each shows as
 a chip you can take off before sending, and in the message once sent (pictures and video as they are, files as chips).

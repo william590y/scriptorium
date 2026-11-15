@@ -190,30 +190,49 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 .lagrange-turn-body { overflow-wrap: anywhere; }
 /* What a reply (or the writer's message) holds beyond prose is rendered as in a note, and kept inside the panel:
    code scrolls sideways, a wide formula or table scrolls, a figure is scaled down to the panel's width. */
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) pre { max-width: 100%; overflow-x: auto; white-space: pre; font-size: 0.82em; }
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(mjx-container[display="true"], .math-block, table) { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(img, svg.excalidraw-svg, .block-language-tikz svg, .mermaid svg) { max-width: 100%; height: auto; }
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(.block-language-tikz, .mermaid) { text-align: center; overflow-x: auto; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) pre { max-width: 100%; overflow-x: auto; white-space: pre; font-size: 0.82em; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) :is(mjx-container[display="true"], .math-block, table) { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) :is(img, svg.excalidraw-svg, .block-language-tikz svg, .mermaid svg) { max-width: 100%; height: auto; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) :is(.block-language-tikz, .mermaid) { text-align: center; overflow-x: auto; }
 /* A TikZ figure that TikZJax did not draw: a line that says so, and the figure's source. */
 .lagrange-view .block-language-tikz.lagrange-figure-source { text-align: start; }
 .lagrange-view .block-language-tikz.lagrange-figure-source > small { display: block; margin-bottom: 0.4em; }
 .lagrange-turn-text.markdown-rendered > :first-child { margin-top: 0; }
 .lagrange-turn-text.markdown-rendered > :last-child { margin-bottom: 0; }
 /* a table is set a little smaller and scrolls sideways when it is wide; its words are not broken to make it fit */
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) table { font-size: 0.85em; overflow-wrap: normal; }
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(th, td) { font-size: inherit; overflow-wrap: normal; word-break: normal; padding: 0.25em 0.55em; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) table { font-size: 0.85em; overflow-wrap: normal; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) :is(th, td) { font-size: inherit; overflow-wrap: normal; word-break: normal; padding: 0.25em 0.55em; }
 /* what is still being written, under the blocks that are rendered */
-.lagrange-turn-open { white-space: pre-wrap; }
 .lagrange-turn-open:empty { display: none; }
+.lagrange-open-text { white-space: pre-wrap; }
+/* a code block that is still open: its code as it comes, in the code font, inside the panel */
+.lagrange-view pre.lagrange-open-code { max-width: 100%; overflow-x: auto; white-space: pre; font-size: 0.82em; margin: 0.6em 0; min-height: 2.6em; }
+.lagrange-view pre.lagrange-open-code > code { font-family: var(--font-monospace); }
+/* code in the chat is set from the left (the panel's text may be justified), and says its language in its corner */
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) pre, .lagrange-view pre.lagrange-open-code { text-align: start; hyphens: none; font-style: normal; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md, .lagrange-turn-open) pre[data-lang] { position: relative; padding-top: 1.9em; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md, .lagrange-turn-open) pre[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute;
+  top: 0.35em;
+  right: 0.7em;
+  font-family: var(--lagrange-serif);
+  font-size: 0.95em;
+  color: var(--lagrange-muted);
+  pointer-events: none;
+}
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) pre[data-lang]:hover::before { visibility: hidden; }
+/* a figure or a displayed formula that is still open */
+.lagrange-open-note { margin: 0.4em 0; font-style: italic; font-size: 0.92em; color: var(--lagrange-muted); }
 .lagrange-turn-body.markdown-rendered { font-size: 1em; line-height: 1.45; }
 .lagrange-turn-body > div > .lagrange-turn-part:first-child > :first-child { margin-top: 0; }
 .lagrange-turn-body > div > .lagrange-turn-part:last-child > :last-child { margin-bottom: 0; }
 /* a line under something the chat shows as its source (a diagram whose plugin is off, a block it will not run) */
 .lagrange-view .lagrange-chat-degraded { color: var(--lagrange-muted); font-style: italic; font-size: 0.85em; }
 /* pictures and video in a message, of the vault or attached: within the panel, never taller than most of it */
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(img, video) { max-width: 100%; height: auto; max-height: 60vh; }
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) .internal-embed { max-width: 100%; }
-.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text) :is(.block-language-tikz, .mermaid, .excalidraw-svg, .internal-embed) svg { max-width: 100%; height: auto; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) :is(img, video) { max-width: 100%; height: auto; max-height: 60vh; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) .internal-embed { max-width: 100%; }
+.lagrange-view :is(.lagrange-turn-body, .lagrange-turn-text, .lagrange-edit-md) :is(.block-language-tikz, .mermaid, .excalidraw-svg, .internal-embed) svg { max-width: 100%; height: auto; }
 
 /* Attachments. In the sent message: pictures and video as they are, files as chips. */
 .lagrange-attached { display: flex; flex-direction: column; align-items: flex-start; gap: 0.45em; margin-top: 0.45em; max-width: 100%; min-width: 0; }
@@ -398,6 +417,53 @@ body.is-mobile .lagrange-view button.lagrange-rewind { opacity: 0.75; }
 .lagrange-edits li { margin: 0.4em 0; }
 .lagrange-edits li::marker { color: var(--lagrange-rubric); font-variant-numeric: oldstyle-nums; }
 .lagrange-edit-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* An edit's words are set as Markdown (code, mathematics, a figure), as a reply is. In one line when they are short … */
+.lagrange-edit-md.markdown-rendered { font-size: 1em; line-height: inherit; white-space: normal; }
+.lagrange-edit-md.is-inline, .lagrange-edit-md.is-inline > p, .lagrange-reason.is-inline > p { display: inline; margin: 0; }
+.lagrange-edit-md.is-inline mjx-container[display="true"] { display: inline-block; margin: 0 0.2em; vertical-align: middle; }
+.lagrange-view .lagrange-edit-md code, .lagrange-view .lagrange-reason code { font-size: 0.85em; }
+.lagrange-reason.markdown-rendered { font-size: 0.88em; line-height: inherit; }
+/* … and as their source where the edit is to the marks themselves */
+.lagrange-edit-md.is-source { font-family: var(--font-monospace); font-size: 0.85em; }
+/* … else one under the other: the sign in the margin, the words in a block beside it. */
+.lagrange-edit-line.is-stacked { display: flex; align-items: baseline; gap: 0.15em; white-space: normal; }
+.lagrange-edit-line.is-stacked + .lagrange-edit-line { margin-top: 0.35em; }
+.lagrange-edit-line.is-stacked > .lagrange-edit-mark { flex: none; white-space: pre; }
+.lagrange-edit-md.is-block { display: block; flex: 1 1 0; min-width: 0; text-decoration: none; }
+.lagrange-edit-md.is-block p { margin: 0.35em 0; text-align: start; hyphens: auto; }
+.lagrange-edit-md.is-block :is(ul, ol) { padding-inline-start: 1.15em; margin: 0.35em 0; }
+.lagrange-edit-md.is-block :is(h1, h2, h3, h4, h5, h6) { font-size: 1em; margin: 0.4em 0 0.2em; }
+.lagrange-edit-md.is-block pre { margin: 0.45em 0; }
+.lagrange-edit-md.is-block :is(.lagrange-edit-short, .lagrange-edit-full) > :first-child,
+.lagrange-edit-md.is-block :is(.lagrange-edit-short, .lagrange-edit-full) > :first-child > :first-child { margin-top: 0; }
+.lagrange-edit-md.is-block :is(.lagrange-edit-short, .lagrange-edit-full) > :last-child,
+.lagrange-edit-md.is-block :is(.lagrange-edit-short, .lagrange-edit-full) > :last-child > :last-child { margin-bottom: 0; }
+/* what was taken out, as a block: not struck through (struck code and formulas cannot be read) but greyed, with a
+   rule in rubric down its side */
+.lagrange-del.is-block { color: var(--lagrange-muted); border-inline-start: 1.5px solid var(--lagrange-rubric); padding-inline-start: 0.5em; }
+.lagrange-del.is-block :is(pre, mjx-container, svg, img, table) { opacity: 0.7; }
+.lagrange-del.is-block p, .lagrange-del.is-block li { text-decoration: line-through; text-decoration-color: var(--lagrange-rubric); text-decoration-thickness: 1px; }
+/* a long edit shows its beginning; the rest is a click away */
+.lagrange-edit-short { max-height: 22em; overflow: hidden; }
+.lagrange-edit-short.is-prose { max-height: 11.6em; }
+.lagrange-edit-short.has-figure { max-height: 28em; }
+.lagrange-edit-short.is-clipped { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.2em), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 2.2em), transparent); }
+.lagrange-view :is(.lagrange-edit-short, .lagrange-edit-full, .lagrange-edit-more).is-hidden { display: none; }
+.lagrange-view button.lagrange-edit-more {
+  display: block;
+  margin: 0.25em 0 0;
+  padding: 0;
+  height: auto;
+  background: none;
+  border: none;
+  box-shadow: none;
+  font: inherit;
+  font-size: 0.88em;
+  font-style: italic;
+  color: var(--lagrange-rubric);
+  cursor: pointer;
+}
+.lagrange-view button.lagrange-edit-more:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .lagrange-del {
   text-decoration: line-through;
   text-decoration-color: var(--lagrange-rubric);
