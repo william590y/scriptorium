@@ -1233,23 +1233,63 @@ function linesDropcap(lines, body) {
    the initial alone ("A body at rest", "I remember"), the space after it as [from, to] in the line: beside a
    dropped initial Reading view sets no space at the head of the line. A paragraph that opens a chapter
    but has no initial is left out: aligned text that did not ask for one, and a paragraph that begins with an
-   embedded file, mathematics, a comment or an HTML tag. plan is alignPlan(lines). Pure. */
+   embedded file, mathematics, a comment or an HTML tag. plan is alignPlan(lines).
+
+   An initial is three lines deep, and a paragraph of one line or two is not: what comes after the paragraph is then
+   beside the initial. So each opening also says what follows it (see "What follows a short opening paragraph" in
+   the snippet): end, the last line of the paragraph (of the note's lines); after, 'text' where a paragraph follows
+   (it goes round the initial, as the paragraph's own lines do), 'list' where a list does (its items stand clear of
+   the initial, each with its marker, and those below it are back at the margin; list is [from, to], the list's
+   lines, and items is besideItems of them) and 'clear' for everything else, which begins below the initial: a quotation, a callout, code, a table, a
+   heading, an image, mathematics, a rule, aligned text, and the end of the note. Pure. */
 function openingPlan(lines, plan) {
   plan = plan || alignPlan(lines);
-  const out = [];
+  const out = [], blocks = noteBlocks(lines, plan.body);
   let prev = plan.body === 0 ? 'opens' : 'other', before = 'other';   // the title's block stands first where there are no properties
-  for (const b of noteBlocks(lines, plan.body)) {
+  const follows = at => {
+    const next = blocks[at + 1];
+    if (!next) return { after: 'clear', list: null, items: null };
+    if (next.type === 'p' && !sectionMarks(plan, next.from, next.to) && !/^\s*!\[/.test(lines[next.from])) return { after: 'text', list: null, items: null };
+    if (next.type === 'other' && BLOCK.list.test(lines[next.from])) return { after: 'list', list: [next.from, next.to], items: besideItems(lines, next.from, next.to) };
+    return { after: 'clear', list: null, items: null };
+  };
+  for (let at = 0; at < blocks.length; at++) {
+    const b = blocks[at];
     const marks = sectionMarks(plan, b.from, b.to);
     if (b.type === 'p' && (prev === 'opens' || (prev === 'quote' && before === 'opens')) && !(marks && (marks.fence || !marks.dropcap))) {
       const first = marks && marks.first ? b.from + 1 : b.from, last = marks && marks.last ? b.to - 1 : b.to;
       if (first <= last && !/^\s*(?:!\[|\$|%%|<)/.test(lines[first])) {
         const text = lines.slice(first, last + 1).map(l => shownLine(l).replace(/\s+$/, '')).join('\n').replace(/^\s+/, '');
         const lone = /^(\s*\p{P}*[\p{L}\p{N}]\p{P}*)([ \t]+)\S/u.exec(lines[first]);
-        out.push({ line: first, text, standing: Boolean(marks), led: /^\s*[*_~=\[`\\]/.test(lines[first]), gap: lone && !marks ? [lone[1].length, lone[1].length + lone[2].length] : null });
+        out.push(Object.assign({ line: first, text, standing: Boolean(marks), led: /^\s*[*_~=\[`\\]/.test(lines[first]), gap: lone && !marks ? [lone[1].length, lone[1].length + lone[2].length] : null, end: last }, follows(at)));
       }
     }
     before = prev;
     prev = (b.type === 'heading' && (b.level <= 2 || b.level === 6)) || (marks && marks.opens) ? 'opens' : b.type === 'quote' ? 'quote' : 'other';
+  }
+  return out;
+}
+
+/* How many lines of a list after an opening paragraph are marked in the editor: an initial is three lines deep and
+   its paragraph has one at least, so two lines at most stand beside it; the mark is harmless on a line that does
+   not (see the snippet), and a few more are marked so that nothing changes while the paragraph is typed. */
+const BESIDE_LINES = 6;
+
+/* The items of a list (lines from to to of the note) that can stand beside an initial, which are those that begin
+   in its first BESIDE_LINES lines: [{line, under}], line being the line an item of the list's first level begins
+   on, and under the lines that belong to that item (its further lines, and the items set in under it). In Reading
+   view those are inside the item, and move with it when it is set in past the initial; the editor has a line of its
+   own for each, and the plugin moves them (see dropcapExtension). Pure. */
+function besideItems(lines, from, to) {
+  const indent = line => { let n = 0; for (const c of line) { if (c === ' ') n++; else if (c === '\t') n += 4 - (n % 4); else break; } return n; };
+  const first = indent(lines[from]), out = [];
+  let item = null;
+  for (let k = from; k <= to; k++) {
+    if (!/\S/.test(lines[k])) continue;
+    if (BLOCK.list.test(lines[k]) && indent(lines[k]) < first + 2) {
+      item = k < from + BESIDE_LINES ? { line: k, under: [] } : null;
+      if (item) out.push(item);
+    } else if (item) item.under.push(k);
   }
   return out;
 }
@@ -1293,10 +1333,10 @@ function docPlan(doc) {
    font changed); preview one that shows a drop cap without saving it ({which}: as previewDropcap takes it;
    undefined for what the note says) and inks it in ({ink: true}); ink switches the inking off again. */
 function dropcapExtension(plugin) {
-  const { StateField, StateEffect, RangeSetBuilder, Prec } = require('@codemirror/state');
+  const { StateField, StateEffect, Prec } = require('@codemirror/state');
   const { Decoration, EditorView, ViewPlugin } = require('@codemirror/view');
   const obsidian = require('obsidian');
-  const refresh = StateEffect.define(), preview = StateEffect.define(), ink = StateEffect.define(), keep = StateEffect.define();
+  const refresh = StateEffect.define(), preview = StateEffect.define(), ink = StateEffect.define(), keep = StateEffect.define(), under = StateEffect.define();
   const pathOf = state => {
     try { const info = obsidian.editorInfoField ? state.field(obsidian.editorInfoField, false) : null; return info && info.file ? info.file.path : ''; } catch (e) { return ''; }
   };
@@ -1308,8 +1348,10 @@ function dropcapExtension(plugin) {
     return { said: linesDropcap(lines, plan.body), openings: openingPlan(lines, plan) };
   };
   const gap = Decoration.mark({ class: 'scriptorium-opening-gap' });   // the space after an initial that is a word by itself
+  const below = Decoration.line({ class: 'scriptorium-opening-end' });   // the paragraph's last line, where what follows begins below the initial
+  const beside = Decoration.line({ class: 'scriptorium-beside-initial' });   // a line of the list that follows the paragraph
   const decorate = (state, value) => {
-    const builder = new RangeSetBuilder(), froms = [];
+    const ranges = [], froms = [], lists = [];
     if (value.openings.length) {
       const choice = plugin.dropcapChoice(value.shown ? value.shown.which : value.said), path = pathOf(state);
       for (const o of value.openings) {
@@ -1318,12 +1360,28 @@ function dropcapExtension(plugin) {
         if (o.led && state.selection.ranges.some(r => r.to >= line.from && r.from <= line.to)) continue;   // its marks are showing
         const made = openingLine(o, choice.which, choice.set, plugin.settings.initials, path, url => plugin.ratioKnown(url), value.inked);
         if (!made) continue;
-        builder.add(line.from, line.from, Decoration.line(made.style ? { class: made.classes, attributes: { style: made.style } } : { class: made.classes }));
-        if (o.gap && line.from + o.gap[1] <= line.to) builder.add(line.from + o.gap[0], line.from + o.gap[1], gap);
+        ranges.push(Decoration.line(made.style ? { class: made.classes, attributes: { style: made.style } } : { class: made.classes }).range(line.from));
+        if (o.gap && line.from + o.gap[1] <= line.to) ranges.push(gap.range(line.from + o.gap[0], line.from + o.gap[1]));
         froms.push(line.from);
+        // What follows a short paragraph is beside its initial (a dropped one; a standing initial has nothing beside it).
+        if (o.standing) continue;
+        if (o.after === 'clear' && o.end < state.doc.lines) {
+          // (the initial's own classes go with the mark: they say how deep the initial is)
+          const end = state.doc.line(o.end + 1), own = made.classes.split(' ').filter(c => c.startsWith('scriptorium-dropcap-') && c !== 'scriptorium-dropcap-inked');
+          ranges.push((own.length && o.end !== o.line ? Decoration.line({ class: ['scriptorium-opening-end'].concat(own).join(' ') }) : below).range(end.from));
+        }
+        else if (o.after === 'list') {
+          for (let n = o.list[0]; n <= Math.min(o.list[1], o.list[0] + BESIDE_LINES - 1, state.doc.lines - 1); n++) {
+            const item = state.doc.line(n + 1);
+            if (/\S/.test(item.text)) ranges.push(beside.range(item.from));
+          }
+          const at = n => (n < state.doc.lines ? state.doc.line(n + 1).from : -1);
+          lists.push({ open: line.from, items: o.items.map(i => ({ at: at(i.line), under: i.under.map(at).filter(p => p >= 0) })).filter(i => i.at >= 0 && i.under.length) });
+        }
       }
     }
-    return Object.assign({}, value, { deco: builder.finish(), froms });
+    // (sorted here: the mark of a paragraph's end is on the opening line itself where the paragraph has one line, before the mark of its gap)
+    return Object.assign({}, value, { deco: Decoration.set(ranges, true), froms, lists });
   };
   const field = StateField.define({
     create: state => decorate(state, Object.assign({ shown: null, inked: false }, read(state))),
@@ -1355,6 +1413,19 @@ function dropcapExtension(plugin) {
     },
     provide: f => EditorView.decorations.from(f),
   });
+  /* The lines under an item of a list that stands beside the initial are set in as far as the item is: {at, by}. */
+  const underField = StateField.define({
+    create: () => Decoration.none,
+    update(value, tr) {
+      for (const e of tr.effects) {
+        if (e.is(under)) {
+          return e.value.length ? Decoration.set(e.value.map(u => Decoration.line({ class: 'scriptorium-under-initial', attributes: { style: `--scriptorium-beside-shift: ${u.by}px` } }).range(u.at)), true) : Decoration.none;
+        }
+      }
+      return tr.docChanged ? value.map(tr.changes) : value;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
   const keeper = ViewPlugin.fromClass(class {
     constructor(view) { this.ask(view); }
     update(u) {
@@ -1367,7 +1438,8 @@ function dropcapExtension(plugin) {
     /* Where the first line of each opening paragraph in view would break inside a word: [[from, to]] of the words. */
     read(view) {
       const state = view.state, froms = state.field(field).froms, found = [];
-      if (!froms.length || !live(state)) return { state, found };
+      const moved = this.readUnder(view);
+      if (!froms.length || !live(state)) return { state, found, moved };
       const had = state.field(keepField).size > 0;
       if (had) view.dom.classList.add('scriptorium-keep-off');
       try {
@@ -1388,13 +1460,42 @@ function dropcapExtension(plugin) {
         }
       } catch (e) { /* never break the editor: the line is as it is */ }
       finally { if (had) view.dom.classList.remove('scriptorium-keep-off'); }
-      return { state, found };
+      return { state, found, moved };
     }
-    write({ state, found }, view) {
+    /* How far each item of a list after an opening paragraph is set in past the initial, as the page has it (the
+       item's line is a box that is kept clear of the float: see the snippet), for the lines under it: [{at, by}],
+       or null where nothing is to change. A list whose lines are not drawn keeps what it had. */
+    readUnder(view) {
+      const state = view.state, lists = state.field(field).lists, had = new Map(), next = [];
+      for (const it = state.field(underField).iter(); it.value; it.next()) had.set(it.from, parseFloat(String(it.value.spec.attributes.style).split(':')[1]) || 0);
+      try {
+        const lineAt = pos => {
+          if (pos < view.viewport.from || pos > view.viewport.to) return null;
+          const at = view.domAtPos(pos), el = (at.node.nodeType === 1 ? at.node : at.node.parentElement).closest('.cm-line');
+          return el && el.isConnected ? el : null;
+        };
+        for (const list of live(state) ? lists : []) {
+          const open = lineAt(list.open);
+          for (const item of list.items) {
+            const el = open && open.classList.contains('scriptorium-opening') ? lineAt(item.at) : null;
+            if (!el) { for (const at of item.under) if (had.has(at)) next.push({ at, by: had.get(at) }); continue; }   // not drawn: as it was
+            const by = Math.round((el.getBoundingClientRect().left - open.getBoundingClientRect().left) * 100) / 100;
+            if (by > 0.5) for (const at of item.under) next.push({ at, by });
+          }
+        }
+      } catch (e) { return null; }
+      next.sort((a, b) => a.at - b.at);
+      if (next.length === had.size && next.every(u => had.has(u.at) && Math.abs(had.get(u.at) - u.by) < 0.05)) return null;
+      return next;
+    }
+    write({ state, found, moved }, view) {
       const now = [];
       for (const it = state.field(keepField).iter(); it.value; it.next()) now.push([it.from, it.to]);
-      if (now.length === found.length && now.every((r, i) => r[0] === found[i][0] && r[1] === found[i][1])) return;
-      Promise.resolve().then(() => { if (view.state === state) try { view.dispatch({ effects: keep.of(found) }); } catch (e) { /* the view is gone */ } });
+      const effects = [];
+      if (!(now.length === found.length && now.every((r, i) => r[0] === found[i][0] && r[1] === found[i][1]))) effects.push(keep.of(found));
+      if (moved) effects.push(under.of(moved));
+      if (!effects.length) return;
+      Promise.resolve().then(() => { if (view.state === state) try { view.dispatch({ effects }); } catch (e) { /* the view is gone */ } });
     }
   });
   /* A click on the initial puts the cursor at the letter: before it or after it, whichever is nearer (a double
@@ -1438,7 +1539,7 @@ function dropcapExtension(plugin) {
       } catch (e) { return false; }
     },
   }));
-  return { extension: [field, keepField, keeper, clicks], refresh, preview, ink, field, keepField };
+  return { extension: [field, keepField, underField, keeper, clicks], refresh, preview, ink, field, keepField, underField };
 }
 
 /* ==========================================================
@@ -5781,7 +5882,7 @@ Object.assign(module.exports, {
   setupRule, setupPackage, planVaultSetup, describeVaultSetup, applyVaultSetup, setupFolder,
   DIAGRAM_PLUGINS, installDiagramPlugins, diagramPluginsWanted, diagramPluginsNote, versionAtLeast,
   noteDropcap, dropcapChoices, markDropcap, dropcapMarks, isPrintPage, dressPrint,
-  noteBlocks, shownLine, linesDropcap, openingPlan, openingLine, dropcapExtension,
+  noteBlocks, shownLine, linesDropcap, openingPlan, besideItems, openingLine, dropcapExtension,
   alignKind, alignMarker, noteAlign, alignPlan, sectionMarks, alignClasses, blockLines, blockMarks, alignEdits, alignDropcapEdits, applyLineEdits, lineAfterEdits, markAligned,
   openingLetter, dropcapFile, describeSet, setName, sanitizeSvg, checkDropcapFile, BUNDLED_SETS, YOUR_OWN_SETS, DROPCAP_FOLDER,
   seedOf, fontFaces, setLabel, monoMask, downloadPlan, fetchDropcapSet, describeDownload, sizeText,

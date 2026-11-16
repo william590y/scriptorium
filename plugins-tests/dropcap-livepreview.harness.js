@@ -152,7 +152,13 @@
     const scroller = leaf.view.containerEl.querySelector('.markdown-preview-view'), found = new Map();
     for (let y = 0, guard = 0; guard < 300; y += 350, guard++) {
       scroller.scrollTop = y; await sleep(130);
-      for (const el of leaf.view.containerEl.querySelectorAll('.markdown-preview-sizer > div.el-p > p')) found.set(words(el), kind(measure(el)));
+      // (only what is in the pane: Reading view takes a heading that is far above the pane off the page before the
+      // paragraph under it, and the paragraph, out of sight, is then no chapter opening until it is scrolled back to)
+      const pane = scroller.getBoundingClientRect();
+      for (const el of leaf.view.containerEl.querySelectorAll('.markdown-preview-sizer > div.el-p > p')) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > pane.top && r.top < pane.bottom) found.set(words(el), kind(measure(el)));
+      }
       if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) break;
     }
     scroller.scrollTop = 0;
