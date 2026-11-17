@@ -418,6 +418,29 @@ waits. With the system's "reduce motion" on, the plate is drawn still. (The reco
 made with the plates in turn, its first one told so that the recording is the same each time: the Lagrange points,
 then clockwork, then alchemy.)
 
+**Voice.** Off until you turn it on (**Settings → Lagrange → Voice**). Then a microphone stands in the ribbon and at
+the foot of the chat. The one in the ribbon (or **Lagrange: Dictate into the note**) dictates: each phrase you say is
+written in at the cursor when you pause, joined to what is there (a space before it, a capital at the start of a
+sentence, never into the middle of a word), with a moment of rubric ink; each phrase is one undo step. Said as a phrase
+of its own, “new line” and “new paragraph” break the line, “scratch that” takes the last phrase out again, “stop
+listening” stops, and “Lagrange, …” sends the rest of the phrase to the chat as a message (so the pen may then edit).
+The microphone in the chat (or **Lagrange: Speak to Lagrange**) listens for one message, sends it, and closes; click it
+again to send at once. While Lagrange listens the status bar says so, with a meter (click it to stop), and **Esc**
+stops (when speaking to Lagrange, Esc drops what you were saying). The microphone is opened only while Lagrange
+listens; a refused or missing microphone is said in plain words, with where to allow it on macOS, Windows and Linux.
+What you say has to be turned into words by a transcription service, and you choose which: **OpenAI**, with an OpenAI
+API key (the one the OpenAI API provider uses; `gpt-4o-mini-transcribe`, or `whisper-1` for an account without it), or
+**a transcription server** that speaks OpenAI's `/audio/transcriptions`: a Whisper on your own computer keeps what you
+say on it (whisper.cpp's `whisper-server --inference-path /v1/audio/transcriptions`, Speaches, LocalAI), or a hosted
+one such as Groq. Claude cannot do it: the Claude API takes no sound, and neither the Claude nor the ChatGPT
+subscription offers transcription to plugins. Nor can Obsidian itself on a computer: the browser inside it has the
+standard speech recognition, but not the service behind it (in Obsidian 1.15 it fails with "network", and its
+on-device recognition is not installed), so that choice is offered only on a phone or tablet whose system has it.
+Each phrase is sent once, as a 16 kHz WAV made in memory, to the service you chose and to no one else; nothing is
+recorded to disk. **Test the microphone** in the settings listens for six seconds and says how loud it was and what it
+heard. `plugins-tests/voice.harness.js` checks all of this in a real Obsidian with a pretend microphone playing
+recorded speech.
+
 **The list of edits.** Under a reply that edits the note, and under *Proofread* and *Revise*, each edit is listed:
 what was taken out, struck, → what was put in. Since Lagrange 0.6.2 the words of an edit are set as the chat sets a
 reply (before, they were shown as their source, cut to 160 characters, so that a code block or an equation the pen
