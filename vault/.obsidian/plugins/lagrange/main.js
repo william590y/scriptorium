@@ -648,11 +648,13 @@ function splitAgentReply(reply) {
 
 /* One item of an edits block, as an operation: {op: 'replace', find, replace, reason}, {op: 'insert', after | before,
    text, reason} or {op: 'append', text, reason}. Null if it is none of these. */
-/* A drawing as a reply asks for it, made safe: {name, elements}. An element is {type: 'rect' | 'ellipse' | 'diamond',
-   x, y, w, h, text?}, {type: 'line' | 'arrow', points: [[x, y], …]} or {type: 'text', x, y, text}; numbers are
-   pixels on a canvas whose y grows downwards. Anything else is left out; null if nothing is left. At most
-   SKETCH_ELEMENTS elements. Pure. */
-const SKETCH_ELEMENTS = 80, SKETCH_PLACE = '![[drawing]]';
+/* A drawing as a reply asks for it, made safe: {name, elements} or {name, elements: [], mermaid}. An element is
+   {type: 'rect' | 'ellipse' | 'diamond', x, y, w, h, text?}, {type: 'line' | 'arrow', points: [[x, y], …]} or
+   {type: 'text', x, y, text}; numbers are pixels on a canvas whose y grows downwards. Anything else is left out. A
+   drawing may instead be given as a Mermaid diagram (its source, at most SKETCH_MERMAID characters, without the
+   fence), which Lagrange draws by hand in Excalidraw (see sketchFromSvg); elements, where there are any, win. Null
+   if nothing is left. At most SKETCH_ELEMENTS elements. Pure. */
+const SKETCH_ELEMENTS = 80, SKETCH_PLACE = '![[drawing]]', SKETCH_MERMAID = 4000;
 function sketchSpec(raw) {
   const num = v => (typeof v === 'number' && isFinite(v) ? Math.max(-20000, Math.min(20000, v)) : null);
   const words = v => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b-\u001f]/g, '').slice(0, 400) : '');
@@ -672,12 +674,14 @@ function sketchSpec(raw) {
       if (x !== null && y !== null && words(e.text)) out.push({ type, x, y, text: words(e.text) });
     }
   }
-  if (!out.length) return null;
+  const mermaid = typeof (raw && raw.mermaid) === 'string' ? raw.mermaid.replace(/^\s*(?:`{3,}|~{3,})\s*mermaid\s*\n|\n\s*(?:`{3,}|~{3,})\s*$/g, '').trim().slice(0, SKETCH_MERMAID) : '';
+  if (!out.length && !mermaid) return null;
   const name = words(raw.name).replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Drawing';
-  return { name, elements: out };
+  return mermaid && !out.length ? { name, elements: out, mermaid } : { name, elements: out };
 }
 
-/* What the model is told about diagrams, by which of the two plugins the vault has (have: {tikz, sketch}). Pure. */
+/* What the model is told about diagrams: Mermaid always (Obsidian draws it), and TikZ and sketches by which of the
+   two plugins the vault has (have: {tikz, sketch}). Pure. */
 function diagramStyle(have) {
   const h = have || {};
   // (what TikZJax 0.5.2 takes was tried, construct by construct, in real Obsidian: see the README, "Diagrams")
@@ -699,10 +703,19 @@ function diagramStyle(have) {
     'with coordinates in pixels (x to the right, y downwards; about 600 wide at most): {"type": "rect" | "ellipse" | "diamond", ' +
     '"x", "y", "w", "h", "text": "an optional label inside"}, {"type": "line" | "arrow", "points": [[x, y], [x, y], …]}, ' +
     '{"type": "text", "x", "y", "text"}. The plugin makes the drawing and puts it in the note.';
-  if (h.tikz && h.sketch) return `Diagrams: ${tikz} ${sketch} Use TikZ where exactness matters and a sketch where it does not.`;
-  if (h.tikz) return `Diagrams: ${tikz} Free-form sketches need the Excalidraw plugin, which this vault does not have turned on: if the writer asks for one, say so, and offer a TikZ figure where it would serve.`;
-  if (h.sketch) return `Diagrams: ${sketch} Technical figures in TikZ need the TikZJax plugin, which this vault does not have turned on: do not write a tikz block; if the writer asks for such a figure, say so, and offer a sketch where it would serve.`;
-  return 'Diagrams: this vault has neither the TikZJax plugin (technical figures) nor the Excalidraw plugin (free-form sketches) turned on, so do not write a tikz block or a drawing; if the writer asks for a diagram, tell them to turn one of the two on in Settings → Community plugins.';
+  // (Obsidian 1.15 draws every one of these kinds itself: each was tried in it, see the README, "Diagrams")
+  const mermaid = 'A diagram of flow or structure (a flowchart, a sequence of messages, the states of a thing, classes or entities and how they ' +
+    'relate, a timeline, a Gantt chart, a mind map, a pie chart) is written in Mermaid, in a code block fenced with ```mermaid, which ' +
+    'Obsidian draws itself, with no plugin: flowchart LR (or TD), sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram, timeline, ' +
+    'gantt, mindmap, pie, journey, gitGraph or quadrantChart, in Mermaid\'s own syntax. Keep labels short, and put a label that holds ' +
+    'punctuation, brackets or quotes in double quotes (A["Step 1: read"]). A block Obsidian cannot read shows its error in place of the ' +
+    'diagram, so write only what is sure to parse. Put the block in a paragraph of its own.';
+  const sketchMermaid = ' For boxes joined by arrows you may give the sketch as a Mermaid flowchart instead of elements, ' +
+    '{"name": "a short title", "mermaid": "flowchart LR\\n  A[One] --> B[Two]"}: it is drawn by hand in Excalidraw, and the writer can then move it about there.';
+  if (h.tikz && h.sketch) return `Diagrams: ${mermaid} ${tikz} ${sketch}${sketchMermaid} Use Mermaid for flow and structure, TikZ where mathematical exactness matters, and a sketch for a rough picture of an idea.`;
+  if (h.tikz) return `Diagrams: ${mermaid} ${tikz} Free-form sketches need the Excalidraw plugin, which this vault does not have turned on: if the writer asks for one, say so, and offer a Mermaid diagram or a TikZ figure where it would serve.`;
+  if (h.sketch) return `Diagrams: ${mermaid} ${sketch}${sketchMermaid} Technical figures in TikZ need the TikZJax plugin, which this vault does not have turned on: do not write a tikz block; if the writer asks for such a figure, say so, and offer a Mermaid diagram or a sketch where it would serve.`;
+  return `Diagrams: ${mermaid} This vault has neither the TikZJax plugin (technical figures) nor the Excalidraw plugin (free-form sketches) turned on, so do not write a tikz block or a drawing; if the writer asks for such a figure, offer a Mermaid diagram where it would serve, or tell them to turn one of the two on in Settings → Community plugins.`;
 }
 
 function normalizeOp(item) {
@@ -1474,19 +1487,33 @@ function plainInline(text) {
 }
 
 /* ---- Diagrams ----
-   Two community plugins draw diagrams in a note, and the pen draws what they render instead of writing its source:
-   TikZJax sets a ```tikz code block as a figure (for technical and mathematical figures), and Excalidraw shows an
-   embedded drawing, ![[Name.excalidraw]] (free-form sketches). Both put an <svg> in the note in Live Preview.
-   figureKinds(text) -> {tikz, sketch}: how many of each a piece of Markdown holds. withoutFigures(text): the text
-   with them taken out, which is what is left for the pen to write by hand. Pure. */
+   Diagrams in a note are drawn by the pen where the note shows them, instead of having their source written out:
+   Obsidian itself sets a ```mermaid code block as a diagram (flowcharts, sequences, states and the like), and two
+   community plugins draw the others: TikZJax sets a ```tikz code block as a figure (technical and mathematical
+   figures), and Excalidraw shows an embedded drawing, ![[Name.excalidraw]] (free-form sketches). All three put an
+   <svg> in the note in Live Preview.
+   figureKinds(text) -> {tikz, sketch, mermaid}: how many of each a piece of Markdown holds. withoutFigures(text):
+   the text with them taken out, which is what is left for the pen to write by hand. Pure. */
 const TIKZ_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*tikz[ \t]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
+const MERMAID_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*mermaid[ \t]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
 const SKETCH_EMBED = /!\[\[[^\]\n]*\.excalidraw(?:\.md)?(?:[|#][^\]\n]*)?\]\]/g;
 function figureKinds(text) {
   const t = String(text == null ? '' : text);
-  return { tikz: (t.match(TIKZ_FENCE) || []).length, sketch: (t.match(SKETCH_EMBED) || []).length };
+  return { tikz: (t.match(TIKZ_FENCE) || []).length, sketch: (t.match(SKETCH_EMBED) || []).length, mermaid: (t.match(MERMAID_FENCE) || []).length };
 }
 function withoutFigures(text) {
-  return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(SKETCH_EMBED, '');
+  return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(MERMAID_FENCE, '$1').replace(SKETCH_EMBED, '');
+}
+/* The Mermaid blocks of a piece of Markdown: [{from, to, source}], from and to around the whole fenced block, source
+   its lines between the fences. Pure. */
+function mermaidBlocks(text) {
+  const t = String(text == null ? '' : text), out = [];
+  for (const m of t.matchAll(MERMAID_FENCE)) {
+    const from = m.index + m[1].length, block = m[0].slice(m[1].length);
+    const lines = block.split('\n');
+    out.push({ from, to: from + block.length, source: lines.slice(1, -1).join('\n') });
+  }
+  return out;
 }
 
 /* How a ```tikz block stands on the page. TikZJax (0.5.2) puts a <script type="text/tikz"> in the block, replaces it
@@ -1498,6 +1525,14 @@ function tikzState(block) {
   if (block.querySelector('svg')) return 'drawn';
   // (the broken picture, or what Scriptorium's "Repair TikZJax rendering" puts in its place: TeX's own words)
   return block.querySelector('img') || block.querySelector('.scriptorium-tikz-error') ? 'failed' : 'waiting';
+}
+/* How a ```mermaid block stands on the page: Obsidian draws it as an <svg> in a .mermaid box, or, when it cannot read
+   the diagram, writes what is wrong there instead. -> 'waiting' | 'drawn' | 'failed'. Pure. */
+function mermaidState(block) {
+  const box = block && block.querySelector('.mermaid');
+  if (!box) return 'waiting';
+  if (box.querySelector('svg')) return 'drawn';
+  return String(box.textContent || '').trim() ? 'failed' : 'waiting';
 }
 /* How long a figure is waited for before its source is shown in its place. TikZJax sets its figures one after
    another: a plain one takes well under a second, pgfplots or circuitikz a second or two, a thousand shapes half a
@@ -1517,12 +1552,81 @@ function tikzTrouble(kind, where, wait) {
     : `TikZJax has not drawn this figure after ${secs} seconds, so its source is shown:`;
 }
 
-/* The order in which the pen draws a figure's parts: shapes first, in the order the figure has them (which is the
-   order TikZ and Excalidraw drew them in), then its labels. parts: [{text: boolean}] -> their indexes. Pure. */
+/* The order in which the pen draws a TikZ figure's parts: shapes first, in the order the figure has them (which is
+   the order TikZ drew them in), then its labels. parts: [{text: boolean}] -> their indexes. Pure. */
 function figureOrder(parts) {
   const shapes = [], labels = [];
   (parts || []).forEach((p, i) => (p && p.text ? labels : shapes).push(i));
   return shapes.concat(labels);
+}
+
+/* The order in which a Mermaid diagram is drawn, piece by piece, as one would draw it by hand (by the pen in the
+   note, and by the chat's ink when a reply brings one). parts: one for each drawable part of the svg, in the svg's
+   own order, [{kind, id, text, footer}]: kind is what the part belongs to ('node', 'edge', 'label': an edge's label,
+   'line': a lifeline under an actor, 'cluster': a box around nodes, '' for anything else), id its group's own id
+   (an edge and its label in a flowchart are "L_<from>_<to>_<n>", in a sequence "i<n>" in the order of the
+   messages), text whether the part is words, footer whether it is an actor's copy at the foot of a sequence.
+   - A flowchart (edges named L_<from>_<to>_<n>) grows from its first node: a node is drawn (its shape, then its
+     words), then each edge that leaves what is drawn (the line, its arrowhead, its label) and the node it comes to,
+     and so on; nodes nothing reaches start again in their own order.
+   - Anything else (a sequence, states, classes…): boxes around nodes, the nodes, the lines under them, the edges
+     in their order with their labels, then the copies at the foot.
+   Parts that belong to nothing come first (shapes) and last (words). -> the parts' indexes, each once. Pure. */
+function diagramOrder(parts) {
+  const list = parts || [];
+  const groups = new Map(), loose = [];
+  list.forEach((p, i) => {
+    if (!p || !p.kind || p.id == null || p.id === '') { loose.push(i); return; }
+    const key = `${p.kind}\u0000${p.id}\u0000${p.footer ? 1 : 0}`;
+    if (!groups.has(key)) groups.set(key, { kind: p.kind, id: String(p.id), footer: Boolean(p.footer), parts: [] });
+    groups.get(key).parts.push(i);
+  });
+  const inOrder = g => g.parts.filter(i => !list[i].text).concat(g.parts.filter(i => list[i].text));
+  const all = Array.from(groups.values());
+  const nodes = all.filter(g => g.kind === 'node' && !g.footer), edges = all.filter(g => g.kind === 'edge');
+  const labelOf = id => all.find(g => g.kind === 'label' && g.id === id);
+  const out = [], done = new Set();
+  const take = g => { if (g && !done.has(g)) { done.add(g); out.push(...inOrder(g)); } };
+  out.push(...loose.filter(i => !(list[i] && list[i].text)));
+  for (const g of all.filter(x => x.kind === 'cluster')) take(g);
+  const byId = new Map(nodes.map(g => [g.id, g]));
+  // an edge's two ends: "L_a_b_0" splits more than one way when the ids hold "_"; the split whose halves are both nodes
+  const endsOf = g => {
+    const m = /^L_(.+)_\d+$/.exec(g.id);
+    if (!m) return null;
+    const bits = m[1].split('_');
+    for (let k = 1; k < bits.length; k++) {
+      const a = bits.slice(0, k).join('_'), b = bits.slice(k).join('_');
+      if (byId.has(a) && byId.has(b)) return [a, b];
+    }
+    return null;
+  };
+  const links = edges.map(g => ({ g, ends: endsOf(g) }));
+  if (links.length && links.every(l => l.ends)) {
+    const drawn = new Set();
+    for (const n of nodes) {
+      if (drawn.has(n.id)) continue;
+      drawn.add(n.id);
+      take(n);
+      for (let again = true; again;) {
+        again = false;
+        for (const l of links) {
+          if (done.has(l.g) || !drawn.has(l.ends[0])) continue;
+          take(l.g); take(labelOf(l.g.id));
+          if (!drawn.has(l.ends[1])) { drawn.add(l.ends[1]); take(byId.get(l.ends[1])); }
+          again = true;
+        }
+      }
+    }
+  } else {
+    for (const g of nodes) take(g);
+    for (const g of all.filter(x => x.kind === 'line')) take(g);
+    const seq = id => { const m = /^i(\d+)$/.exec(id); return m ? Number(m[1]) : Infinity; };
+    for (const g of edges.slice().sort((a, b) => seq(a.id) - seq(b.id))) { take(g); take(labelOf(g.id)); }
+  }
+  for (const g of all) { take(g); if (g.kind === 'edge') take(labelOf(g.id)); }   // the foot, and what is not named above
+  out.push(...loose.filter(i => list[i] && list[i].text));
+  return out;
 }
 
 /* (plain: the text is written as Live Preview shows it, without its Markdown marks; see plainInline) */
@@ -2051,10 +2155,21 @@ const DEMO_FIGURE = ['```tikz', '\\begin{document}', '\\begin{tikzpicture}[scale
   '\\fill (1,1.732) circle (0.04) node[above] {$L_4$};',
   '\\fill (1,-1.732) circle (0.04) node[below] {$L_5$};',
   '\\end{tikzpicture}', '\\end{document}', '```'].join('\n');
+/* The demo's Mermaid diagram (Obsidian draws it without any plugin): why a small body rests at the first point. */
+const DEMO_MERMAID = ['```mermaid', 'flowchart LR',
+  '  S((Sun)) -->|pull| B[Small body]',
+  '  E((Earth)) -->|pull| B',
+  '  B --> Q{Pulls and turning balance?}',
+  '  Q -->|yes| R[It rests at L1]',
+  '  Q -->|no| D[It drifts away]', '```'].join('\n');
 function demoChatEdits(question, note, have) {
   const q = String(question || '').toLowerCase();
   let ops = null;
-  if (/\b(diagram|figure|draw|tikz)/.test(q) && have && have.tikz) {
+  if (/\b(sketch|excalidraw)/.test(q) && have && have.sketch) {
+    ops = [{ sketch: { name: 'Balance at L1', mermaid: DEMO_MERMAID.split('\n').slice(1, -1).join('\n') } }];
+  } else if (/\b(flow ?chart|mermaid|chart)/.test(q) || (/\b(diagram|figure|draw)/.test(q) && !(have && have.tikz))) {
+    ops = [{ append: `Why a small body can rest at the first point:\n\n${DEMO_MERMAID}` }];
+  } else if (/\b(diagram|figure|draw|tikz)/.test(q) && have && have.tikz) {
     ops = [{ append: `The five points, with the two masses:\n\n${DEMO_FIGURE}` }];
   } else if (/\b(equation|formula|math)/.test(q)) {
     ops = [{ append: 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$' }];
@@ -2105,7 +2220,7 @@ function demoChatReply(question, note, agentic, look, have) {
   parts.push(`You asked: “${excerpt(String(question || '').replace(/\s+/g, ' '), 160)}” A model would answer here, ` +
     'with the note in mind.');
   parts.push('The edits work offline in demo mode:\n\n' +
-    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation*, to *add some code* or (with TikZJax on) to *draw a diagram*, and the pen does it.\n' : '') +
+    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation*, to *add some code*, to *draw a flowchart* (or, with TikZJax on, *a diagram*; with Excalidraw on, *a sketch*), and the pen does it.\n' : '') +
     '- Ask me to *explain* something, and the reply shows how the chat sets mathematics, code and a figure.\n' +
     '- **Proofread note** finds typographic slips (straight quotes, spaced hyphens, doubled spaces) and sets the ' +
     'corrections down with the pen.\n' +
@@ -4296,6 +4411,187 @@ function prefersReducedMotion(win) {
   try { return (win || window).matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
 }
 
+/* Which kind of diagram an <svg> is: 'mermaid' (a ```mermaid block as Obsidian draws it), 'sketch' (an Excalidraw
+   drawing), 'tikz', or ''. */
+function diagramKind(svg) {
+  if (!svg || !svg.closest) return '';
+  if (svg.closest('.mermaid') || (svg.classList && svg.classList.contains('pele'))) return 'mermaid';
+  if (svg.closest('.block-language-tikz')) return 'tikz';
+  if ((svg.classList && svg.classList.contains('excalidraw-svg')) || svg.closest('.excalidraw-embedded-img, .excalidraw-svg')) return 'sketch';
+  return '';
+}
+/* The drawable parts of a diagram's <svg>: its strokes, shapes, words and pictures, in the svg's own order, without
+   what is only referred to (markers, patterns and the like) and without the pieces of a text. */
+function diagramParts(svg) {
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  // (an Excalidraw drawing's paper: a rect at the root as large as the picture, which is there from the first)
+  const ground = n => n.parentElement === svg && n.tagName.toLowerCase() === 'rect' && vb && vb.width > 0 &&
+    Math.abs((parseFloat(n.getAttribute('width')) || 0) - vb.width) < 1 && Math.abs((parseFloat(n.getAttribute('height')) || 0) - vb.height) < 1;
+  return Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text, foreignObject, image'))
+    .filter(n => !n.closest('defs, mask, clipPath, marker, metadata, pattern, symbol') && !(n.tagName.toLowerCase() !== 'text' && n.closest('text')) && !ground(n));
+}
+/* The order in which a diagram's parts are drawn (parts: as diagramParts gives them). A Mermaid diagram as
+   diagramOrder has it, read from what Obsidian's renderer marks on its groups (data-id, and pele-node, pele-edge,
+   pele-edge-label, pele-lifeline, pele-cluster); an Excalidraw drawing element by element, in the drawing's own
+   order (each shape and then its words, as they were made); a TikZ figure as figureOrder has it. Reads the DOM. */
+function drawOrder(svg, parts) {
+  const words = n => /^(text|foreignObject|image)$/i.test(n.tagName);
+  const kind = diagramKind(svg);
+  if (kind === 'sketch') return parts.map((n, i) => i);
+  if (kind !== 'mermaid') return figureOrder(parts.map(n => ({ text: words(n) })));
+  return diagramOrder(parts.map(n => {
+    const g = n.closest('[data-id]');
+    if (!g || !svg.contains(g) || g === svg) return { kind: '', id: '', text: words(n) };
+    const c = g.classList, is = name => c.contains(name);
+    const kind = is('pele-edge-label') ? 'label' : is('pele-edge') ? 'edge' : is('pele-node') ? 'node' : is('pele-lifeline') ? 'line'
+      : ['pele-cluster', 'pele-cluster-title', 'pele-subgraph', 'pele-quadrant', 'pele-section-label'].some(is) ? 'cluster' : 'other';
+    return { kind, id: g.getAttribute('data-id'), text: words(n), footer: is('pele-actor-footer') };
+  }));
+}
+
+/* A Mermaid diagram as Obsidian has drawn it, as the elements of a sketch (sketchSpec's shapes): its boxes, rounds
+   and diamonds, its lines and arrows (followed along their curves), and its words where they stand and at their
+   size, in the order the diagram is drawn (drawOrder), so that the pen draws the sketch as it would draw the
+   diagram. Coordinates are the diagram's own, from its top left corner. Arrowheads are not elements of their own:
+   the line they end becomes an arrow. Parts that show nothing (neither stroke nor fill) are left out. The svg must
+   be laid out (on the page, if out of sight). Reads the DOM. -> [{type, …}] */
+function sketchFromSvg(svg) {
+  const win = (svg.ownerDocument && svg.ownerDocument.defaultView) || window;
+  const root = svg.getScreenCTM && svg.getScreenCTM();
+  if (!root) return [];
+  const inv = root.inverse(), vb = svg.viewBox && svg.viewBox.baseVal, ox = vb ? vb.x : 0, oy = vb ? vb.y : 0;
+  const round = v => Math.round(v * 10) / 10;
+  const at = (n, x, y) => { const p = new win.DOMPoint(x, y).matrixTransform(inv.multiply(n.getScreenCTM())); return [round(p.x - ox), round(p.y - oy)]; };
+  const box = n => {
+    const b = n.getBBox(), c = [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]].map(q => at(n, q[0], q[1]));
+    const xs = c.map(q => q[0]), ys = c.map(q => q[1]), x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: round(Math.max(...xs) - x), h: round(Math.max(...ys) - y) };
+  };
+  // four corners at the middle of each side of their box: a diamond
+  const diamond = pts => {
+    if (pts.length !== 4) return false;
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2, tol = Math.max(2, (x1 - x0 + y1 - y0) * 0.04);
+    return pts.every(p => (Math.abs(p[0] - mx) < tol && (Math.abs(p[1] - y0) < tol || Math.abs(p[1] - y1) < tol)) || (Math.abs(p[1] - my) < tol && (Math.abs(p[0] - x0) < tol || Math.abs(p[0] - x1) < tol)));
+  };
+  const parts = diagramParts(svg), out = [];
+  for (const i of drawOrder(svg, parts)) {
+    const n = parts[i], tag = n.tagName.toLowerCase(), cs = win.getComputedStyle(n);
+    try {
+      if (tag === 'text' || tag === 'foreignobject') {
+        const text = String(n.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text) out.push(Object.assign({ type: 'text', text, size: Math.round(parseFloat(cs.fontSize) || 16) }, box(n)));
+        continue;
+      }
+      if (tag === 'image' || n.classList.contains('pele-marker')) continue;
+      const stroked = cs.stroke && cs.stroke !== 'none' && parseFloat(cs.strokeWidth) !== 0, filled = cs.fill && cs.fill !== 'none' && cs.fillOpacity !== '0';
+      if (!stroked && !filled) continue;
+      const dashed = Boolean(cs.strokeDasharray && cs.strokeDasharray !== 'none');
+      if (tag === 'rect') out.push(Object.assign({ type: 'rect' }, box(n)));
+      else if (tag === 'circle' || tag === 'ellipse') out.push(Object.assign({ type: 'ellipse' }, box(n)));
+      else if (tag === 'polygon' || tag === 'polyline') {
+        const pts = Array.from(n.points || []).map(p => at(n, p.x, p.y));
+        if (tag === 'polygon' && diamond(pts)) out.push(Object.assign({ type: 'diamond' }, box(n)));
+        else if (pts.length >= 2) out.push({ type: 'line', points: tag === 'polygon' ? pts.concat([pts[0]]) : pts, dashed });
+      } else if (tag === 'line') {
+        const g = k => (n[k] && n[k].baseVal ? n[k].baseVal.value : 0);
+        out.push({ type: 'line', points: [at(n, g('x1'), g('y1')), at(n, g('x2'), g('y2'))], dashed });
+      } else if (tag === 'path') {
+        const len = n.getTotalLength();
+        if (!(len > 0.5)) continue;
+        const steps = Math.max(1, Math.min(24, Math.round(len / 14))), pts = [];
+        for (let k = 0; k <= steps; k++) { const q = n.getPointAtLength(len * k / steps); pts.push(at(n, q.x, q.y)); }
+        const edge = n.closest('.pele-edge');
+        out.push({ type: edge && edge.querySelector('.pele-marker') ? 'arrow' : 'line', points: pts, dashed });
+      }
+    } catch (e) { /* a part that cannot be measured is left out */ }
+  }
+  return out;
+}
+
+/* Puts a sketch's elements (sketchSpec's shapes, or sketchFromSvg's) into an ExcalidrawAutomate, in their order:
+   each label inside its shape, and each piece of text, centred where it was meant to stand once Excalidraw has
+   measured it in its own (hand-written) font. */
+function addSketchElements(ea, elements) {
+  const st = ea.style || {}, size0 = st.fontSize, stroke0 = st.strokeStyle;
+  const centre = (id, cx, cy) => {
+    const el = typeof ea.getElement === 'function' ? ea.getElement(id) : null;
+    if (el && el.width > 0 && el.height > 0) { el.x = cx - el.width / 2; el.y = cy - el.height / 2; }
+  };
+  for (const e of elements || []) {
+    if (e.type === 'rect') ea.addRect(e.x, e.y, e.w, e.h);
+    else if (e.type === 'ellipse') ea.addEllipse(e.x, e.y, e.w, e.h);
+    else if (e.type === 'diamond') ea.addDiamond(e.x, e.y, e.w, e.h);
+    else if (e.type === 'line' || e.type === 'arrow') {
+      st.strokeStyle = e.dashed ? 'dashed' : stroke0;
+      if (e.type === 'arrow') ea.addArrow(e.points); else ea.addLine(e.points);
+      st.strokeStyle = stroke0;
+    } else if (e.type === 'text') {
+      if (e.size) st.fontSize = Math.max(10, Math.min(36, e.size));
+      const id = ea.addText(e.x, e.y, e.text);
+      if (e.w > 0 && e.h > 0) centre(id, e.x + e.w / 2, e.y + e.h / 2);
+      st.fontSize = size0;
+    }
+    if (e.text && e.type !== 'text') {
+      const id = ea.addText(e.x + 4, e.y + 4, e.text);
+      centre(id, e.x + e.w / 2, e.y + e.h / 2);
+    }
+  }
+}
+
+/* A diagram that draws itself in ink where it stands, without the pen (the chat, when a reply brings a Mermaid
+   diagram or a TikZ figure): its parts in drawOrder, each line along its length and each label uncovered from left
+   to right, in about a second and a half in all. Nothing moves with reduced motion, nor for a diagram of very many
+   parts; the diagram is whole again if it leaves the page meanwhile. Resolves when it is done. */
+async function inkDraw(svg) {
+  const win = (svg && svg.ownerDocument && svg.ownerDocument.defaultView) || window;
+  if (!svg || !svg.isConnected || svg.hasAttribute('data-lagrange-inked') || prefersReducedMotion(win)) return;
+  svg.setAttribute('data-lagrange-inked', '');
+  const parts = diagramParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
+  if (!parts.length || parts.length > 300) return;
+  const order = drawOrder(svg, parts);
+  const keys = ['opacity', 'fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset', 'clipPath'];
+  const whole = () => { for (const n of parts) for (const p of keys) n.style[p] = ''; svg.removeAttribute('data-lagrange-drawing'); };
+  for (const n of parts) n.style.opacity = '0';
+  svg.setAttribute('data-lagrange-drawing', '');
+  const each = Math.max(30, Math.min(220, 1500 / parts.length));
+  const tween = (ms, fn) => new Promise(resolve => {
+    const t0 = win.performance.now();
+    const step = now => {
+      if (!svg.isConnected) { resolve(false); return; }
+      const t = Math.min(1, (now - t0) / ms);
+      fn(t);
+      if (t < 1) win.requestAnimationFrame(step); else resolve(true);
+    };
+    win.requestAnimationFrame(step);
+  });
+  try {
+    for (const i of order) {
+      const n = parts[i];
+      if (/^(text|foreignObject|image)$/i.test(n.tagName)) {
+        n.style.clipPath = 'inset(-20% 100% -20% -10%)';
+        n.style.opacity = '';
+        if (!await tween(each, t => { n.style.clipPath = `inset(-20% ${((1 - t) * 100).toFixed(1)}% -20% -10%)`; })) break;
+        n.style.clipPath = '';
+        continue;
+      }
+      let len = 0;
+      try { len = n.getTotalLength ? n.getTotalLength() : 0; } catch (e) { len = 0; }
+      if (!len) { n.style.opacity = ''; continue; }
+      const cs = win.getComputedStyle(n), bare = cs.stroke === 'none' || parseFloat(cs.strokeWidth) === 0;
+      n.style.fillOpacity = '0';
+      if (bare) { n.style.stroke = cs.fill && cs.fill !== 'none' ? cs.fill : 'currentColor'; n.style.strokeWidth = '0.6'; }
+      n.style.strokeDasharray = `${len} ${len}`;
+      n.style.strokeDashoffset = String(len);
+      n.style.opacity = '';
+      if (!await tween(Math.max(each * 0.6, Math.min(each * 1.8, len * 2.2)), t => { n.style.strokeDashoffset = (len * (1 - t)).toFixed(2); })) break;
+      for (const p of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) n.style[p] = '';
+    }
+  } finally {
+    whole();
+  }
+}
+
 /* Screen rectangles, in viewport coordinates (as getBoundingClientRect gives), covering the document range [from, to]
    of a CodeMirror 6 EditorView: one per visual line, in reading order, each {left, top, right, bottom, width, height}.
    Measured from the DOM CodeMirror has drawn, with view.coordsAtPos as the fallback, so a pen can fly to the text.
@@ -4994,11 +5290,13 @@ function createPen(app, settings) {
      unseen from the moment they come (the styles: .lagrange-pen-figures, until an svg is marked data-lagrange-seen),
      so a figure never pops in ahead of the pen. TikZJax compiles a figure before it shows it, which takes a moment,
      and longer the first time in a session: the pen waits for as many figures as the edit holds, for at most `wait` ms. */
-  const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg';
+  const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg, .mermaid > svg';
   // (TikZJax's spinner is an <svg> in the block too: it is not a figure, and is never drawn by the pen)
   const figureList = view => Array.from(view.contentDOM.querySelectorAll(FIGURES)).filter(svg => !svg.parentElement.closest('svg') && !svg.querySelector(':scope > circle > animate'));
   // the ```tikz blocks TikZJax has given up on (a broken picture), that the pen has not yet counted
-  const figureFailures = view => Array.from(view.contentDOM.querySelectorAll('.block-language-tikz:not([data-lagrange-seen])')).filter(b => tikzState(b) === 'failed');
+  // (and the ```mermaid blocks Obsidian could not read: it shows what is wrong in place of the diagram)
+  const figureFailures = view => Array.from(view.contentDOM.querySelectorAll('.block-language-tikz:not([data-lagrange-seen]), .cm-lang-mermaid:not([data-lagrange-seen])'))
+    .filter(b => (b.classList.contains('cm-lang-mermaid') ? mermaidState(b) : tikzState(b)) === 'failed');
   const awaitFigures = async (L, view, want, wait) => {
     const until = L.win.performance.now() + wait;
     for (;;) {
@@ -5012,8 +5310,9 @@ function createPen(app, settings) {
     }
   };
   const FIGURE_STYLES = ['opacity', 'fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset', 'clipPath'];
-  const figureParts = svg => Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text, foreignObject, image'))
-    .filter(n => !n.closest('defs, mask, clipPath, marker, metadata, pattern, symbol') && !(n.tagName.toLowerCase() !== 'text' && n.closest('text')));
+  const figureParts = diagramParts;
+  // (what is drawn: the parts that take some room on the screen)
+  const visibleParts = svg => figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
   const restoreFigure = svg => {
     svg.setAttribute('data-lagrange-seen', '');
     svg.removeAttribute('data-lagrange-drawing');
@@ -5028,8 +5327,8 @@ function createPen(app, settings) {
      -> how many parts are drawn, or -1 when the whole figure is. */
   const drawFigure = async (L, svg, k, from) => {
     const win = L.win;
-    const parts = figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
-    const order = figureOrder(parts.map(n => ({ text: /^(text|foreignObject|image)$/i.test(n.tagName) })));
+    const parts = visibleParts(svg);
+    const order = drawOrder(svg, parts);
     const at = n => { const r = rel(L, n.getBoundingClientRect()); return { x: r.left, y: r.top + r.height * 0.6 }; };
     if (!parts.length || parts.length > 220) {
       svg.style.clipPath = 'inset(0 100% 0 0)';
@@ -5409,8 +5708,8 @@ function createPen(app, settings) {
           const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
           // Diagrams in the text (Live Preview draws them): those already in the note are marked as seen, and the
           // ones this edit brings stay unseen until the pen draws them.
-          const figs = live ? figureKinds(text) : { tikz: 0, sketch: 0 };
-          const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch;
+          const figs = live ? figureKinds(text) : { tikz: 0, sketch: 0, mermaid: 0 };
+          const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch + figs.mermaid;
           if (wantFigures) {
             for (const svg of figureList(view)) svg.setAttribute('data-lagrange-seen', '');
             for (const b of figureFailures(view)) b.setAttribute('data-lagrange-seen', '');
@@ -5773,6 +6072,64 @@ function createPen(app, settings) {
     /* Ends every edit being written, at once and before it returns: their changes are made in the note if they had
        not been yet, the handwriting, the ink and the pens go, and the marks on the note come off. Returns whether
        there was an edit to end. (The promises edit() gave resolve a moment later.) */
+    /* The diagrams the note shows in an editor (Live Preview): each one's <svg>, in the order of the note. */
+    figures(view) {
+      return figureList(view);
+    },
+    /* Draws diagrams the note already shows, where they stand (the command "Draw the diagram again", and a drawing
+       Lagrange has added to): the pen comes in, draws each one as it draws a new figure (drawFigure), from part
+       opts.from on (the parts before it stay as they are), and goes. A click or a key in the note, or finish(),
+       shows them whole at once; with reduced motion nothing moves and they stay as they are. Resolves when done. */
+    async redraw(view, svgs, opts) {
+      if (destroyed) throw new Error('The pen was put away.');
+      const o = opts || {};
+      const doc = view.dom.ownerDocument, win = doc.defaultView || window;
+      const list = (svgs || []).filter(svg => svg && svg.isConnected);
+      if (!list.length || prefersReducedMotion(win)) return;
+      const speed = Number(settings && settings.penSpeed) > 0 ? Number(settings.penSpeed) : 1, k = 1 / speed;
+      const busy = new Set(Array.from(current).filter(c => c.view === view).map(c => c.slot));
+      const slot = SLOTS.find(i => !busy.has(i));
+      if (slot === undefined) return;
+      install(view);
+      const S = layerFor(view);
+      S.fit();
+      const L = penOn(S, slot);
+      const ctx = context();
+      L.ctx = ctx;
+      const from = Math.max(0, Math.round(Number(o.from) || 0));
+      // every figure is unseen from the start (each from its own first new part), so none shows ahead of the pen
+      for (const svg of list) {
+        const parts = visibleParts(svg);
+        if (parts.length && parts.length <= 220) drawOrder(svg, parts).forEach((i, at) => { if (at >= from) parts[i].style.opacity = '0'; });
+        svg.setAttribute('data-lagrange-drawing', '');
+      }
+      const showAll = () => { for (const svg of list) restoreFigure(svg); };
+      const me = { ctx, view, slot, finish() { ctx.stop(); showAll(); putAway(L); } };
+      current.add(me);
+      try {
+        win.clearTimeout(L.idle);
+        L.busy = (L.busy || 0) + 1;
+        L.lift = 0;
+        const vr = rel(L, view.scrollDOM.getBoundingClientRect());
+        const r0 = rel(L, list[0].getBoundingClientRect());
+        if (!L.pos) { const door = doorIn(L, vr, r0.top); place(L, door.x, door.y); }
+        L.pen.style.display = '';
+        for (const svg of list) {
+          if (ctx.stopped) break;
+          await drawFigure(L, svg, k, from);
+          restoreFigure(svg);
+        }
+        await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
+      } catch (e) {
+        if (e !== STOP) throw e;
+      } finally {
+        current.delete(me);
+        showAll();
+        if (L.ctx === ctx) L.ctx = null;
+        ctx.stop();
+        if (L.pos && !destroyed) park(L, view, 160);
+      }
+    },
     finish() {
       const all = Array.from(current);
       for (const me of all) { try { me.finish(); } catch (e) { console.error('Lagrange: the pen', e); } }
@@ -7397,12 +7754,25 @@ class LagrangeChatView extends ItemView {
       const opts = this.plugin.chatRenderOptions(), apart = Boolean(opts.tikz && figureKinds(md).tikz);
       const rendered = (apart ? renderApart : renderMarkdown)(this.app, chatMarkdown(md, opts), el, sourcePath || '', component);
       const done = apart ? rendered.then(figures => { this.watchFigures(figures); }) : rendered;
-      return Promise.resolve(done).then(() => { this.labelCode(el); this.scrollDown(); }, e => { console.error('Lagrange: rendering a message', e); });
+      return Promise.resolve(done).then(() => { this.labelCode(el); this.scrollDown(); this.inkDiagrams(el, md); }, e => { console.error('Lagrange: rendering a message', e); });
     } catch (e) {
       console.error('Lagrange: rendering a message', e);
       el.setText(md);
       return Promise.resolve();
     }
+  }
+
+  /* The Mermaid diagrams a reply brings draw themselves in ink as they come into the log (inkDraw), as the pen draws
+     them in the note; not in the list of edits, nor in the writer's own messages. Obsidian may draw a diagram a
+     moment after the block is set: it is looked for for a second or two. */
+  async inkDiagrams(el, md) {
+    if (!figureKinds(md).mermaid || !el.closest('.lagrange-turn--reply') || el.closest('.lagrange-edit-md')) return;
+    for (let i = 0; i < 25; i++) {
+      const boxes = Array.from(el.querySelectorAll('.mermaid'));
+      if (boxes.length && boxes.every(b => b.querySelector(':scope > svg') || String(b.textContent || '').trim())) break;
+      await sleep(80).catch(() => {});
+    }
+    for (const svg of el.querySelectorAll('.mermaid > svg:not([data-lagrange-inked])')) void inkDraw(svg);
   }
 
   /* Each code block of a rendered message is given its language's name (shown in its corner, as the editor shows
@@ -7427,6 +7797,8 @@ class LagrangeChatView extends ItemView {
         if (!f.block.isConnected) return false;
         const state = tikzState(f.block);
         if (state === 'waiting' && Date.now() <= until) return true;
+        // (a figure that has come draws itself in ink, as a Mermaid diagram does: see inkDiagrams)
+        if (state === 'drawn' && f.block.closest('.lagrange-turn--reply') && !f.block.closest('.lagrange-edit-md')) void inkDraw(f.block.querySelector('svg'));
         if (state !== 'drawn') {
           const said = f.block.querySelector('.scriptorium-tikz-error pre');     // what TeX said, where Scriptorium shows it
           const words = said ? said.textContent.trim() : '';
@@ -7592,7 +7964,7 @@ class LagrangeChatView extends ItemView {
     box.addClass('is-block');
     const cut = editPreview(text);
     const short = box.createDiv({ cls: 'lagrange-edit-short' });
-    if (figureKinds(cut.head).tikz || figureKinds(cut.head).sketch || /^\s*(?:`{3,}|~{3,})\s*mermaid\b/m.test(cut.head)) short.addClass('has-figure');
+    if ((f => f.tikz || f.sketch || f.mermaid)(figureKinds(cut.head))) short.addClass('has-figure');
     else if (!mdBlocks(cut.head).some(b => b.kind !== 'text')) short.addClass('is-prose');     // (prose alone is clipped sooner than code or a formula)
     this.renderChat(cut.head, short, sourcePath, this);
     const more = box.createEl('button', { cls: 'lagrange-edit-more', attr: { type: 'button', 'aria-expanded': 'false' } });
@@ -8782,6 +9154,26 @@ class LagrangePlugin extends Plugin {
       },
     });
     this.addCommand({
+      id: 'redraw-diagram',
+      name: 'Draw the diagram again (Mermaid, TikZ or Excalidraw)',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) void this.redrawDiagram(view);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'mermaid-to-sketch',
+      name: 'Turn this Mermaid diagram into an Excalidraw drawing',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) void this.mermaidToSketch(view);
+        return true;
+      },
+    });
+    this.addCommand({
       id: 'draw-dropcap',
       name: 'Draw a drop cap (or change one)',
       checkCallback: checking => {
@@ -9127,20 +9519,7 @@ class LagrangePlugin extends Plugin {
       if (!o.sketch) { out.push(o); continue; }
       if (!have.sketch) { noSketch++; continue; }
       try {
-        const ea = window.ExcalidrawAutomate, folder = view.file.parent && view.file.parent.path !== '/' ? view.file.parent.path : '';
-        let name = o.sketch.name;
-        for (let n = 2; this.app.vault.getAbstractFileByPath(`${folder ? folder + '/' : ''}${name}.excalidraw.md`); n++) name = `${o.sketch.name} ${n}`;
-        ea.reset();
-        for (const e of o.sketch.elements) {
-          if (e.type === 'rect') ea.addRect(e.x, e.y, e.w, e.h);
-          else if (e.type === 'ellipse') ea.addEllipse(e.x, e.y, e.w, e.h);
-          else if (e.type === 'diamond') ea.addDiamond(e.x, e.y, e.w, e.h);
-          else if (e.type === 'line') ea.addLine(e.points);
-          else if (e.type === 'arrow') ea.addArrow(e.points);
-          else if (e.type === 'text') ea.addText(e.x, e.y, e.text);
-          if (e.text && e.type !== 'text') ea.addText(e.x + e.w / 2 - Math.min(e.w / 2 - 4, e.text.length * 5), e.y + e.h / 2 - 12, e.text);
-        }
-        await ea.create({ filename: name, foldername: folder, onNewPane: false, silent: true });
+        const { name } = await this.makeSketch(view, o.sketch);
         const embed = `![[${name}.excalidraw]]`;
         out.push(Object.assign({}, o, { text: o.op === 'append' ? embed : o.after ? `\n\n${embed}` : `${embed}\n\n`, sketch: undefined, reason: o.reason || `a drawing, “${name}”` }));
         reply.note(`Lagrange made the drawing “${name}” (an Excalidraw file next to the note). Undo takes it out of the note; the file stays in the vault.`, 'is-quiet');
@@ -9152,6 +9531,119 @@ class LagrangePlugin extends Plugin {
     if (noTikz) reply.note(`${noTikz === 1 ? 'A figure' : `${noTikz} figures`} in TikZ ${noTikz === 1 ? 'was' : 'were'} left out: the TikZJax plugin is not installed or not turned on in this vault, so ${noTikz === 1 ? 'it' : 'they'} would show as code. Turn it on in Settings → Community plugins (search for “TikZJax”), then ask again.`, 'is-warn');
     if (noSketch) reply.note(`${noSketch === 1 ? 'A drawing was' : `${noSketch} drawings were`} left out: the Excalidraw plugin is not installed or not turned on in this vault. Turn it on in Settings → Community plugins (search for “Excalidraw”), then ask again.`, 'is-warn');
     return out;
+  }
+
+  /* Makes an Excalidraw drawing for a note from a sketch (sketchSpec: its elements, or a Mermaid diagram, which is
+     drawn by hand: mermaidSketch), beside the note (Excalidraw's own folder for a note at the top of the vault), under
+     a name that no other file answers to. -> {name, path}. Throws a LagrangeError in plain words. */
+  async makeSketch(view, sketch) {
+    const ea = window.ExcalidrawAutomate;
+    if (!ea || typeof ea.create !== 'function') throw new LagrangeError('the Excalidraw plugin is not turned on in this vault.', { kind: 'setup' });
+    const elements = sketch.elements && sketch.elements.length ? sketch.elements : sketch.mermaid ? await this.mermaidSketch(sketch.mermaid, view.file.path) : [];
+    if (!elements.length) throw new LagrangeError('the drawing had nothing in it.');
+    const folder = view.file.parent && view.file.parent.path !== '/' ? view.file.parent.path : '';
+    const taken = n => Boolean(this.app.metadataCache.getFirstLinkpathDest(`${n}.excalidraw`, view.file.path) || this.app.vault.getAbstractFileByPath(`${folder ? folder + '/' : ''}${n}.excalidraw.md`));
+    let name = sketch.name || 'Drawing';
+    for (let n = 2; taken(name); n++) name = `${sketch.name || 'Drawing'} ${n}`;
+    ea.reset();
+    addSketchElements(ea, elements);
+    const path = await ea.create({ filename: name, foldername: folder, onNewPane: false, silent: true });
+    return { name, path };
+  }
+
+  /* A Mermaid diagram as the elements of a hand-drawn sketch: Obsidian draws it out of sight (in a box of its own,
+     never shown), and its parts are read off as Excalidraw shapes (sketchFromSvg). Excalidraw's own Mermaid import
+     is not used: in Obsidian 1.15 it waits for ever. -> [elements]. Throws a LagrangeError with Obsidian's words when
+     the diagram cannot be read. */
+  async mermaidSketch(source, sourcePath) {
+    const host = document.body.createDiv({ cls: 'lagrange-offstage' });
+    host.setAttribute('aria-hidden', 'true');
+    const comp = new Component();
+    comp.load();
+    try {
+      await renderMarkdown(this.app, '```mermaid\n' + String(source || '').trim() + '\n```', host, sourcePath || '', comp);
+      let svg = null;
+      for (let i = 0; i < 50 && !svg; i++) {
+        svg = host.querySelector('.mermaid > svg');
+        if (svg) break;
+        const box = host.querySelector('.mermaid'), said = box ? String(box.textContent || '').trim() : '';
+        if (said) throw new LagrangeError(`Obsidian could not read the Mermaid diagram (${said.split('\n')[0].slice(0, 160)}).`);
+        await sleep(80);
+      }
+      if (!svg) throw new LagrangeError('Obsidian did not draw the Mermaid diagram.');
+      const elements = sketchFromSvg(svg).slice(0, 400);
+      if (!elements.length) throw new LagrangeError('the Mermaid diagram had nothing in it that could be drawn.');
+      return elements;
+    } finally {
+      comp.unload();
+      host.remove();
+    }
+  }
+
+  /* The command "Turn this Mermaid diagram into an Excalidraw drawing": the Mermaid block the cursor is in (or the
+     nearest) becomes a hand-drawn Excalidraw drawing beside the note, which the writer can then move about and add
+     to; the pen puts the drawing's embed where the block was, and draws it. One Undo brings the block back (the
+     drawing stays in the vault). */
+  async mermaidToSketch(view) {
+    if (!this.diagramPlugins().sketch) { new Notice('Turn the Excalidraw plugin on first (Settings → Community plugins → Excalidraw), then run this again.', 8000); return; }
+    if (this.editing) { new Notice('Lagrange is already editing; try again when the pen has finished.'); return; }
+    await this.ensureEditing(view);
+    const cm = view.editor && view.editor.cm;
+    if (!cm || !view.file) return;
+    const text = cm.state.doc.toString(), cursor = cm.state.selection.main.head;
+    const blocks = mermaidBlocks(text);
+    if (!blocks.length) { new Notice('This note has no Mermaid diagram (a code block fenced with ```mermaid).'); return; }
+    const dist = b => (cursor < b.from ? b.from - cursor : cursor > b.to ? cursor - b.to : 0);
+    const block = blocks.slice().sort((a, b) => dist(a) - dist(b))[0];
+    this.editing = true;
+    try {
+      const made = await this.makeSketch(view, { name: `${view.file.basename} diagram`, elements: [], mermaid: block.source });
+      const now = cm.state.doc.toString();
+      if (now.slice(block.from, block.to) !== text.slice(block.from, block.to)) { new Notice(`The drawing “${made.name}” was made, but the diagram changed meanwhile, so the note was left as it is.`, 8000); return; }
+      await this.applyEdits(view, [{ from: block.from, to: block.to, matched: text.slice(block.from, block.to), replace: `![[${made.name}.excalidraw]]`, reason: 'the Mermaid diagram as a drawing' }], [], null, null);
+      new Notice(`The Mermaid diagram is now the Excalidraw drawing “${made.name}”. Undo brings the diagram back; the drawing stays in the vault.`, 8000);
+    } catch (e) {
+      console.error('Lagrange: the diagram could not be turned into a drawing', e);
+      new Notice(`The diagram could not be turned into a drawing: ${String((e && e.message) || e).slice(0, 200)}`, 10000);
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /* The command "Draw the diagram again": the pen draws a diagram the note shows in Live Preview (a Mermaid or TikZ
+     block, or an Excalidraw drawing), the one nearest the cursor among those in view, as it draws a new one. A click
+     or a key shows it whole at once. */
+  async redrawDiagram(view) {
+    const cm = view.editor && view.editor.cm;
+    if (!cm || view.getMode() !== 'source' || !cm.dom.closest('.is-live-preview')) {
+      new Notice('The pen draws diagrams in Live Preview: switch the note to Live Preview (not Reading view or Source mode), then run this again.', 8000);
+      return;
+    }
+    if (this.editing) { new Notice('Lagrange is already editing; try again when the pen has finished.'); return; }
+    const svgs = this.pen.figures(cm);
+    if (!svgs.length) { new Notice('There is no diagram in view for the pen to draw (a Mermaid or TikZ block, or an Excalidraw drawing).', 8000); return; }
+    const s = cm.scrollDOM.getBoundingClientRect(), head = cm.state.selection.main.head;
+    const inView = svg => { const r = svg.getBoundingClientRect(); return r.bottom > s.top + 8 && r.top < s.bottom - 8; };
+    const pos = svg => { try { return cm.posAtDOM(svg); } catch (e) { return 0; } };
+    // the nearest to the cursor on the screen (above or below its line), among those in view; else in the text
+    const caret = cm.coordsAtPos(head), y = caret ? (caret.top + caret.bottom) / 2 : null;
+    const away = svg => { const r = svg.getBoundingClientRect(); return y === null ? Math.abs(pos(svg) - head) : y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0; };
+    const pool = svgs.filter(inView).length ? svgs.filter(inView) : svgs;
+    const svg = pool.slice().sort((a, b) => (pool === svgs ? Math.abs(pos(a) - head) - Math.abs(pos(b) - head) : away(a) - away(b)))[0];
+    if (!inView(svg)) {
+      cm.dispatch({ effects: EditorView.scrollIntoView(pos(svg), { y: 'center' }) });
+      for (let i = 0; i < 12; i++) await nextFrame();
+    }
+    const doc = cm.dom.ownerDocument;
+    const stop = ev => { if (ev.type === 'keydown' ? ev.key === 'Escape' || cm.dom.contains(ev.target) : cm.dom.contains(ev.target)) this.pen.finish(); };
+    for (const t of ['keydown', 'pointerdown']) doc.addEventListener(t, stop, true);
+    try {
+      await this.pen.redraw(cm, [svg]);
+    } catch (e) {
+      console.error('Lagrange: the pen could not draw the diagram', e);
+    } finally {
+      for (const t of ['keydown', 'pointerdown']) doc.removeEventListener(t, stop, true);
+    }
   }
 
   async applyChatEdits(view, note, parsed, reply, signal) {
@@ -9179,8 +9671,11 @@ class LagrangePlugin extends Plugin {
       if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
       const tikz = located.some(e => figureKinds(e.replace).tikz) && this.diagramPlugins().tikz;
       const failedBefore = tikz ? this.noteFigures(view).failed : 0;
+      const mermaid = located.some(e => figureKinds(e.replace).mermaid);
+      const unreadBefore = mermaid ? this.noteMermaid(view).failed : 0;
       const result = await this.applyEdits(view, located, skipped, task, signal);
       if (tikz) this.watchNoteFigures(view, reply, failedBefore);
+      if (mermaid) this.watchNoteMermaid(view, reply, unreadBefore);
       return result;
     } catch (err) {
       this.reportFailure(err, task);
@@ -9195,6 +9690,28 @@ class LagrangePlugin extends Plugin {
     const count = { waiting: 0, drawn: 0, failed: 0 };
     if (view && view.contentEl) for (const b of view.contentEl.querySelectorAll('.block-language-tikz')) count[tikzState(b)]++;
     return count;
+  }
+
+  /* How the Mermaid diagrams of an open note stand: {waiting, drawn, failed} (see mermaidState). */
+  noteMermaid(view) {
+    const count = { waiting: 0, drawn: 0, failed: 0 };
+    if (view && view.contentEl) for (const b of view.contentEl.querySelectorAll('.cm-lang-mermaid, .block-language-mermaid')) count[mermaidState(b)]++;
+    return count;
+  }
+
+  /* After an edit that wrote a Mermaid diagram into the note: if Obsidian cannot read it (it shows what is wrong in
+     its place), the chat says so too, within a few seconds. Not waited for. */
+  async watchNoteMermaid(view, reply, failedBefore) {
+    try {
+      for (let i = 0; i < 20; i++) {
+        await sleep(250);
+        if (!view.containerEl.isConnected) return;
+        if (this.noteMermaid(view).failed > failedBefore) {
+          reply.note('Obsidian could not read a Mermaid diagram Lagrange wrote in the note: it shows what is wrong in place of the diagram. Ask Lagrange to correct it, or undo the edit.', 'is-warn');
+          return;
+        }
+      }
+    } catch (e) { /* the view has gone */ }
   }
 
   /* After an edit that wrote a TikZ figure into the note: when TikZJax gives up on it, or has not drawn it after
@@ -9467,4 +9984,5 @@ Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERN
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
 Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: LagrangePlates.NAMES, codeLabel, openTail, openProse, tailInline, openDisplay, OPEN_MATH_HOLD, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
+Object.assign(LagrangePlugin.internals, { DEMO_MERMAID, diagramOrder, mermaidBlocks, mermaidState, SKETCH_MERMAID });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
