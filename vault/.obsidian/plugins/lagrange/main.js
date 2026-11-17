@@ -18,8 +18,10 @@
  *      pen's script (with its mathematics) and trail, clipping notes, error messages, demo replies. They touch
  *      neither the DOM nor Obsidian; plugins-tests/lagrange.test.js tests them under Node.
  *   3. Providers: Anthropic Messages API, OpenAI API and OpenAI-compatible chat completions, a Claude subscription
- *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline). The only requests the plugin makes
- *      are to the provider chosen in its settings, when the writer asks for something.
+ *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline); and, for voice control, a
+ *      transcription service (OpenAI's, or an OpenAI-compatible server). The only requests the plugin makes are to
+ *      the provider chosen in its settings, when the writer asks for something, and to the transcription service
+ *      chosen there, while it listens.
  *   4. The loader, a replaceable section:  mountLoader(containerEl, theme) -> { stop() }
  *   5. Pen helpers shared by any pen (rangeRects, sleep, nextFrame), then the pen, a replaceable section:
  *      createPen(app, settings) -> { edit(view, from, to, replacement, run, how), finish(), destroy(), extension, pens }
@@ -36,7 +38,10 @@
  *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits). A reply
  *      may also ask to look at the page (its look block: the plugin's lookAtPage), and the turn goes on with what
  *      was seen. Each run of edits can be undone and redone (recordEdit, undoEdit, redoEdit), and each message is a
- *      checkpoint the conversation and the note can be rewound to (rewind, restoreNote).
+ *      checkpoint the conversation and the note can be rewound to (rewind, restoreNote). Voice control (off until
+ *      turned on): a VoiceListener holds the microphone while Lagrange listens, cuts what is said into phrases and has
+ *      each transcribed; the plugin writes dictated phrases in at the cursor (dictate) or sends one to the chat
+ *      (speakToLagrange). Its pure parts are among the pure helpers ("Voice"), tested in lagrange-voice.test.js.
  */
 'use strict';
 
@@ -88,6 +93,9 @@ const LOOK_PICTURES = ['auto', 'on', 'off'];
 const PEN_MAX = 4;                    // pens that may write at once, at most (the pen's styles know as many; see penLanes)
 
 const LOADER_THEMES = ['cycle', 'clockwork', 'alchemy', 'orbit'];
+// Voice control (see "Voice" among the pure helpers): who transcribes, and how long a pause ends a phrase, in seconds.
+const VOICE_ROUTES = ['openai', 'server', 'system'];
+const VOICE_PAUSES = [0.6, 0.8, 1, 1.4, 2];
 // Reasoning effort, where the provider and model take one; '' leaves it to the provider's own default.
 const EFFORTS = ['low', 'medium', 'high'];
 const CLAUDE_CODE_MODELS = ['sonnet', 'opus', 'haiku'];   // Claude Code's aliases for the latest of each
@@ -112,6 +120,14 @@ const DEFAULT_SETTINGS = {
   agenticEdits: true,                 // a chat message may edit the open note with the pen; off: the chat only talks
   lookAtPage: true,                   // Lagrange may look at the note as rendered; off: the page is never rendered or captured
   lookPictures: 'auto',               // 'auto' (pictures where the model takes them) | 'on' | 'off' (a description only)
+  voice: false,                       // voice control (dictation, speaking to Lagrange); off: the microphone is never opened
+  voiceRoute: 'openai',               // who transcribes: 'openai' (OpenAI's API, with the OpenAI API key above) | 'server' (an
+                                      // OpenAI-compatible transcription server, local or hosted) | 'system' (phones and tablets only)
+  voiceModel: '',                     // '' = gpt-4o-mini-transcribe (OpenAI) or whisper-1 (a server)
+  voiceServerUrl: 'http://127.0.0.1:8080/v1',
+  voiceServerKey: '',
+  voiceLanguage: '',                  // '' = the service detects it; else an ISO 639-1 code such as 'en' or 'fr'
+  voicePause: 1,                      // seconds of silence that end a phrase (VOICE_PAUSES)
   loaderTheme: 'cycle',               // 'cycle' (each plate in turn, the first by chance) | 'clockwork' | 'alchemy' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
@@ -142,6 +158,9 @@ function sanitizeSettings(saved) {
   if (!EFFORTS.includes(s.effort)) s.effort = '';
   if (!LOOK_PICTURES.includes(s.lookPictures)) s.lookPictures = DEFAULT_SETTINGS.lookPictures;
   if (!['off', 'dictionary', 'model'].includes(s.autocorrect)) s.autocorrect = DEFAULT_SETTINGS.autocorrect;
+  if (!VOICE_ROUTES.includes(s.voiceRoute)) s.voiceRoute = DEFAULT_SETTINGS.voiceRoute;
+  if (!VOICE_PAUSES.includes(s.voicePause)) s.voicePause = DEFAULT_SETTINGS.voicePause;
+  s.voiceLanguage = voiceLanguage(s.voiceLanguage);
   return s;
 }
 
@@ -2436,6 +2455,315 @@ function demoLookReply(look) {
 }
 
 
+/* ---- Voice ----
+   Voice control, off until the writer turns it on (Settings → Lagrange → Voice). While Lagrange listens, the sound of
+   the microphone is cut into phrases where the speaker pauses (createVad); each phrase is resampled to 16 kHz mono
+   (resample), written as a WAV file in memory (encodeWav) and sent as a form (multipartBody, transcriptionRequest) to
+   the transcription service the writer chose: OpenAI's, or a server of their own that speaks OpenAI's
+   /audio/transcriptions (a local Whisper, for one). What comes back is read for the few commands that may be said aloud
+   (voiceParse) and joined to the note at the cursor (dictationPoint, dictationJoin), or sent to the chat. The Claude API
+   takes no sound, and neither subscription offers transcription to a plugin; Obsidian on a computer has no working
+   built-in recognition (Electron has the browser's SpeechRecognition but not Google's service behind it: it fails with
+   "network"). Pure; plugins-tests/lagrange-voice.test.js tests them. */
+
+const VOICE_RATE = 16000;                       // what every transcription service takes
+const VOICE_MAX_SECONDS = 30;                   // a phrase longer than this is sent in parts
+const VOICE_DEFAULT_MODEL = { openai: 'gpt-4o-mini-transcribe', server: 'whisper-1' };
+const VOICE_FALLBACK_MODEL = 'whisper-1';       // OpenAI's older model, for an account that has not the default
+const OPENAI_AUDIO_URL = 'https://api.openai.com/v1';
+
+/* A language code for the service: '' (the service detects it) or an ISO 639-1 code like 'en' ('en-US' -> 'en'). */
+function voiceLanguage(value) {
+  const m = /^\s*([a-z]{2,3})(?:[-_][a-z0-9]+)?\s*$/i.exec(String(value == null ? '' : value));
+  return m ? m[1].toLowerCase() : '';
+}
+
+/* The model asked for: the writer's, or the route's default. */
+function voiceModel(s) {
+  return String((s && s.voiceModel) || '').trim() || VOICE_DEFAULT_MODEL[s && s.voiceRoute] || VOICE_FALLBACK_MODEL;
+}
+
+/* What keeps the chosen route from working, in words, or ''. env: {desktop, system (whether the system's speech
+   recognition exists here)}. */
+function voiceProblem(s, env) {
+  const e = env || {};
+  if (s.voiceRoute === 'openai') {
+    if (!String(s.openaiPlatformKey || '').trim()) return 'Voice needs an OpenAI API key to transcribe what you say: paste one in Settings → Lagrange → Voice, or choose a transcription server there.';
+    return '';
+  }
+  if (s.voiceRoute === 'server') {
+    const url = String(s.voiceServerUrl || '').trim();
+    if (!url) return 'Give the address of the transcription server in Settings → Lagrange → Voice.';
+    if (!/^https?:\/\/[^\s/]+/i.test(url)) return `“${url}” is not a web address: the transcription server’s address starts with http:// or https://.`;
+    return '';
+  }
+  if (s.voiceRoute === 'system') {
+    if (e.desktop) return 'Obsidian on a computer has no speech recognition of its own that works (the browser it is built on comes without the service behind it). Choose OpenAI or a transcription server in Settings → Lagrange → Voice.';
+    if (!e.system) return 'This device offers Obsidian no speech recognition. Choose OpenAI or a transcription server in Settings → Lagrange → Voice.';
+    return '';
+  }
+  return 'Choose who transcribes what you say in Settings → Lagrange → Voice.';
+}
+
+/* Resamples mono sound from one rate to another: each output sample is the mean of the input it covers when the rate
+   goes down (which also keeps out most of what the lower rate cannot hold), a straight line between neighbours when
+   it goes up. -> Float32Array */
+function resample(input, from, to) {
+  const n = input ? input.length : 0;
+  if (!n || !(from > 0) || !(to > 0)) return new Float32Array(0);
+  if (from === to) return Float32Array.from(input);
+  const ratio = from / to, m = Math.max(1, Math.floor(n / ratio)), out = new Float32Array(m);
+  if (ratio > 1) {
+    for (let i = 0; i < m; i++) {
+      const a = i * ratio, b = Math.min(n, a + ratio);
+      let sum = 0, w = 0;
+      for (let j = Math.floor(a); j < b; j++) {
+        const k = Math.min(b, j + 1) - Math.max(a, j);
+        if (k > 0) { sum += input[j] * k; w += k; }
+      }
+      out[i] = w ? sum / w : 0;
+    }
+  } else {
+    for (let i = 0; i < m; i++) {
+      const x = i * ratio, j = Math.floor(x), f = x - j;
+      out[i] = input[j] * (1 - f) + (j + 1 < n ? input[j + 1] : input[j]) * f;
+    }
+  }
+  return out;
+}
+
+/* A WAV file (16-bit PCM, mono) of samples in [-1, 1] at `rate`. -> Uint8Array */
+function encodeWav(samples, rate) {
+  const n = samples ? samples.length : 0, bytes = new Uint8Array(44 + n * 2), v = new DataView(bytes.buffer);
+  const tag = (o, t) => { for (let i = 0; i < 4; i++) bytes[o + i] = t.charCodeAt(i); };
+  tag(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); tag(8, 'WAVE');
+  tag(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  tag(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const x = Math.max(-1, Math.min(1, Number(samples[i]) || 0));
+    v.setInt16(44 + i * 2, x < 0 ? Math.round(x * 32768) : Math.round(x * 32767), true);
+  }
+  return bytes;
+}
+
+/* The loudness of a block of samples (root mean square). */
+function rmsOf(block) {
+  let s = 0;
+  for (let i = 0; i < block.length; i++) s += block[i] * block[i];
+  return block.length ? Math.sqrt(s / block.length) : 0;
+}
+
+/* Tells speech from silence, block by block, for cutting what is said into phrases. Its sense of silence follows the
+   room: the noise floor is the quietest block of the last windowMs (speech has gaps between its words, so a steady hum
+   becomes the floor even while it is mistaken for speech), sinking quickly and rising slowly, and speech is what
+   stands `ratio` times above it (never less than minLevel). A phrase begins after `startFrames` loud blocks in a row (it is
+   dated from the first of them) and ends after silenceMs of quiet (a little below the threshold that began it, so
+   that it does not end on a soft syllable); one with less than minSpeechMs of speech in it is a cough or a click
+   (keep: false). A phrase longer than maxMs is cut there and goes on as a new one. push(rms, ms) takes one block's
+   loudness and length and gives null, {type: 'start', at}, or {type: 'end' | 'cut', from, to, speech, keep}, the
+   times in ms from the first block. */
+function createVad(opts) {
+  const o = Object.assign({ silenceMs: 1000, minSpeechMs: 250, maxMs: VOICE_MAX_SECONDS * 1000, startFrames: 3, floor: 0.004, minLevel: 0.006, ratio: 3, windowMs: 2500 }, opts);
+  let floor = o.floor, speaking = false, loud = 0, loudMs = 0, quiet = 0, speech = 0, from = 0, t = 0;
+  const recent = [];   // [time, level] of the last windowMs: speech has gaps between words, so its quietest block is the room
+  const threshold = () => Math.max(o.minLevel, floor * o.ratio);
+  return {
+    get speaking() { return speaking; },
+    get floor() { return floor; },
+    get threshold() { return threshold(); },
+    push(rms, ms) {
+      const level = Number(rms) || 0, dt = Number(ms) > 0 ? Number(ms) : 20;
+      t += dt;
+      const th = threshold();
+      recent.push([t, level]);
+      while (recent.length && recent[0][0] <= t - o.windowMs) recent.shift();
+      let low = Infinity;
+      for (const r of recent) if (r[1] < low) low = r[1];
+      // the floor follows the quietest block of the window: down at once to a quieter room, up slowly to a louder one
+      // (and only once the window is full, so that the first words of a phrase are not taken for the room)
+      if (low < floor) floor += (low - floor) * 0.3;
+      else if (t >= o.windowMs) floor += (low - floor) * 0.04;
+      floor = Math.min(0.05, Math.max(0.0003, floor));
+      if (!speaking) {
+        if (level > th) {
+          loud++; loudMs += dt;
+          if (loud >= o.startFrames) {
+            speaking = true; from = t - loudMs; speech = loudMs; quiet = 0; loud = 0; loudMs = 0;
+            return { type: 'start', at: from };
+          }
+          return null;
+        }
+        loud = 0; loudMs = 0;
+        return null;
+      }
+      if (level > th * 0.75) { quiet = 0; speech += dt; } else quiet += dt;
+      if (quiet >= o.silenceMs) {
+        speaking = false;
+        const ev = { type: 'end', from, to: t - quiet, speech, keep: speech >= o.minSpeechMs };
+        quiet = 0;
+        return ev;
+      }
+      if (t - from >= o.maxMs) {
+        const ev = { type: 'cut', from, to: t, speech, keep: speech >= o.minSpeechMs };
+        from = t; speech = 0; quiet = 0;
+        return ev;
+      }
+      return null;
+    },
+  };
+}
+
+/* A form (multipart/form-data) with text fields and one file {name, type, bytes}; empty fields are left out.
+   -> {body: Uint8Array, contentType} */
+function multipartBody(fields, file, boundary) {
+  const enc = t => new TextEncoder().encode(t);
+  const parts = [];
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v === undefined || v === null || v === '') continue;
+    parts.push(enc(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+  }
+  parts.push(enc(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`));
+  parts.push(file.bytes, enc(`\r\n--${boundary}--\r\n`));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return { body: out, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+/* The request that transcribes one phrase (a WAV file), for the route in the settings. -> {url, method, headers, body,
+   contentType}. The OpenAI key is the one Lagrange holds for its OpenAI API provider; it goes to api.openai.com only. */
+function transcriptionRequest(s, wav, model, boundary) {
+  const openai = s.voiceRoute === 'openai';
+  const base = openai ? OPENAI_AUDIO_URL : String(s.voiceServerUrl || '').trim().replace(/\/+$/, '');
+  const key = String((openai ? s.openaiPlatformKey : s.voiceServerKey) || '').trim();
+  const { body, contentType } = multipartBody({ model, response_format: 'json', language: voiceLanguage(s.voiceLanguage) },
+    { name: 'speech.wav', type: 'audio/wav', bytes: wav }, boundary);
+  const headers = { 'Content-Type': contentType };
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return { url: `${base}/audio/transcriptions`, method: 'POST', headers, body, contentType };
+}
+
+/* The words in a transcription service's answer: {"text": …} as OpenAI gives it, or plain text from a server asked for
+   text. Markers some servers put in for silence or music ([BLANK_AUDIO], (silence)) are taken out. */
+function transcriptText(body) {
+  const raw = String(body == null ? '' : body).trim();
+  let text = raw;
+  if (/^[{[]/.test(raw)) {
+    try {
+      const d = JSON.parse(raw);
+      text = typeof d === 'string' ? d : d && typeof d.text === 'string' ? d.text
+        : Array.isArray(d && d.segments) ? d.segments.map(x => (x && x.text) || '').join(' ') : '';
+    } catch (e) { text = raw; }
+  }
+  return String(text).replace(/\[(?:BLANK_AUDIO|blank_audio|silence|SILENCE|music|MUSIC|inaudible)\]|\((?:silence|music|inaudible|Music)\)/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/* ---- Voice commands ----
+   Said as a phrase of their own while dictating, these are done, not written (English only): "new line", "new
+   paragraph", "scratch that" (takes the last phrase dictated back out), "stop listening", and "Lagrange, …" at the
+   start of a phrase, which gives the rest of the phrase to the chat as a message. */
+const VOICE_COMMANDS = [
+  { kind: 'paragraph', re: /^(?:new paragraph|next paragraph)$/ },
+  { kind: 'newline', re: /^(?:new line|newline|next line)$/ },
+  { kind: 'scratch', re: /^(?:scratch that|strike that|delete that)$/ },
+  { kind: 'stop', re: /^(?:stop listening|stop dictation|stop dictating)$/ },
+];
+// "Lagrange," as transcription services hear it ("La Grange", "Le Grange"), with "hey" or "okay" before it at most, and
+// set off by a comma or the like (the services write the pause that way): "Lagrange points" is only words
+const VOICE_WAKE = /^\s*(?:(?:hey|okay|ok)[\s,]+)?(?:la\s*grange|le\s*grange|lagrange)\s*(?:[,.:;!?—–-]+\s*|$)/i;
+
+function voiceKey(text) {
+  return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/* What a dictated phrase asks for, in order: [{kind: 'text', text} | {kind: 'paragraph' | 'newline' | 'scratch' |
+   'stop'} | {kind: 'ask', text}]. A command is a sentence of its own in the phrase (the services end it with a full
+   stop, or it is the whole phrase); "Lagrange, …" counts only at the start of a phrase, and the rest of the phrase is
+   the message. */
+function voiceParse(text) {
+  const t = transcriptText(text);
+  if (!t) return [];
+  const wake = VOICE_WAKE.exec(t);
+  let said = t;
+  if (wake) {
+    const rest = t.slice(wake[0].length).trim();
+    if (!rest) return [];
+    if (!VOICE_COMMANDS.some(c => c.re.test(voiceKey(rest)))) return [{ kind: 'ask', text: rest[0].toUpperCase() + rest.slice(1) }];
+    said = rest;   // "Lagrange, stop listening"
+  }
+  const out = [];
+  for (const sentence of said.match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*)?\s*|[.!?…]+\s*/g) || [said]) {
+    const key = voiceKey(sentence);
+    if (!key) {
+      if (out.length && out[out.length - 1].kind === 'text') out[out.length - 1].text += sentence;
+      continue;
+    }
+    const cmd = VOICE_COMMANDS.find(c => c.re.test(key));
+    if (cmd) { out.push({ kind: cmd.kind }); continue; }
+    if (out.length && out[out.length - 1].kind === 'text') out[out.length - 1].text += sentence;
+    else out.push({ kind: 'text', text: sentence });
+  }
+  for (const a of out) if (a.kind === 'text') a.text = a.text.trim();
+  return out.filter(a => a.kind !== 'text' || a.text);
+}
+
+/* The message a phrase said to Lagrange makes: the phrase without a "Lagrange," before it; '' when the phrase was
+   only that, or "stop listening". */
+function voiceMessage(text) {
+  let t = transcriptText(text);
+  const wake = VOICE_WAKE.exec(t);
+  if (wake) t = t.slice(wake[0].length).trim();
+  if (!t || VOICE_COMMANDS.some(c => c.kind === 'stop' && c.re.test(voiceKey(t)))) return '';
+  return t[0].toUpperCase() + t.slice(1);
+}
+
+/* Where dictation goes when the cursor stands inside a word: after that word, never into its middle. before and
+   after: the text on either side of the cursor. -> how many characters to move forward. */
+function dictationPoint(before, after) {
+  const word = /[\p{L}\p{N}_]$/u;
+  if (!word.test(String(before || '')) || !/^[\p{L}\p{N}_]/u.test(String(after || ''))) return 0;
+  return /^[\p{L}\p{N}_'’-]*/u.exec(after)[0].replace(/['’-]+$/, '').length;
+}
+
+// Common words, never taken for names (see dictationJoin).
+const VOICE_LOWER = new Set(('a an the and but or nor so yet for of to in on at by with from into onto over under about after before ' +
+  'between through during without within as if then than that this these those there here it its it\'s is are was were be been being ' +
+  'has have had do does did will would shall should can could may might must not no yes we you he she they them their our your his her ' +
+  'my me us what which who whom whose when where why how all some any each every more most much many such also just only even still ' +
+  'very well now once again because while though although until unless since whether both either neither one two three').split(' '));
+
+/* The words of a phrase as they join the note: a space before them unless the cursor follows a space, the start of a
+   line or an opening bracket, and none before punctuation; a capital at the start of a sentence (after a full stop,
+   a question or exclamation mark, at the start of a line or of a list item, quotation or heading), and in the middle
+   of one, the capital the service gave the phrase's first word taken off, unless that word looks like a name: "I",
+   capitals inside it (NASA, iPhone), or written with a capital in the text before the cursor (and not a common word,
+   VOICE_LOWER); no full stop of theirs before punctuation that follows the cursor; a space after them when a word
+   follows.
+   before and after: the text on either side of the cursor (a line's worth is enough). -> what to insert, or ''. */
+function dictationJoin(before, text, after) {
+  let t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  const b = String(before || ''), a = String(after || '');
+  const line = b.slice(b.lastIndexOf('\n') + 1).replace(/^\s*(?:(?:[-*+]|\d+[.)])\s+(?:\[.\]\s+)?|>\s*|#{1,6}\s+)*/, '');
+  const start = !line.trim() || /[.!?…]["'”’)\]]*\s*$/.test(line);
+  const m = /^(["'“‘(]*)(\p{L})/u.exec(t);
+  if (m) {
+    const i = m[1].length, first = /^[\p{L}\p{N}'’-]+/u.exec(t.slice(i))[0];
+    const bare = first.replace(/['’].*$/, '');
+    const name = bare === 'I' || !/^\p{Lu}[\p{Ll}'’-]*$/u.test(first)
+      || (!VOICE_LOWER.has(bare.toLowerCase()) && new RegExp(`(^|[^\\p{L}])${bare}(?![\\p{L}])`, 'u').test(b));
+    if (start) t = t.slice(0, i) + t[i].toUpperCase() + t.slice(i + 1);
+    else if (!name) t = t.slice(0, i) + t[i].toLowerCase() + t.slice(i + 1);
+  }
+  if (/^[.!?…,;:]/.test(a)) t = t.replace(/[.!?…]+$/, '');   // the text after the cursor has its own punctuation
+  if (!t) return '';
+  const lead = b && !/[\s([{“‘"'/—–-]$/.test(b) && !/^[,.;:!?…)\]}”’]/.test(t) ? ' ' : '';
+  const tail = /^[\p{L}\p{N}(“‘"'[]/u.test(a) ? ' ' : '';
+  return lead + t + tail;
+}
+
+
 /* ---------------------------------------------------------------------------------------------------------------
  * 3. Providers
  *
@@ -3239,6 +3567,51 @@ function drawDropcap(settings, req, hooks, session) {
   return drawSvg(settings, req, hooks, session);
 }
 
+
+/* ---- Transcription (voice; see "Voice" among the pure helpers) ----
+   transcribe(settings, wav, hooks) -> the words of one phrase. hooks: {request(req) -> {status, text} (Obsidian's
+   requestUrl in the plugin, which a local server's CORS does not stop; a fake in the tests), env (for voiceProblem),
+   boundary, session ({voiceModel: the model that worked}), retryDelays, timeout (ms a request may take: 60 s)}. An OpenAI account without the default model
+   gets the older whisper-1, once and then for the session. Errors come as LagrangeErrors in plain words. */
+async function transcribe(s, wav, hooks) {
+  const h = hooks || {};
+  const problem = voiceProblem(s, h.env);
+  if (problem) throw new LagrangeError(problem, { kind: 'setup' });
+  const session = h.session || {};
+  const own = String(s.voiceModel || '').trim();
+  let model = !own && s.voiceRoute === 'openai' && session.voiceModel ? session.voiceModel : voiceModel(s);
+  const delays = h.retryDelays || [1200];
+  for (let attempt = 0, retries = 0; ; attempt++) {
+    const req = transcriptionRequest(s, wav, model, h.boundary || `----lagrange${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`);
+    let res, timer = null;
+    try {
+      res = await Promise.race([h.request(req), new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('timed out'), { timedOut: true })), h.timeout || 60000);
+      })]);
+    } catch (e) {
+      if (e && e.timedOut) throw new LagrangeError(`The transcription service did not answer within ${Math.round((h.timeout || 60000) / 1000)} seconds, so that phrase was dropped.`, { kind: 'network' });
+      let host = req.url;
+      try { host = new URL(req.url).host; } catch (x) { /* keep the address */ }
+      throw new LagrangeError(s.voiceRoute === 'openai' ? 'Could not reach api.openai.com to transcribe what you said. Check your internet connection.'
+        : `Could not reach the transcription server at ${host}. Is it running, at the address in Settings → Lagrange → Voice?`, { kind: 'network', cause: e });
+    } finally {
+      clearTimeout(timer);
+    }
+    const status = Number(res && res.status) || 0;
+    if (status >= 200 && status < 300) {
+      if (s.voiceRoute === 'openai' && !own) session.voiceModel = model;
+      return transcriptText(res.text);
+    }
+    const info = parseErrorBody(res && res.text);
+    if (s.voiceRoute === 'openai' && !own && model !== VOICE_FALLBACK_MODEL && (status === 404 || ((status === 400 || status === 403) && /model/i.test(info.message || '')))) {
+      model = VOICE_FALLBACK_MODEL;
+      continue;
+    }
+    if (RETRY_STATUSES.has(status) && retries < delays.length) { await sleep(delays[retries++]); continue; }
+    throw new LagrangeError(`The transcription failed. ${describeError({ provider: 'openai', status, type: info.type, message: info.message, model })}`
+      .replace('Settings → Lagrange.', 'Settings → Lagrange → Voice.'), { kind: 'http', status });
+  }
+}
 
 /* ---- Prompts ---- */
 
@@ -7558,6 +7931,262 @@ function attachmentEnv(win) {
 let pickerUid = 0;   // radio groups need a name of their own in each picker drawn
 let attachUid = 0;
 
+/* ---- Voice: listening, dictation, and speaking to Lagrange ----
+   A VoiceListener holds the microphone while Lagrange listens, and only then: mode 'dictate' (phrases go into the
+   note at the cursor until the writer stops), 'talk' (one phrase becomes a message in the chat, then the microphone
+   is closed) or 'test' (a few seconds, for the settings' "Test the microphone"). The sound is read by an AudioWorklet
+   (a ScriptProcessor where there is none), cut into phrases by createVad, and each phrase is transcribed in turn
+   while listening goes on; nothing is written to disk. The phrase being said when the writer stops is still
+   transcribed (Esc in 'talk' mode drops it). On a phone or tablet the system's own recognition may be chosen instead
+   (route 'system'), where the system offers it; Obsidian on a computer does not. */
+
+const VOICE_WORKLET = `class LagrangeTap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(1024); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) { this.buf[this.n++] = ch[i]; if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; } }
+    return true;
+  }
+}
+registerProcessor('lagrange-tap', LagrangeTap);`;
+const VOICE_PREROLL = 0.3, VOICE_TAIL = 0.2;   // seconds kept before a phrase begins and after it ends
+
+/* What a failure to open the microphone means, in words (the DOMException's name decides). */
+function micProblem(e, platform) {
+  const name = e && e.name;
+  if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+    const where = platform === 'darwin' ? 'On a Mac: System Settings → Privacy & Security → Microphone, turn on Obsidian, then restart Obsidian.'
+      : platform === 'win32' ? 'On Windows: Settings → Privacy & security → Microphone, turn on “Microphone access” and “Let desktop apps access your microphone”.'
+        : platform === 'linux' ? 'On Linux: check that the microphone is not muted (PulseAudio or PipeWire), and, if Obsidian came as a Flatpak or a Snap, that it is allowed to use audio.'
+          : 'Allow Obsidian to use the microphone in the system’s settings (privacy, microphone).';
+    return `Obsidian is not allowed to use the microphone. ${where}`;
+  }
+  if (name === 'NotFoundError' || name === 'OverconstrainedError' || name === 'DevicesNotFoundError') return 'No microphone was found. Connect one, or choose it as the system’s sound input, and try again.';
+  if (name === 'NotReadableError' || name === 'TrackStartError' || name === 'AbortError') return 'The microphone could not be opened: another program may be using it. Close that program and try again.';
+  return `The microphone could not be opened${e && e.message ? ` (${e.message})` : ''}.`;
+}
+
+class VoiceListener {
+  /* o: {mode, settings, desktop, platform, transcribe(wav) -> text, onState(listener), onText(text, listener),
+     onError(message, listener), onEnd(listener), maxMs (test mode)} */
+  constructor(o) {
+    this.o = o;
+    this.mode = o.mode;
+    this.state = 'starting';     // 'starting' | 'listening' | 'hearing' (a phrase is being said) | 'stopping' | 'off'
+    this.level = 0;              // 0..1, for the meter
+    this.busy = 0;               // phrases being transcribed
+    this.heard = 0;              // phrases sent to be transcribed
+    this.peak = 0;
+    this.blocks = []; this.offset = 0; this.total = 0;   // the sound kept: blocks from sample `offset`, `total` read in all
+    this.jobs = Promise.resolve();
+    this.closed = false;
+  }
+
+  async start() {
+    const md = typeof navigator !== 'undefined' && navigator.mediaDevices;
+    if (!md || typeof md.getUserMedia !== 'function') throw new LagrangeError('This device gives Obsidian no microphone.', { kind: 'mic' });
+    try {
+      this.stream = await md.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) {
+      throw new LagrangeError(micProblem(e, this.o.platform), { kind: 'mic', cause: e });
+    }
+    if (this.closed) { this.release(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    if (this.ctx.state === 'suspended') { try { await this.ctx.resume(); } catch (e) { /* it starts with the stream */ } }
+    this.rate = this.ctx.sampleRate;
+    const pause = Math.round((Number(this.o.settings.voicePause) || 1) * 1000);
+    this.vad = createVad({ silenceMs: this.mode === 'talk' ? Math.min(pause, 1400) : pause });
+    this.source = this.ctx.createMediaStreamSource(this.stream);
+    this.mute = this.ctx.createGain();
+    this.mute.gain.value = 0;
+    this.mute.connect(this.ctx.destination);
+    let tap = null;
+    try {
+      const url = URL.createObjectURL(new Blob([VOICE_WORKLET], { type: 'application/javascript' }));
+      try { await this.ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      tap = new AudioWorkletNode(this.ctx, 'lagrange-tap');
+      tap.port.onmessage = ev => this.take(ev.data);
+    } catch (e) {
+      tap = this.ctx.createScriptProcessor(2048, 1, 1);
+      tap.onaudioprocess = ev => this.take(ev.inputBuffer.getChannelData(0).slice(0));
+    }
+    this.tap = tap;
+    if (this.closed) { this.release(); return; }   // stopped while the microphone was being opened
+    this.source.connect(tap);
+    tap.connect(this.mute);
+    this.state = 'listening';
+    this.began = Date.now();
+    this.notify();
+  }
+
+  notify() { try { this.o.onState(this); } catch (e) { console.error('Lagrange: voice', e); } }
+
+  /* One block of sound from the microphone. */
+  take(block) {
+    if (this.closed || !block || !block.length) return;
+    this.blocks.push(block);
+    this.total += block.length;
+    const rms = rmsOf(block);
+    this.level = Math.min(1, Math.sqrt(rms) * 2.2);
+    this.peak = Math.max(this.peak, rms);
+    const ev = this.vad.push(rms, block.length / this.rate * 1000);
+    if (ev && ev.type === 'start') { this.state = 'hearing'; this.phraseAt = ev.at; }
+    else if (ev && (ev.type === 'end' || ev.type === 'cut')) {
+      if (ev.type === 'end') this.state = 'listening';
+      else this.phraseAt = ev.to;   // a long phrase cut here goes on from here
+      if (ev.keep) this.phrase(ev.from, ev.to, ev.type === 'cut');
+      if (ev.type === 'end' && (this.mode === 'talk' || this.mode === 'test') && ev.keep) { void this.stop(false); return; }
+    }
+    if (this.mode === 'test' && Date.now() - this.began > (this.o.maxMs || 6000)) { void this.stop(true); return; }
+    // keep a little before the phrase, or before now when no phrase is being said
+    const keepFrom = Math.floor(((this.vad.speaking ? this.phraseAt : this.total / this.rate * 1000) / 1000 - VOICE_PREROLL - 0.2) * this.rate);
+    while (this.blocks.length > 1 && this.offset + this.blocks[0].length < keepFrom) { this.offset += this.blocks[0].length; this.blocks.shift(); }
+    if (!this.raf) this.raf = window.requestAnimationFrame(() => { this.raf = 0; this.notify(); });
+  }
+
+  /* The sound from ms `from` to `to` (plus a little either side), sent to be transcribed after the phrases before it. */
+  phrase(from, to, cut) {
+    const a = Math.max(this.offset, Math.floor((from / 1000 - (cut ? 0 : VOICE_PREROLL)) * this.rate));
+    const b = Math.min(this.total, Math.ceil((to / 1000 + (cut ? 0 : VOICE_TAIL)) * this.rate));
+    if (b <= a) return;
+    const samples = new Float32Array(b - a);
+    let at = this.offset;
+    for (const block of this.blocks) {
+      const s = Math.max(a, at), e = Math.min(b, at + block.length);
+      if (e > s) samples.set(block.subarray(s - at, e - at), s - a);
+      at += block.length;
+      if (at >= b) break;
+    }
+    this.heard++;
+    this.busy++;
+    this.notify();
+    const wav = encodeWav(resample(samples, this.rate, VOICE_RATE), VOICE_RATE);
+    this.jobs = this.jobs.then(async () => {
+      try {
+        const text = await this.o.transcribe(wav, this);
+        if (text) await this.o.onText(text, this);
+      } catch (e) {
+        this.o.onError((e && e.message) || String(e), this, e);
+        if (e && e.kind === 'setup') void this.stop(false);
+      } finally {
+        this.busy--;
+        this.notify();
+      }
+    });
+  }
+
+  /* Stops listening. flush: the phrase being said is still transcribed (if it has enough speech in it). Resolves
+     when every phrase has been transcribed and dealt with. */
+  async stop(flush = true) {
+    if (!this.closed) {
+      this.closed = true;
+      if (flush && this.vad && this.vad.speaking && this.rate) {
+        const now = this.total / this.rate * 1000;
+        if (now - this.phraseAt >= 250) this.phrase(this.phraseAt, now, false);
+      }
+      this.release();
+      this.state = 'stopping';
+      this.notify();
+    }
+    await this.jobs;
+    if (this.state !== 'off') {
+      this.state = 'off';
+      this.notify();
+      try { this.o.onEnd(this); } catch (e) { console.error('Lagrange: voice', e); }
+    }
+  }
+
+  release() {
+    if (this.raf) { try { window.cancelAnimationFrame(this.raf); } catch (e) { /* gone */ } this.raf = 0; }
+    try { if (this.tap) { this.tap.disconnect(); if (this.tap.port) this.tap.port.onmessage = null; this.tap.onaudioprocess = null; } } catch (e) { /* already */ }
+    try { if (this.source) this.source.disconnect(); } catch (e) { /* already */ }
+    if (this.stream) for (const t of this.stream.getTracks()) { try { t.stop(); } catch (e) { /* already */ } }
+    if (this.ctx && this.ctx.state !== 'closed') { try { void this.ctx.close(); } catch (e) { /* already */ } }
+    this.stream = null;
+    this.level = 0;
+  }
+}
+
+/* The system's own speech recognition, for phones and tablets that have it (route 'system'): the same face as a
+   VoiceListener (start, stop, state, level, busy), each final result a phrase. */
+class SystemListener {
+  constructor(o) {
+    this.o = o; this.mode = o.mode; this.state = 'starting'; this.level = 0; this.busy = 0; this.heard = 0; this.peak = 0; this.closed = false;
+  }
+  async start() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) throw new LagrangeError('This device offers Obsidian no speech recognition.', { kind: 'setup' });
+    const r = new SR();
+    this.rec = r;
+    r.continuous = this.mode === 'dictate';
+    r.interimResults = false;
+    const lang = voiceLanguage(this.o.settings.voiceLanguage);
+    if (lang) r.lang = lang;
+    this.chain = Promise.resolve();
+    r.onspeechstart = () => { this.state = 'hearing'; this.level = 0.6; this.o.onState(this); };
+    r.onspeechend = () => { this.state = 'listening'; this.level = 0; this.o.onState(this); };
+    r.onresult = ev => {
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const res = ev.results[i];
+        if (!res.isFinal) continue;
+        const text = res[0] && res[0].transcript;
+        this.heard++;
+        this.chain = this.chain.then(() => this.o.onText(String(text || ''), this)).catch(e => this.o.onError(e.message || String(e), this, e));
+      }
+    };
+    r.onerror = ev => {
+      const why = ev.error === 'not-allowed' || ev.error === 'service-not-allowed' ? micProblem({ name: 'NotAllowedError' }, this.o.platform)
+        : ev.error === 'audio-capture' ? micProblem({ name: 'NotFoundError' }) : ev.error === 'network' ? 'The system’s speech recognition could not reach its service.'
+          : ev.error === 'no-speech' || ev.error === 'aborted' ? '' : `The system’s speech recognition stopped (${ev.error}).`;
+      if (why) this.o.onError(why, this);
+    };
+    r.onend = () => { if (!this.closed && this.mode === 'dictate') { try { r.start(); return; } catch (e) { /* ends below */ } } void this.stop(false); };
+    r.start();
+    this.state = 'listening';
+    this.o.onState(this);
+  }
+  async stop() {
+    if (!this.closed) { this.closed = true; try { this.rec.stop(); } catch (e) { /* already */ } }
+    await this.chain;
+    if (this.state !== 'off') { this.state = 'off'; this.o.onState(this); try { this.o.onEnd(this); } catch (e) { /* gone */ } }
+  }
+}
+
+/* In the editor: the last phrase dictated (for "scratch that"), kept on its words as the note changes and given up
+   when they are edited; and a moment of rubric ink on each phrase as it comes in. */
+let voiceCm = null;   // {setLast, ink, inkDone, last, inkField}, made on first use (CodeMirror is Obsidian's)
+function voiceEditor() {
+  if (voiceCm) return voiceCm;
+  const setLast = StateEffect.define(), ink = StateEffect.define(), inkDone = StateEffect.define();
+  const last = StateField.define({
+    create: () => null,
+    update(value, tr) {
+      for (const e of tr.effects) if (e.is(setLast)) return e.value;
+      if (!value || !tr.docChanged) return value;
+      let touched = false;
+      tr.changes.iterChangedRanges((fa, ta) => { if (fa < value.to && ta > value.from) touched = true; });
+      if (touched) return null;
+      return { from: tr.changes.mapPos(value.from, 1), to: tr.changes.mapPos(value.to, -1), text: value.text };
+    },
+  });
+  const mark = Decoration.mark({ class: 'lagrange-voice-ink' });
+  const inkField = StateField.define({
+    create: () => Decoration.none,
+    update(deco, tr) {
+      deco = deco.map(tr.changes);
+      for (const e of tr.effects) {
+        if (e.is(ink) && e.value.to > e.value.from) deco = deco.update({ add: [mark.range(e.value.from, e.value.to)] });
+        if (e.is(inkDone)) deco = Decoration.none;
+      }
+      return deco;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  voiceCm = { setLast, ink, inkDone, last, inkField, extension: [last, inkField] };
+  return voiceCm;
+}
+
 class LagrangeChatView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -7664,6 +8293,10 @@ class LagrangeChatView extends ItemView {
     const clip = left.createEl('button', { cls: 'lagrange-attach clickable-icon', attr: { type: 'button', 'aria-label': 'Attach pictures, video or files' } });
     setIcon(clip, 'paperclip');
     clip.addEventListener('click', () => pick.click());
+    // Speak to Lagrange (with voice control on): one phrase, sent as a message. Click again to send at once.
+    this.micEl = left.createEl('button', { cls: 'lagrange-mic clickable-icon', attr: { type: 'button', 'aria-label': 'Speak to Lagrange' } });
+    setIcon(this.micEl, 'mic');
+    this.micEl.addEventListener('click', () => { void this.plugin.toggleTalk(); });
     // The model and effort in use: a button that opens the picker (openPicker).
     this.modelEl = left.createEl('button', {
       cls: 'lagrange-model',
@@ -7681,7 +8314,20 @@ class LagrangeChatView extends ItemView {
     this.refreshSubject();
     this.refreshFoot();
     this.refreshHistory();
+    this.refreshVoice();
     this.showEmpty();
+  }
+
+  /* The microphone at the foot of the chat: shown with voice control on, and listening while Lagrange listens for a
+     message. */
+  refreshVoice() {
+    if (!this.micEl) return;
+    const p = this.plugin, l = p.voice, talk = Boolean(l && l.mode === 'talk' && l.state !== 'off');
+    this.micEl.toggle(Boolean(p.settings.voice));
+    this.micEl.toggleClass('is-listening', talk);
+    this.micEl.dataset.state = talk ? l.state : '';
+    this.micEl.style.setProperty('--lagrange-level', talk ? (l.level || 0).toFixed(2) : '0');
+    this.micEl.setAttr('aria-label', !talk ? 'Speak to Lagrange' : l.state === 'stopping' ? 'Transcribing…' : 'Listening: click to send what you have said');
   }
 
   /* The Undo and Redo buttons are live only when there is a run of Lagrange's edits to take back or to make again. */
@@ -9055,6 +9701,7 @@ class LagrangeSettingTab extends PluginSettingTab {
       text: 'Lagrange sends the open note and your messages (and, when it looks at the page, pictures of the note as ' +
         'it is rendered) to the provider chosen here, and only when you ask it something or run one of its commands ' +
         '(or, with Autocorrect “With the model”, when you pause in typing: then the paragraph you are typing). ' +
+        'With voice control on, what you say while it listens goes to the transcription service chosen under Voice. ' +
         'It makes no other network requests and collects nothing.',
     });
 
@@ -9256,6 +9903,100 @@ class LagrangeSettingTab extends PluginSettingTab {
       .addDropdown(d => d.addOption('auto', 'Where the model takes them').addOption('on', 'Always').addOption('off', 'Never: words only')
         .setValue(s.lookPictures).onChange(async v => { s.lookPictures = v; await save(); }))
       .setDisabled(!s.lookAtPage || !desktop);
+
+    new Setting(containerEl).setName('Voice').setHeading();
+    new Setting(containerEl)
+      .setName('Voice control')
+      .setDesc('Dictate into the note, and speak to Lagrange. The microphone is opened only when you start listening ' +
+        '(the microphone in the ribbon or in the chat, or a command) and closed when you stop; what you say while it ' +
+        'listens goes to the transcription service chosen below, and nowhere else. Nothing is recorded to disk.')
+      .addToggle(t => t.setValue(s.voice).onChange(async v => {
+        s.voice = v;
+        if (!v) await this.plugin.stopVoice(false);
+        await save(true);
+      }));
+    if (s.voice) {
+      const env = this.plugin.voiceEnv(), offerSystem = (!env.desktop && env.system) || s.voiceRoute === 'system';
+      new Setting(containerEl)
+        .setName('Transcription')
+        .setDesc('Who turns what you say into words. Claude cannot: the Claude API takes no sound, and neither the Claude ' +
+          'nor the ChatGPT subscription offers transcription to plugins.' + (env.desktop ? ' Obsidian on a computer has no ' +
+          'speech recognition of its own that works (the browser inside it comes without the service behind it).' : ''))
+        .addDropdown(d => {
+          d.addOption('openai', 'OpenAI (an OpenAI API key)');
+          d.addOption('server', 'A transcription server (on this computer, or hosted)');
+          if (offerSystem) d.addOption('system', 'This device’s speech recognition');
+          d.setValue(s.voiceRoute).onChange(async v => { s.voiceRoute = v; await save(true); });
+        });
+      if (s.voiceRoute === 'openai') {
+        new Setting(containerEl)
+          .setName('OpenAI API key')
+          .setDesc('The same key as the OpenAI API provider’s above (platform.openai.com). Sent only to api.openai.com, with ' +
+            'each phrase you say. OpenAI charges for transcription by the minute of sound.')
+          .addText(t => {
+            t.inputEl.type = 'password';
+            t.inputEl.autocomplete = 'off';
+            t.inputEl.spellcheck = false;
+            t.setPlaceholder('sk-…').setValue(s.openaiPlatformKey).onChange(async v => { s.openaiPlatformKey = v.trim(); await save(); });
+          });
+        new Setting(containerEl)
+          .setName('Transcription model')
+          .setDesc('Blank: gpt-4o-mini-transcribe (whisper-1 for an account without it). gpt-4o-transcribe is more accurate and costs more.')
+          .addText(t => t.setPlaceholder(VOICE_DEFAULT_MODEL.openai).setValue(s.voiceModel).onChange(async v => { s.voiceModel = v.trim(); await save(); }));
+      } else if (s.voiceRoute === 'server') {
+        new Setting(containerEl)
+          .setName('Server address')
+          .setDesc('A server that speaks OpenAI’s transcription API, its address ending in /v1. A Whisper on this computer keeps ' +
+            'what you say on it: whisper.cpp (whisper-server --inference-path /v1/audio/transcriptions --port 8080, then ' +
+            'http://127.0.0.1:8080/v1), Speaches (http://localhost:8000/v1) or LocalAI. Hosted: Groq (https://api.groq.com/openai/v1), and others.')
+          .addText(t => t.setPlaceholder('http://127.0.0.1:8080/v1').setValue(s.voiceServerUrl).onChange(async v => { s.voiceServerUrl = v.trim(); await save(); }));
+        new Setting(containerEl)
+          .setName('Model')
+          .setDesc('The model name the server knows. Blank: whisper-1. whisper.cpp ignores it; Speaches: Systran/faster-whisper-small, for one; Groq: whisper-large-v3-turbo.')
+          .addText(t => t.setPlaceholder(VOICE_DEFAULT_MODEL.server).setValue(s.voiceModel).onChange(async v => { s.voiceModel = v.trim(); await save(); }));
+        new Setting(containerEl)
+          .setName('API key')
+          .setDesc('Only if the server asks for one. Stored in plain text in this vault’s .obsidian/plugins/lagrange/data.json.')
+          .addText(t => {
+            t.inputEl.type = 'password';
+            t.inputEl.autocomplete = 'off';
+            t.setPlaceholder('optional').setValue(s.voiceServerKey).onChange(async v => { s.voiceServerKey = v.trim(); await save(); });
+          });
+      } else {
+        containerEl.createEl('p', {
+          cls: 'setting-item-description',
+          text: voiceProblem(s, env) || 'The device recognises what you say. Apple’s and Google’s recognition may send the sound to their servers to do it.',
+        });
+      }
+      new Setting(containerEl)
+        .setName('Language')
+        .setDesc('Blank: the service works it out. Or a two-letter code (en, fr, de, …), which helps with short phrases.')
+        .addText(t => t.setPlaceholder('detect').setValue(s.voiceLanguage).onChange(async v => { s.voiceLanguage = voiceLanguage(v); await save(); }));
+      new Setting(containerEl)
+        .setName('A pause ends a phrase after')
+        .setDesc('Each phrase is written in when you pause this long.')
+        .addDropdown(d => {
+          for (const p of VOICE_PAUSES) d.addOption(String(p), `${p} s`);
+          d.setValue(String(s.voicePause)).onChange(async v => { s.voicePause = Number(v); await save(); });
+        });
+      const test = new Setting(containerEl)
+        .setName('Test the microphone')
+        .setDesc('Listens for six seconds: say a sentence.');
+      const outcome = containerEl.createEl('p', { cls: 'setting-item-description lagrange-voice-test' });
+      test.addButton(b => b.setButtonText('Test').onClick(async () => {
+        b.setDisabled(true);
+        b.setButtonText('Listening…');
+        outcome.setText('');
+        try { await this.plugin.testVoice(text => outcome.setText(text)); } finally { b.setDisabled(false); b.setButtonText('Test'); }
+      }));
+      containerEl.createEl('p', {
+        cls: 'setting-item-description',
+        text: 'Dictate with the microphone in the ribbon (or Lagrange: Dictate into the note); each phrase goes in at the cursor when ' +
+          'you pause. Said as a phrase of their own: “new line”, “new paragraph”, “scratch that” (takes the last phrase out ' +
+          'again), “stop listening”, and “Lagrange, …”, which sends the rest to the chat. The microphone in the chat (or ' +
+          'Lagrange: Speak to Lagrange) listens for one message and sends it. Esc stops listening.',
+      });
+    }
 
     new Setting(containerEl).setName('Appearance').setHeading();
     new Setting(containerEl)
@@ -9617,17 +10358,278 @@ class LagrangePlugin extends Plugin {
         return true;
       },
     });
+    // Voice control (offered once it is turned on in the settings; see "Voice: listening, dictation, …")
+    this.addCommand({
+      id: 'voice-dictate',
+      name: 'Dictate into the note (start or stop)',
+      checkCallback: checking => {
+        if (!this.settings.voice) return false;
+        if (!checking) void this.toggleDictation();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'voice-talk',
+      name: 'Speak to Lagrange',
+      checkCallback: checking => {
+        if (!this.settings.voice) return false;
+        if (!checking) void this.toggleTalk();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'voice-stop',
+      name: 'Stop listening',
+      checkCallback: checking => {
+        if (!this.voice || this.voice.closed) return false;
+        if (!checking) void this.stopVoice(true);
+        return true;
+      },
+    });
     this.addSettingTab(new LagrangeSettingTab(this.app, this));
 
     this.lastMarkdownLeaf = null;
     this.registerEvent(this.app.workspace.on('active-leaf-change', leaf => {
       if (leaf && leaf.view instanceof MarkdownView) this.lastMarkdownLeaf = leaf;
     }));
+
+    // Voice control, off until the writer turns it on: a microphone in the ribbon (dictation) and in the chat
+    // (speaking to Lagrange), a word in the status bar while listening, Esc to stop.
+    this.voice = null;            // the VoiceListener (or SystemListener) while Lagrange listens
+    this.voiceSession = {};       // {voiceModel}: the OpenAI model that worked
+    this.voiceErrors = [];        // the last few messages about voice, newest last (shown as notices; kept for tests)
+    this.registerEditorExtension(voiceEditor().extension);
+    this.voiceRibbon = this.addRibbonIcon('mic', 'Dictate into the note (Lagrange)', () => { void this.toggleDictation(); });
+    this.voiceRibbon.addClass('lagrange-voice-ribbon');
+    this.voiceBar = this.addStatusBarItem();
+    this.voiceBar.addClass('lagrange-voice-bar');
+    this.voiceBar.createSpan({ cls: 'lagrange-voice-dot' });
+    this.voiceWords = this.voiceBar.createSpan({ cls: 'lagrange-voice-words' });
+    this.voiceBar.createSpan({ cls: 'lagrange-voice-meter' }).createSpan();
+    this.voiceBar.setAttr('aria-label', 'Lagrange is listening: click to stop');
+    this.registerDomEvent(this.voiceBar, 'click', () => { void this.stopVoice(true); });
+    this.registerDomEvent(document, 'keydown', ev => this.voiceKeydown(ev), true);
+    this.refreshVoice();
   }
 
   onunload() {
     if (this.autocorrect) this.autocorrect.stop();
     if (this.pen) this.pen.destroy();
+    if (this.voice) void this.voice.stop(false);
+  }
+
+  /* ---- Voice (see "Voice: listening, dictation, and speaking to Lagrange") ---- */
+
+  voiceEnv() {
+    const P = obsidian.Platform || {};
+    return { desktop: Boolean(P.isDesktopApp), system: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition) };
+  }
+
+  /* Sends a transcription request through Obsidian's requestUrl (a local server's CORS does not stop it). */
+  voiceRequest() {
+    return async req => {
+      const headers = Object.assign({}, req.headers);
+      delete headers['Content-Type'];
+      const body = req.body.buffer.slice(req.body.byteOffset, req.body.byteOffset + req.body.byteLength);
+      const r = await obsidian.requestUrl({ url: req.url, method: req.method, headers, contentType: req.contentType, body, throw: false });
+      return { status: r.status, text: r.text };
+    };
+  }
+
+  /* Starts listening: mode 'dictate', 'talk' or 'test'. Asking for the mode that is already listening stops it. */
+  async startVoice(mode) {
+    if (!this.settings.voice) { new Notice('Turn on voice control first: Settings → Lagrange → Voice.'); return null; }
+    if (this.voice) {
+      const same = this.voice.mode === mode;
+      await this.stopVoice(true);
+      if (same) return null;
+    }
+    const s = this.settings, env = this.voiceEnv();
+    const problem = voiceProblem(s, env);
+    if (problem && mode !== 'test') { this.voiceError(problem); return null; }
+    let target = null;
+    if (mode === 'dictate') {
+      target = this.targetMarkdownView();
+      if (!target || !target.editor || !target.editor.cm || target.getMode() !== 'source') {
+        new Notice(target ? 'Switch the note to editing (Live Preview or Source mode) to dictate into it.' : 'Open a note to dictate into first.');
+        return null;
+      }
+    }
+    const Listener = s.voiceRoute === 'system' && !problem ? SystemListener : VoiceListener;
+    const listener = new Listener({
+      mode, settings: s, platform: typeof process !== 'undefined' ? process.platform : '',
+      transcribe: wav => (problem ? Promise.resolve('') : transcribe(s, wav, { request: this.voiceRequest(), env, session: this.voiceSession })),
+      onState: () => this.refreshVoice(),
+      onText: (text, l) => this.voiceHeard(text, l),
+      onError: (message, l) => this.voiceError(message, l),
+      onEnd: l => { if (this.voice === l) this.voice = null; this.refreshVoice(); },
+    });
+    listener.target = target;
+    listener.problem = problem;
+    this.voice = listener;
+    this.refreshVoice();
+    try {
+      await listener.start();
+    } catch (e) {
+      if (this.voice === listener) this.voice = null;
+      this.refreshVoice();
+      this.voiceError((e && e.message) || String(e), listener);
+      return null;
+    }
+    return listener;
+  }
+
+  async stopVoice(flush = true) {
+    const l = this.voice;
+    if (l) await l.stop(flush);
+  }
+
+  toggleDictation() { return this.voice && this.voice.mode === 'dictate' && !this.voice.closed ? this.stopVoice(true) : this.startVoice('dictate'); }
+  toggleTalk() { return this.voice && this.voice.mode === 'talk' && !this.voice.closed ? this.stopVoice(true) : this.startVoice('talk'); }
+
+  /* Esc stops listening (in 'talk' mode it drops what was being said), unless a window of Obsidian's is open. */
+  voiceKeydown(ev) {
+    if (ev.key !== 'Escape' || !this.voice || this.voice.closed || this.voice.mode === 'test') return;
+    if (document.querySelector('.modal-container')) return;
+    void this.stopVoice(this.voice.mode !== 'talk');
+  }
+
+  /* A phrase has been transcribed. */
+  async voiceHeard(text, l) {
+    if (l.mode === 'test') { l.result = text; return; }
+    if (l.mode === 'talk') {
+      const message = voiceMessage(text);
+      if (message) await this.speakToLagrange(message);
+      return;
+    }
+    for (const a of voiceParse(text)) {
+      if (a.kind === 'text') this.dictate(l, a.text);
+      else if (a.kind === 'paragraph' || a.kind === 'newline') this.dictateBreak(l, a.kind);
+      else if (a.kind === 'scratch') this.scratchDictation(l);
+      else if (a.kind === 'stop') { void l.stop(false); break; }
+      else if (a.kind === 'ask') await this.speakToLagrange(a.text);
+    }
+  }
+
+  /* The editor dictation goes into, while it is open; otherwise dictation stops. */
+  voiceCm(l) {
+    const view = l && l.target, cm = view && view.editor && view.editor.cm;
+    if (!cm || !view.containerEl.isConnected) {
+      this.voiceError('The note you were dictating into is no longer open, so dictation has stopped.', l);
+      void l.stop(false);
+      return null;
+    }
+    return cm;
+  }
+
+  voiceDispatch(cm, spec) {
+    if (isolateHistory) spec.annotations = isolateHistory.of('full');   // each phrase is an undo step of its own
+    cm.dispatch(spec);
+  }
+
+  /* Writes a phrase in at the cursor (after the word the cursor is in, never into its middle), joined to what stands
+     there (dictationJoin), with a moment of rubric ink (not with reduced motion). */
+  dictate(l, text) {
+    const cm = this.voiceCm(l);
+    if (!cm) return false;
+    const V = voiceEditor(), doc = cm.state.doc, sel = cm.state.selection.main;
+    let from = sel.from, to = sel.to;
+    if (from === to) from = to = from + dictationPoint(doc.sliceString(Math.max(0, from - 2), from), doc.sliceString(from, Math.min(doc.length, from + 200)));
+    const line = doc.lineAt(from);
+    const insert = dictationJoin(doc.sliceString(Math.max(line.from, from - 400), from), text, doc.sliceString(to, Math.min(doc.lineAt(to).to, to + 40)));
+    if (!insert) return false;
+    const effects = [V.setLast.of({ from, to: from + insert.length, text: insert })];
+    const a = from + (insert.length - insert.trimStart().length), b = from + insert.trimEnd().length;
+    if (!prefersReducedMotion(window) && b > a) effects.push(V.ink.of({ from: a, to: b }));
+    this.voiceDispatch(cm, { changes: { from, to, insert }, selection: { anchor: from + insert.length }, scrollIntoView: true, userEvent: 'input.dictate', effects });
+    window.clearTimeout(this.voiceInkTimer);
+    this.voiceInkTimer = window.setTimeout(() => { try { cm.dispatch({ effects: V.inkDone.of(null) }); } catch (e) { /* the editor is gone */ } }, 1800);
+    return true;
+  }
+
+  /* "New line" and "new paragraph": a line break, or a blank line (none if the cursor already stands after one). */
+  dictateBreak(l, kind) {
+    const cm = this.voiceCm(l);
+    if (!cm) return false;
+    const doc = cm.state.doc, sel = cm.state.selection.main;
+    let from = sel.from;
+    const before = doc.sliceString(Math.max(0, from - 2), from);
+    if (from > 0 && / $/.test(before)) from--;   // no space left at the end of the line
+    const insert = kind === 'newline' ? '\n' : from === 0 || doc.sliceString(Math.max(0, from - 2), from) === '\n\n' ? '' : doc.sliceString(from - 1, from) === '\n' ? '\n' : '\n\n';
+    if (!insert && from === sel.to) return false;
+    this.voiceDispatch(cm, { changes: { from, to: sel.to, insert }, selection: { anchor: from + insert.length }, scrollIntoView: true, userEvent: 'input.dictate' });
+    return true;
+  }
+
+  /* "Scratch that": takes the last phrase dictated back out, if its words are still as they were written in. */
+  scratchDictation(l) {
+    const cm = this.voiceCm(l);
+    if (!cm) return false;
+    const V = voiceEditor(), last = cm.state.field(V.last, false);
+    if (!last || cm.state.doc.sliceString(last.from, last.to) !== last.text) {
+      new Notice('Nothing to scratch: the last words dictated have been changed since, or are gone already.');
+      return false;
+    }
+    this.voiceDispatch(cm, { changes: { from: last.from, to: last.to, insert: '' }, effects: V.setLast.of(null), userEvent: 'delete.dictate' });
+    return true;
+  }
+
+  /* A phrase said to Lagrange: a message in the chat, sent at once (into the box, if Lagrange is still answering). */
+  async speakToLagrange(text) {
+    const chat = await this.activateView(false);
+    if (!chat || !chat.inputEl) { this.voiceError('Lagrange’s chat could not be opened.'); return; }
+    const had = chat.inputEl.value.trim();
+    chat.inputEl.value = had ? `${had} ${text}` : text;
+    chat.fitInput();
+    if (chat.pending) { new Notice('Lagrange is still answering: what you said is in the box, to send when it has finished.'); return; }
+    void chat.send();
+  }
+
+  voiceError(message, l) {
+    if (!message) return;
+    this.voiceErrors.push(message);
+    if (this.voiceErrors.length > 10) this.voiceErrors.shift();
+    new Notice(message, 12000);
+    const chat = l && l.mode === 'talk' ? this.chatView() : null;
+    if (chat) chat.addAside(message, 'is-warn');
+  }
+
+  /* The microphone in the ribbon, the word in the status bar and the microphone in the chat, as they stand. */
+  refreshVoice() {
+    const on = this.settings.voice, l = this.voice, active = Boolean(l && l.state !== 'off');
+    if (this.voiceRibbon) {
+      this.voiceRibbon.toggle(Boolean(on));
+      const dictating = active && l.mode === 'dictate';
+      this.voiceRibbon.toggleClass('is-listening', dictating);
+      this.voiceRibbon.setAttr('aria-label', dictating ? 'Stop dictating (Lagrange)' : 'Dictate into the note (Lagrange)');
+    }
+    if (this.voiceBar) {
+      this.voiceBar.toggle(active);
+      if (active) {
+        const words = l.state === 'starting' ? 'Opening the microphone…'
+          : l.state === 'stopping' ? 'Transcribing…'
+            : `${l.mode === 'talk' ? 'Listening for Lagrange…' : l.mode === 'test' ? 'Testing the microphone…' : 'Listening…'}${l.busy ? ' Transcribing…' : ''}`;
+        if (this.voiceWords.textContent !== words) this.voiceWords.setText(words);
+        this.voiceBar.dataset.state = l.state;
+        this.voiceBar.dataset.mode = l.mode;
+        this.voiceBar.style.setProperty('--lagrange-level', (l.level || 0).toFixed(2));
+      }
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) if (leaf.view instanceof LagrangeChatView) leaf.view.refreshVoice();
+  }
+
+  /* "Test the microphone": listens for six seconds, then says how loud the microphone was and what the service made
+     of the first phrase. report(text) is given the outcome. */
+  async testVoice(report) {
+    const l = await this.startVoice('test');
+    if (!l) { report('The microphone could not be opened: see the notice.'); return; }
+    await new Promise(resolve => { const t = window.setInterval(() => { if (l.state === 'off') { window.clearInterval(t); resolve(); } }, 100); });
+    const db = l.peak > 0 ? `${Math.round(20 * Math.log10(l.peak))} dB` : 'silence';
+    if (l.result) report(`The microphone works (loudest ${db}). Heard: “${l.result}”`);
+    else if (l.peak < 0.002) report('The microphone gave only silence: is it muted, or is another input chosen in the system’s sound settings?');
+    else if (!l.heard) report(`The microphone works (loudest ${db}), but no speech was heard. Press Test and say a sentence.`);
+    else if (l.problem) report(`The microphone works (loudest ${db}) and heard speech. ${l.problem}`);
+    else report(`The microphone works (loudest ${db}) and heard speech, but the transcription gave back no words${this.voiceErrors.length ? `: ${this.voiceErrors[this.voiceErrors.length - 1]}` : '.'}`);
   }
 
   async saveSettings() {
@@ -9635,6 +10637,7 @@ class LagrangePlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       if (leaf.view instanceof LagrangeChatView) leaf.view.refreshFoot();
     }
+    if (this.voiceBar) this.refreshVoice();
   }
 
   openSettings() {
@@ -10414,3 +11417,5 @@ Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: 
 Object.assign(LagrangePlugin.internals, { activeRuns, proseSkips, wordsToCheck, typoDistance, typoLimit, typoFix, DEMO_TYPOS, modelTypoFixes, meantWord, AUTOCORRECT_SYSTEM, AUTOCORRECT_MODES });
 Object.assign(LagrangePlugin.internals, { DEMO_MERMAID, diagramOrder, mermaidBlocks, mermaidState, SKETCH_MERMAID });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+// Voice control (see "Voice" among the pure helpers and "Transcription" among the providers)
+Object.assign(LagrangePlugin.internals, { VOICE_ROUTES, VOICE_PAUSES, VOICE_RATE, VOICE_DEFAULT_MODEL, VOICE_FALLBACK_MODEL, VOICE_COMMANDS, voiceLanguage, voiceModel, voiceProblem, resample, encodeWav, rmsOf, createVad, multipartBody, transcriptionRequest, transcriptText, voiceParse, voiceMessage, dictationPoint, dictationJoin, transcribe, micProblem });

@@ -199,7 +199,7 @@ jobs:
           node --version
           node --check vault/.obsidian/plugins/scriptorium/main.js
           node --check vault/.obsidian/plugins/lagrange/main.js
-          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js plugins-tests/lagrange-diagrams.test.js plugins-tests/lagrange-autocorrect.test.js plugins-tests/rclone-sync.test.js
+          node --test plugins-tests/scriptorium.test.js plugins-tests/lagrange.test.js plugins-tests/lagrange-diagrams.test.js plugins-tests/lagrange-autocorrect.test.js plugins-tests/lagrange-voice.test.js plugins-tests/rclone-sync.test.js
 
   sync-tests:
     name: Test the Google Drive sync with the real rclone (${{ matrix.os }})

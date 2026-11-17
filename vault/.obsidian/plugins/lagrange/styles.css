@@ -939,3 +939,35 @@ body.theme-dark .lagrange-pen-trail { mix-blend-mode: screen; }
    A Mermaid diagram Lagrange turns into a sketch is drawn by Obsidian in a box that is laid out but never seen
    (main.js: mermaidSketch), so that its parts can be measured. */
 .lagrange-offstage { position: fixed; left: -12000px; top: 0; width: 900px; visibility: hidden; pointer-events: none; contain: layout style; }
+
+/* ---- Voice: the microphones (ribbon, chat), the word in the status bar while Lagrange listens, and the moment of
+   rubric ink on a dictated phrase. --lagrange-level (0..1) is the microphone's loudness, set by main.js. ---- */
+.lagrange-view button.lagrange-mic { flex: none; align-self: center; position: relative; width: 1.7em; height: 1.7em; padding: 0; margin-left: -0.1em; color: var(--lagrange-muted); }
+.lagrange-view button.lagrange-mic:is(:hover, :focus-visible) { color: var(--lagrange-rubric); }
+.lagrange-view button.lagrange-mic svg { width: 1.05em; height: 1.05em; }
+.lagrange-view button.lagrange-mic.is-listening { color: var(--lagrange-rubric); }
+.lagrange-view button.lagrange-mic.is-listening::after,
+.side-dock-ribbon-action.lagrange-voice-ribbon.is-listening::after {
+  content: ""; position: absolute; inset: 1px; border-radius: 50%; pointer-events: none;
+  box-shadow: 0 0 0 calc(1px + var(--lagrange-level, 0) * 4px) color-mix(in srgb, var(--lagrange-rubric) 45%, transparent);
+  animation: lagrange-voice-pulse 1.6s ease-in-out infinite;
+}
+.lagrange-view button.lagrange-mic[data-state="stopping"]::after { animation: none; opacity: 0.5; }
+.side-dock-ribbon-action.lagrange-voice-ribbon { position: relative; }
+.side-dock-ribbon-action.lagrange-voice-ribbon.is-listening { color: var(--lagrange-rubric); }
+.status-bar-item.lagrange-voice-bar { display: inline-flex; align-items: center; gap: 0.45em; cursor: pointer; }
+.lagrange-voice-dot { width: 0.55em; height: 0.55em; border-radius: 50%; background: #8b2323; background: var(--lagrange-rubric); animation: lagrange-voice-pulse 1.6s ease-in-out infinite; }
+.lagrange-voice-bar[data-state="stopping"] .lagrange-voice-dot { animation: none; opacity: 0.45; }
+.lagrange-voice-meter { display: inline-block; width: 2.6em; height: 0.3em; border-radius: 0.15em; background: color-mix(in srgb, currentColor 18%, transparent); overflow: hidden; }
+.lagrange-voice-meter > span { display: block; height: 100%; width: calc(var(--lagrange-level, 0) * 100%); background: var(--lagrange-rubric, #8b2323); transition: width 80ms linear; }
+.lagrange-voice-bar[data-state="stopping"] .lagrange-voice-meter { display: none; }
+.lagrange-voice-ink { animation: lagrange-voice-ink 1.6s ease-out; }
+.lagrange-settings .lagrange-voice-test:empty { display: none; }
+@keyframes lagrange-voice-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes lagrange-voice-ink { from { color: var(--lagrange-rubric, #8b2323); } to { color: inherit; } }
+@media (prefers-reduced-motion: reduce) {
+  .lagrange-voice-dot, .lagrange-view button.lagrange-mic.is-listening::after,
+  .side-dock-ribbon-action.lagrange-voice-ribbon.is-listening::after { animation: none; }
+  .lagrange-voice-ink { animation: none; }
+  .lagrange-voice-meter > span { transition: none; }
+}
