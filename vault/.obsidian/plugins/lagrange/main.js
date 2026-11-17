@@ -44,6 +44,9 @@ const obsidian = require('obsidian');
 const { Plugin, ItemView, Modal, Notice, PluginSettingTab, Setting, MarkdownRenderer, MarkdownView, Component, setIcon } = obsidian;
 const { StateField, StateEffect, EditorState, Transaction, ChangeSet, Annotation } = require('@codemirror/state');
 const { EditorView, Decoration, WidgetType } = require('@codemirror/view');
+// (a run of Lagrange's edits is an undo step of its own, never joined to the typing just after it; Obsidian gives
+// plugins @codemirror/commands, but nothing breaks without it)
+const isolateHistory = (() => { try { return require('@codemirror/commands').isolateHistory || null; } catch (e) { return null; } })();
 
 
 /* ---------------------------------------------------------------------------------------------------------------
@@ -117,6 +120,7 @@ const DEFAULT_SETTINGS = {
   severalPens: true,                  // edits that stand well apart on the page are written at the same time, each by a pen of its own
   maxPens: 3,                         // how many pens may write at once (2 to 4; see penLanes)
   editWhileWriting: false,            // off: a click or a key in the note ends the pen's animation; on: the writer edits alongside it
+  autocorrect: 'off',                 // 'off' | 'dictionary' (this computer's spelling dictionary) | 'model' (the provider); see Autocorrect
 };
 
 function sanitizeSettings(saved) {
@@ -137,6 +141,7 @@ function sanitizeSettings(saved) {
   if (!(Number.isInteger(s.maxPens) && s.maxPens >= 2 && s.maxPens <= PEN_MAX)) s.maxPens = DEFAULT_SETTINGS.maxPens;
   if (!EFFORTS.includes(s.effort)) s.effort = '';
   if (!LOOK_PICTURES.includes(s.lookPictures)) s.lookPictures = DEFAULT_SETTINGS.lookPictures;
+  if (!['off', 'dictionary', 'model'].includes(s.autocorrect)) s.autocorrect = DEFAULT_SETTINGS.autocorrect;
   return s;
 }
 
@@ -1484,6 +1489,185 @@ function plainInline(text) {
       .replace(/==(?=\S)([^\n]*?\S)==/g, '$1');
   }
   return t.replace(/[\uE100-\uE1FF]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE100));
+}
+
+/* ---- Autocorrect ----
+   With Settings → Lagrange → Autocorrect on, the pen corrects slips of typing a moment after they are typed: words
+   the writer has just finished (the word still being typed is left alone), in prose only. The pieces here are pure;
+   the plugin watches the typing, asks this computer's spelling dictionary (or the model) and gives the corrections
+   to the pen (see Autocorrect in the plugin).
+   proseSkips(text) -> [[from, to]]: where nothing is ever corrected: front matter, code (fenced, even unclosed, and
+   inline), mathematics ($…$, $$…$$, \(…\), \[…\]), comments, HTML, wikilinks and embeds, link and image
+   destinations, reference definitions, bare web addresses and e-mail addresses, tags, footnote marks, block ids,
+   callout types, the marker lines of aligned text, and tables. */
+function proseSkips(text) {
+  const t = String(text == null ? '' : text), skip = [];
+  const fm = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(t);
+  if (fm) skip.push([0, fm[0].length]);
+  const patterns = [
+    /^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[ \t]*(?=\n|$)|$)/gm,   // fenced code, to its end (or the note's)
+    /(`+)[^`\n]+?\1/g,                                // inline code
+    /\$\$[\s\S]*?(?:\$\$|$)/g,                       // displayed mathematics, closed or not
+    /\$(?=\S)[^$\n]*\S\$|\$(?=\S)[^$\n]*$/gm,        // inline mathematics, and an open $ to the end of its line
+    /\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/g,          // \( \) and \[ \]
+    /%%[\s\S]*?(?:%%|$)|<!--[\s\S]*?(?:-->|$)/g,     // comments
+    /<\/?[A-Za-z][^>\n]*>/g,                         // HTML tags
+    /!?\[\[[^\]\n]*(?:\]\]|$)/gm,                     // wikilinks and embeds
+    /\]\((?:[^()\n]|\([^()\n]*\))*\)/g,                 // link and image destinations
+    /^[ \t]*\[[^\]\n]+\]:.*$/gm,                        // reference definitions
+    /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()]+|\bwww\.[^\s<>()]+/gi,   // web addresses
+    /[\w.+-]+@[\w-]+\.[\w.-]+/g,                        // e-mail addresses
+    /(^|\s)#[^\s#]+/g,                                   // tags
+    /\[\^[^\]\n]*\]/g,                                   // footnote marks
+    /\s\^[A-Za-z0-9-]+$/gm,                              // block ids
+    /^[ \t]*>?[ \t]*\[![^\]\n]*\]/gm,                    // callout types
+    /^[ \t]*:{3,}.*$/gm,                                 // the marker lines of aligned text
+    /^[ \t]*\|.*$/gm,                                    // tables
+  ];
+  for (const re of patterns) for (const m of t.matchAll(re)) skip.push([m.index, m.index + m[0].length]);
+  return skip;
+}
+
+/* A word as autocorrect reads it: letters, with an apostrophe or a hyphen inside. */
+const AC_WORD = /[\p{L}](?:[\p{L}\p{M}'’-]*[\p{L}\p{M}])?/gu;
+/* The words of text[from, to) that the writer has finished typing and that may be corrected: wholly inside the
+   range, followed by something that is not part of a word (a word that runs up to the cursor, or to the end of the
+   note, is still being typed), outside proseSkips, at least two letters, and not one that is set apart on purpose
+   (with a digit or an underscore next to it, in capitals, or with capitals inside, as in a name or an identifier).
+   cursor: the cursor's place. -> [{from, to, word}], in order. Pure. */
+function wordsToCheck(text, from, to, cursor, skips) {
+  const t = String(text == null ? '' : text);
+  const a = Math.max(0, from), b = Math.min(t.length, to);
+  if (b <= a) return [];
+  const skip = skips || proseSkips(t);
+  // the line around the range, so that a word that begins before it is read whole
+  const lo = t.lastIndexOf('\n', a - 1) + 1, hiNl = t.indexOf('\n', b), hi = hiNl < 0 ? t.length : hiNl;
+  const out = [];
+  for (const m of t.slice(lo, hi).matchAll(AC_WORD)) {
+    const s = lo + m.index, e = s + m[0].length, word = m[0];
+    if (e <= a || s >= b) continue;                                  // not touched by the typing
+    if (e === t.length || e === cursor) continue;                    // still being typed
+    if (/[\p{L}\p{N}_]/u.test(t[e] || '') || /[\p{N}_@./\\]/u.test(t[s - 1] || '') || /[\p{N}_]/u.test(t[e] || '')) continue;
+    if (/^[.@/\\]/.test(t[e] || '') && /[\p{L}\p{N}]/u.test(t[e + 1] || '')) continue;   // part of a name, an address or a path
+    if (word.length < 2 || /[\p{N}_]/u.test(word)) continue;
+    const letters = word.replace(/[^\p{L}]/gu, '');
+    if (letters.length > 1 && letters === letters.toUpperCase()) continue;              // capitals: an abbreviation
+    if (/\p{Ll}\p{Lu}/u.test(word)) continue;                                         // capitals inside: a name or an identifier
+    if (skip.some(([x, y]) => s < y && x < e)) continue;
+    out.push({ from: s, to: e, word });
+  }
+  return out;
+}
+
+/* The optimal string alignment distance between two words (Damerau–Levenshtein without repeated edits of one
+   place): a letter added, left out, changed, or two letters side by side swapped each count one. Pure. */
+function typoDistance(a, b) {
+  const s = Array.from(String(a)), t = Array.from(String(b));
+  const d = Array.from({ length: s.length + 1 }, (_, i) => [i].concat(new Array(t.length).fill(0)));
+  for (let j = 1; j <= t.length; j++) d[0][j] = j;
+  for (let i = 1; i <= s.length; i++) {
+    for (let j = 1; j <= t.length; j++) {
+      const c = s[i - 1] === t[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + c);
+      if (i > 1 && j > 1 && s[i - 1] === t[j - 2] && s[i - 2] === t[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[s.length][t.length];
+}
+
+/* The most common words of English: between two corrections equally near what was typed, the common one is the one
+   meant ("wiht" is "with", not "whit"). */
+const COMMON_WORDS = new Set(('the of and to a in is it you that he was for on are with as his they be at one have this from or ' +
+  'had by hot but some what there we can out other were all your when up use word how said an each she which do their time if will ' +
+  'way about many then them would write like so these her long make thing see him two has look more day could go come did my sound ' +
+  'no most number who over know water than call first people may down side been now find any new work part take get place made live ' +
+  'where after back little only round man year came show every good me give our under name very through just form great think say ' +
+  'help low line before turn cause same mean differ move right boy old too does tell sentence set three want air well also play small ' +
+  'end put home read hand port large spell add even land here must big high such follow act why ask men change went light kind off ' +
+  'need house picture try us again animal point mother world near build self earth father head stand own page should country found ' +
+  'answer school grow study still learn plant cover food sun four thought let keep eye never last door between city tree cross since ' +
+  'hard start might story saw far sea draw left late run while press close night real life few stop open seem together next white ' +
+  'children begin got walk example ease paper often always music those both mark book letter until mile river car feet care second ' +
+  'group carry took rain eat room friend began idea fish mountain north once base hear horse cut sure watch color face wood main enough ' +
+  'plain girl usual young ready above ever red list though feel talk bird soon body dog family direct pose leave song measure state ' +
+  'product black short numeral class wind question happen complete ship area half rock order fire south problem piece told knew pass ' +
+  'farm top whole king size heard best hour better true during hundred am remember step early hold west ground interest reach fast five ' +
+  'sing listen six table travel less morning ten simple several vowel toward war lay against pattern slow center love person money ' +
+  'serve appear road map science rule govern pull cold notice voice fall power town fine certain fly unit lead cry dark machine note ' +
+  'wait plan figure star box noun field rest correct able pound done beauty drive stood contain front teach week final gave green oh ' +
+  'quick develop sleep warm free minute strong special mind behind clear tail produce fact street inch lot nothing course stay wheel full ' +
+  'force blue object decide surface deep moon island foot yet busy test record boat common gold possible plane age dry wonder laugh ' +
+  'thousand ago ran check game shape yes miss brought heat snow bed bring sit perhaps fill east weight language among').split(' '));
+
+/* How far a correction may be from what was typed and still be a slip of typing: one letter in a short word, two
+   in a longer one. */
+function typoLimit(word) {
+  return Array.from(String(word)).length <= 4 ? 1 : 2;
+}
+
+/* The correction of a misspelled word from a dictionary's suggestions (best first), or null. Of the suggestions
+   that are a slip of typing away (typoLimit, case aside), not the same word in other capitals, and made of letters
+   (with an apostrophe, a hyphen, or a space between two words), the one taken is the nearest that keeps the word's
+   first letter (or only swaps its first two: "hte"), the first letter being the one least often mistyped; failing
+   that, the nearest; between equals, a common word (COMMON_WORDS) before a rarer one, a word in small letters before
+   a name, and letters swapped before a letter changed. It takes the word's capitals: a capital first letter stays one; a word typed in small letters
+   that the dictionary knows only with a capital (a name) is left alone. Pure. */
+function typoFix(word, suggestions) {
+  const w = String(word || '');
+  if (!w) return null;
+  const lower = w.toLowerCase(), cap = w[0] !== w[0].toLowerCase();
+  const near = [];
+  (suggestions || []).forEach((raw, i) => {
+    const s = String(raw || ''), sl = s.toLowerCase();
+    if (!s || sl === lower || !/^[\p{L}\p{M}'’ -]+$/u.test(s) || /^[ '’-]|[ '’-]$/.test(s)) return;
+    const d = typoDistance(lower, sl);
+    if (d > typoLimit(w)) return;
+    const start = sl[0] === lower[0] || (sl[0] === lower[1] && sl[1] === lower[0]);
+    const swap = Array.from(sl).sort().join('') === Array.from(lower).sort().join('');   // the same letters, in another order
+    near.push({ s, d, i, start, swap, plain: s[0] === s[0].toLowerCase(), common: COMMON_WORDS.has(sl) });
+  });
+  const first = (x, y, k) => (x[k] === y[k] ? 0 : x[k] ? -1 : 1);
+  near.sort((a, b) => first(a, b, 'start') || a.d - b.d || first(a, b, 'common') || first(a, b, 'plain') || first(a, b, 'swap') || a.i - b.i);
+  const best = near[0];
+  if (!best) return null;
+  const s = best.s;
+  if (!cap && s[0] !== s[0].toLowerCase()) return null;            // a name the writer did not capitalise: theirs to say
+  if (/\p{Lu}/u.test(s.slice(1))) return null;                      // capitals inside: not a slip of typing
+  return cap ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/* The demo's own little dictionary of slips (demo mode, and where this computer has no spelling dictionary to ask in
+   the tests). */
+const DEMO_TYPOS = {
+  teh: 'the', adn: 'and', hte: 'the', taht: 'that', recieve: 'receive', recieved: 'received', seperate: 'separate',
+  definately: 'definitely', wierd: 'weird', occured: 'occurred', untill: 'until', becuase: 'because', thier: 'their',
+  wich: 'which', freind: 'friend', tommorow: 'tomorrow', accomodate: 'accommodate', beleive: 'believe', goverment: 'government',
+  enviroment: 'environment', existance: 'existence', foriegn: 'foreign', lenght: 'length', neccessary: 'necessary',
+  occassion: 'occasion', publically: 'publicly', reccomend: 'recommend', succesful: 'successful', truely: 'truly', wirte: 'write',
+};
+
+/* The corrections a model proposes for a passage it was given (its reply: a JSON list of {"find", "replace"}), kept
+   only where each is a slip of typing in the words that were asked about: find is one of those words, as typed, and
+   replace is a slip of typing away from it (typoLimit, case aside; a word may become two). Anything else, a
+   rewording or a correction of a word that was not asked about, is left out. words: [{word}] the words asked
+   about. -> [{find, replace}]. Pure. */
+function modelTypoFixes(reply, words) {
+  const asked = new Set((words || []).map(w => w.word));
+  let list = null;
+  for (const value of jsonValuesIn(String(reply || ''))) {
+    list = Array.isArray(value) ? value : (value && Array.isArray(value.edits) ? value.edits : null);
+    if (list) break;
+  }
+  const out = [];
+  for (const item of list || []) {
+    if (!item || typeof item.find !== 'string' || typeof item.replace !== 'string') continue;
+    const find = item.find.trim(), replace = item.replace.trim();
+    if (!asked.has(find) || !replace || replace === find || !/^[\p{L}\p{M}'’ -]+$/u.test(replace)) continue;
+    if (typoDistance(find.toLowerCase(), replace.toLowerCase()) > typoLimit(find)) continue;
+    if (out.some(o => o.find === find)) continue;
+    out.push({ find, replace });
+  }
+  return out;
 }
 
 /* ---- Diagrams ----
@@ -2931,7 +3115,7 @@ async function checkCli(which, custom) {
 
 async function streamDemo(req, hooks) {
   const text = typeof req.demo === 'function' ? String(req.demo()) : 'Demo mode has no reply for this.';
-  await sleep(req.purpose === 'chat' ? 900 : 1200, hooks.signal);
+  await sleep(req.purpose === 'chat' ? 900 : req.purpose === 'autocorrect' ? 250 : 1200, hooks.signal);
   const pieces = text.match(/\s*\S+|\s+$/g) || [];
   const pause = req.purpose === 'chat' ? 22 : 0;
   let out = '';
@@ -4452,16 +4636,19 @@ function drawOrder(svg, parts) {
 /* A Mermaid diagram as Obsidian has drawn it, as the elements of a sketch (sketchSpec's shapes): its boxes, rounds
    and diamonds, its lines and arrows (followed along their curves), and its words where they stand and at their
    size, in the order the diagram is drawn (drawOrder), so that the pen draws the sketch as it would draw the
-   diagram. Coordinates are the diagram's own, from its top left corner. Arrowheads are not elements of their own:
+   diagram. Coordinates are the diagram's own from its top left corner, a quarter larger (SKETCH_SCALE: a hand-
+   written font is wider than Obsidian's, and the words keep their size). Arrowheads are not elements of their own:
    the line they end becomes an arrow. Parts that show nothing (neither stroke nor fill) are left out. The svg must
    be laid out (on the page, if out of sight). Reads the DOM. -> [{type, …}] */
+const SKETCH_SCALE = 1.25;
 function sketchFromSvg(svg) {
   const win = (svg.ownerDocument && svg.ownerDocument.defaultView) || window;
   const root = svg.getScreenCTM && svg.getScreenCTM();
   if (!root) return [];
   const inv = root.inverse(), vb = svg.viewBox && svg.viewBox.baseVal, ox = vb ? vb.x : 0, oy = vb ? vb.y : 0;
   const round = v => Math.round(v * 10) / 10;
-  const at = (n, x, y) => { const p = new win.DOMPoint(x, y).matrixTransform(inv.multiply(n.getScreenCTM())); return [round(p.x - ox), round(p.y - oy)]; };
+  // (a little larger than the diagram, the words at their size: a hand-written font is wider than Obsidian's)
+  const at = (n, x, y) => { const p = new win.DOMPoint(x, y).matrixTransform(inv.multiply(n.getScreenCTM())); return [round((p.x - ox) * SKETCH_SCALE), round((p.y - oy) * SKETCH_SCALE)]; };
   const box = n => {
     const b = n.getBBox(), c = [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]].map(q => at(n, q[0], q[1]));
     const xs = c.map(q => q[0]), ys = c.map(q => q[1]), x = Math.min(...xs), y = Math.min(...ys);
@@ -4483,7 +4670,8 @@ function sketchFromSvg(svg) {
         if (text) out.push(Object.assign({ type: 'text', text, size: Math.round(parseFloat(cs.fontSize) || 16) }, box(n)));
         continue;
       }
-      if (tag === 'image' || n.classList.contains('pele-marker')) continue;
+      // (an edge label's box is only the paper behind its word: the word is enough in a sketch)
+      if (tag === 'image' || n.classList.contains('pele-marker') || (tag === 'rect' && n.closest('.pele-edge-label'))) continue;
       const stroked = cs.stroke && cs.stroke !== 'none' && parseFloat(cs.strokeWidth) !== 0, filled = cs.fill && cs.fill !== 'none' && cs.fillOpacity !== '0';
       if (!stroked && !filled) continue;
       const dashed = Boolean(cs.strokeDasharray && cs.strokeDasharray !== 'none');
@@ -5516,9 +5704,9 @@ function createPen(app, settings) {
       const doc = view.dom.ownerDocument, win = doc.defaultView || window;
       const still = prefersReducedMotion(win);
       const speed = Number(settings && settings.penSpeed) > 0 ? Number(settings.penSpeed) : 1;
-      const k = 1 / speed;
-      const text = String(replacement == null ? '' : replacement);
       const h = how || {};
+      const k = 1 / (speed * (h.quick ? 2.5 : 1));      // (quick: a correction made while the writer types, see Autocorrect)
+      const text = String(replacement == null ? '' : replacement);
       const tally = h.tally || run;                     // whose time this edit's handwriting counts against (penLines)
       // The pen that writes it: the one asked for or, if that one is at another edit of this note, one that is free.
       const busy = new Set(Array.from(current).filter(c => c.view === view).map(c => c.slot));
@@ -6378,7 +6566,7 @@ async function runEdits(view, located, opts) {
     for (const e of located) if (!ok.includes(e)) skipped.push(Object.assign({}, e, { why: 'the text changed' }));
     if (!ok.length) return { applied, skipped, changes: ChangeSet.empty(docBefore.length), docBefore, docAfter: docBefore };
     const changes = ChangeSet.of(ok.map(e => ({ from: e.from, to: e.to, insert: e.replace })), docBefore.length);
-    view.dispatch({ changes, userEvent: 'lagrange.edit', scrollIntoView: true });
+    view.dispatch({ changes, userEvent: 'lagrange.edit', scrollIntoView: !opts.stay, annotations: isolateHistory ? [isolateHistory.of('full')] : [] });
     return { applied: ok, skipped, changes, docBefore, docAfter: view.state.doc };
   }
 
@@ -6411,7 +6599,7 @@ async function runEdits(view, located, opts) {
       const redo = undo.invert(after);
       view.dispatch({ changes: undo, annotations: own });
       const without = view.state.doc;
-      view.dispatch({ changes: redo, selection, userEvent: 'lagrange.edit' });
+      view.dispatch({ changes: redo, selection, userEvent: 'lagrange.edit', annotations: isolateHistory ? [isolateHistory.of('full')] : [] });
       result = { changes: redo, docBefore: without, docAfter: view.state.doc };
     }
     if (opts.onDone) { try { opts.onDone(result); } catch (e) { console.error('Lagrange', e); } }
@@ -6502,7 +6690,7 @@ async function runEdits(view, located, opts) {
           several, () => !run.closed && !run.cancelled);
         if (run.closed) break;
       }
-      if (!lanes) { await write(i); continue; }
+      if (!lanes) { await write(i, opts.how); continue; }
       await Promise.all(lanes.map(async (lane, slot) => {
         const tally = tallies[slot] || (tallies[slot] = { spent: 0 });
         for (let n = 0; n < lane.length && !run.closed && !failure; n++) {
@@ -8865,7 +9053,8 @@ class LagrangeSettingTab extends PluginSettingTab {
     containerEl.createEl('p', {
       cls: 'setting-item-description',
       text: 'Lagrange sends the open note and your messages (and, when it looks at the page, pictures of the note as ' +
-        'it is rendered) to the provider chosen here, and only when you ask it something or run one of its commands. ' +
+        'it is rendered) to the provider chosen here, and only when you ask it something or run one of its commands ' +
+        '(or, with Autocorrect “With the model”, when you pause in typing: then the paragraph you are typing). ' +
         'It makes no other network requests and collects nothing.',
     });
 
@@ -9029,6 +9218,20 @@ class LagrangeSettingTab extends PluginSettingTab {
       .setDesc('When you ask in the chat for a change to the open note, Lagrange makes it with its pen (one undo takes ' +
         'it back). Off: the chat only talks, and edits come from the Revise selection and Proofread note commands.')
       .addToggle(t => t.setValue(s.agenticEdits).onChange(async v => { s.agenticEdits = v; await save(); }));
+    new Setting(containerEl)
+      .setName('Autocorrect as I write')
+      .setDesc('The pen corrects slips of typing a moment after you type them, while you go on writing: a word you have ' +
+        'finished, never the one you are typing, and never in code, mathematics, front matter, links or tags. Each ' +
+        'correction is one undo step; a correction you undo is not made again. With this computer’s spelling ' +
+        'dictionary (the one spell-check uses) nothing leaves the computer, and only a word with one clear correction ' +
+        'is changed. With the model, the paragraph you are typing goes to the provider above a moment after you pause, ' +
+        'which costs a request each time and takes a second or more; it can tell “form” from “from” by the sense.')
+      .addDropdown(d => d
+        .addOption('off', 'Off')
+        .addOption('dictionary', 'With the spelling dictionary')
+        .addOption('model', 'With the model')
+        .setValue(s.autocorrect)
+        .onChange(async v => { s.autocorrect = v; if (v === 'off' && this.plugin.autocorrect) this.plugin.autocorrect.stop(); await save(); }));
 
     new Setting(containerEl).setName('Looking at the page').setHeading();
     new Setting(containerEl)
@@ -9115,6 +9318,225 @@ class LagrangeSettingTab extends PluginSettingTab {
   }
 }
 
+/* ---------------------------------------------------------------------------------------------------------------
+ * Autocorrect (Settings → Lagrange → Autocorrect; off unless the writer turns it on)
+ *
+ * Watches what the writer types in every editor. A moment after they stop typing (AC_IDLE; with the model,
+ * AC_MODEL_IDLE), or every AC_EVERY in a long spell of typing, the words they have finished since are looked at
+ * (wordsToCheck: never the word at the cursor, nor code, mathematics, front matter, links and the like), and the
+ * slips among them are given to the pen (runEdits, alongside the writer's typing: the pen never takes the keyboard
+ * or moves the cursor or the view), each run of corrections one undo step of its own. A correction the writer takes
+ * back with Undo is not made again in the session. The slips are found
+ *   - 'dictionary': by this computer's spelling dictionary (the one Obsidian's spell-check uses, asked through
+ *     Electron), when it has a correction that is a slip of typing away (typoFix); nothing leaves the computer;
+ *   - 'model': by the provider of Settings → Lagrange, which is given the paragraph and the words just typed, and
+ *     whose corrections are kept only where each is a slip of typing (modelTypoFixes).
+ * ------------------------------------------------------------------------------------------------------------- */
+const AC_IDLE = 900, AC_MODEL_IDLE = 1800, AC_EVERY = 4000, AC_RECENT = 40;
+const AUTOCORRECT_MODES = ['off', 'dictionary', 'model'];
+const AUTOCORRECT_SYSTEM =
+  'You are the autocorrect of Lagrange, a writing companion inside Obsidian. You are given a passage the writer is typing and ' +
+  'a list of words they have just typed in it. Correct only slips of typing and misspellings among those words, judging by the ' +
+  'passage: a letter left out, added, doubled, swapped or mistyped, a well-known misspelling, or two words run together. Change ' +
+  'nothing else: not the grammar, the style, the punctuation or the wording; not names, technical terms, or words in another ' +
+  'language; not a word that is right as it stands. Reply with only a JSON array, with nothing before or after it: ' +
+  '[{"find": "the word as typed", "replace": "the corrected word"}], or [] when every word is right.';
+
+/* Whether a misspelled word looks meant: a capitalised word that does not begin a sentence (a name), or a word the
+   note uses three times or more (a term of the writer's own). text: the note; w: {from, to, word}. Pure. */
+function meantWord(text, w) {
+  const t = String(text || '');
+  if (/^\p{Lu}/u.test(w.word)) {
+    const before = t.slice(Math.max(0, w.from - 12), w.from);
+    if (!/(^|[.!?…:]["”’)\]]*\s+|^\s*(?:[-*+]|\d+[.)]|#{1,6}|>)\s+|\n\s*)$/u.test(before) && w.from > 0) return true;
+  }
+  let n = 0;
+  for (const m of t.matchAll(AC_WORD)) if (m[0] === w.word && ++n >= 3) return true;
+  return false;
+}
+
+class Autocorrect {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.views = new Map();       // EditorView -> {ranges: [[from, to]] typed since the last look, timer, first, words: the words being asked about}
+    this.declined = new Set();    // words (in small letters) the writer has taken a correction of back, this session
+    this.recent = [];             // corrections made: {view, from, typo, fix}, to tell when one is taken back
+    this.running = null;          // the run of corrections being written, a promise
+    this.told = new Set();        // what the writer has been told once already this session
+  }
+  get mode() { return AUTOCORRECT_MODES.includes(this.plugin.settings.autocorrect) ? this.plugin.settings.autocorrect : 'off'; }
+  extension() { return EditorView.updateListener.of(update => this.watch(update)); }
+  watch(update) {
+    let st = this.views.get(update.view);
+    if (this.mode === 'off') { if (st) this.drop(update.view); return; }
+    if (!update.docChanged) return;
+    let typed = false;
+    for (const tr of update.transactions) {
+      if (!tr.docChanged) continue;
+      // (the editor of a pane is given another note's text when another note is opened in it, with no transaction:
+      // what was kept of the note before is then out of place, and is forgotten)
+      const len = tr.changes.length, fits = (...ps) => ps.every(p => p >= 0 && p <= len);
+      if (st) {
+        st.ranges = st.ranges.filter(([a, b]) => fits(a, b)).map(([a, b]) => [tr.changes.mapPos(a, -1), tr.changes.mapPos(b, 1)]);
+        for (const w of st.words || []) {
+          if (!fits(w.from, w.to)) { w.spoilt = true; continue; }
+          tr.changes.iterChangedRanges((fa, ta) => { if (fa < w.to && ta > w.from) w.spoilt = true; });
+          [w.from, w.to] = [tr.changes.mapPos(w.from, 1), tr.changes.mapPos(w.to, -1)];
+        }
+      }
+      this.recent = this.recent.filter(r => r.view !== update.view || fits(r.from));
+      for (const r of this.recent) if (r.view === update.view) r.from = tr.changes.mapPos(r.from, -1);
+      if (tr.isUserEvent('undo')) this.noteUndo(update.view, tr.state.doc);
+      if (!tr.isUserEvent('input.type') || tr.isUserEvent('input.type.compose')) continue;
+      if (!st) { st = { ranges: [], timer: 0, first: 0, words: null }; this.views.set(update.view, st); }
+      tr.changes.iterChangedRanges((fa, ta, fb, tb) => { st.ranges.push([fb, tb]); });
+      if (!st.first) st.first = Date.now();
+      typed = true;
+    }
+    if (st && st.ranges.length > 1) {
+      // what was typed, as few ranges as will cover it
+      const merged = [];
+      for (const [a, b] of st.ranges.slice().sort((x, y) => x[0] - y[0])) {
+        const last = merged[merged.length - 1];
+        if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b); else merged.push([a, b]);
+      }
+      st.ranges = merged;
+    }
+    if (typed) this.schedule(update.view, st);
+  }
+  schedule(view, st, ms) {
+    const win = view.dom.ownerDocument.defaultView || window;
+    if (st.timer) win.clearTimeout(st.timer);
+    const idle = this.mode === 'model' ? AC_MODEL_IDLE : AC_IDLE;
+    const wait = ms != null ? ms : (st.first && Date.now() - st.first > AC_EVERY ? 120 : idle);
+    st.timer = win.setTimeout(() => { st.timer = 0; void this.check(view); }, wait);
+  }
+  drop(view) {
+    const st = this.views.get(view);
+    if (st && st.timer) (view.dom.ownerDocument.defaultView || window).clearTimeout(st.timer);
+    this.views.delete(view);
+  }
+  stop() { for (const view of Array.from(this.views.keys())) this.drop(view); }
+  /* A correction taken back by Undo: the word as it was typed stands at its place again. */
+  noteUndo(view, doc) {
+    this.recent = this.recent.filter(r => {
+      if (r.view !== view) return true;
+      if (r.from + r.typo.length > doc.length || doc.sliceString(r.from, r.from + r.typo.length) !== r.typo) return true;
+      this.declined.add(r.typo.toLowerCase());
+      return false;
+    });
+  }
+  tell(key, text) {
+    if (this.told.has(key)) return;
+    this.told.add(key);
+    new Notice(text, 10000);
+  }
+  /* This computer's spelling dictionary, as Obsidian's spell-check uses it (Electron's), or null (on a phone or a
+     tablet, or when Electron does not offer it). */
+  dictionary() {
+    try {
+      if (obsidian.Platform && obsidian.Platform.isDesktopApp === false) return null;
+      const wf = nodeModule('electron').webFrame;
+      return wf && typeof wf.isWordMisspelled === 'function' && typeof wf.getWordSuggestions === 'function' ? wf : null;
+    } catch (e) { return null; }
+  }
+  /* Looks at the words finished since the last look, and has the pen correct the slips among them. */
+  async check(view) {
+    const st = this.views.get(view);
+    if (!st) return;
+    if (this.mode === 'off' || !view.dom.isConnected) { this.drop(view); return; }
+    // never in the way: while the pen is at work, Lagrange is editing, or the writer is composing a character
+    if (this.running || this.plugin.editing || activeRuns.get(view) || view.composing || st.words) { this.schedule(view, st, 600); return; }
+    const state = view.state, text = state.doc.toString(), head = state.selection.main.head;
+    const skips = proseSkips(text);
+    const words = [];
+    for (const [a, b] of st.ranges.filter(([x, y]) => y <= text.length)) for (const w of wordsToCheck(text, a, b, head, skips)) if (!words.some(x => x.from === w.from)) words.push(w);
+    // what is still being typed (the word at the cursor) is looked at again later; the rest is done
+    let start = head;
+    while (start > 0 && /[\p{L}\p{M}'’-]/u.test(text[start - 1])) start--;
+    st.ranges = start < head ? [[start, head]] : [];
+    st.first = st.ranges.length ? Date.now() : 0;
+    const sel = state.selection.ranges.filter(r => !r.empty);
+    const open = words.filter(w => !this.declined.has(w.word.toLowerCase()) && !sel.some(r => r.from < w.to && r.to > w.from)).sort((x, y) => x.from - y.from);
+    if (!open.length) return;
+    let fixes = [];
+    if (this.mode === 'dictionary') {
+      const wf = this.dictionary();
+      if (!wf) { this.tell('no-dictionary', 'Autocorrect: this device has no spelling dictionary Lagrange can ask (Obsidian on a phone or tablet). Choose “With the model” in Settings → Lagrange → Autocorrect instead.'); return; }
+      for (const w of open) {
+        let fix = null;
+        try {
+          if (wf.isWordMisspelled(w.word) && !meantWord(text, w)) {
+            // (a word with a capital first letter, at the head of a sentence: its suggestions in small letters first)
+            const lower = w.word.toLowerCase(), sugg = w.word !== lower ? wf.getWordSuggestions(lower).concat(wf.getWordSuggestions(w.word)) : wf.getWordSuggestions(w.word);
+            fix = typoFix(w.word, sugg);
+          }
+        } catch (e) { fix = null; }
+        if (fix) fixes.push({ w, fix });
+      }
+    } else {
+      st.words = open.map(w => Object.assign({}, w));
+      try {
+        fixes = await this.askModel(view, text, st.words);
+      } finally {
+        const asked = st.words;
+        st.words = null;
+        fixes = fixes.filter(f => !asked.find(w => w === f.w).spoilt);
+      }
+    }
+    if (!fixes.length || this.mode === 'off' || !view.dom.isConnected) return;
+    const doc = view.state.doc;
+    const located = fixes
+      .filter(f => doc.sliceString(f.w.from, f.w.to) === f.w.word && f.w.to !== view.state.selection.main.head &&
+        !/[\p{L}\p{M}\p{N}_'’-]/u.test(doc.sliceString(Math.max(0, f.w.from - 1), f.w.from) + doc.sliceString(f.w.to, Math.min(doc.length, f.w.to + 1))))
+      .map(f => ({ from: f.w.from, to: f.w.to, matched: f.w.word, replace: f.fix, reason: 'a slip of typing' }));
+    if (!located.length) return;
+    if (this.running || this.plugin.editing || activeRuns.get(view)) return;
+    this.running = this.correct(view, located);
+    try { await this.running; } finally { this.running = null; }
+  }
+  /* The model's corrections of the words just typed, in the paragraph they are in: [{w, fix}]. A failure is said
+     once, quietly, and autocorrect goes on. */
+  async askModel(view, text, words) {
+    const first = words[0], last = words[words.length - 1];
+    const a = Math.max(0, text.lastIndexOf('\n\n', first.from) + 1, first.from - 700), b0 = text.indexOf('\n\n', last.to);
+    const b = Math.min(b0 < 0 ? text.length : b0, last.to + 300);
+    const passage = text.slice(a, b);
+    const list = [...new Set(words.map(w => w.word))];
+    try {
+      const res = await complete(this.plugin.settings, {
+        purpose: 'autocorrect',
+        system: AUTOCORRECT_SYSTEM,
+        messages: [{ role: 'user', content: `The passage:\n<passage>\n${passage}\n</passage>\n\nThe words just typed: ${list.join(', ')}` }],
+        demo: () => JSON.stringify(list.filter(w => DEMO_TYPOS[w.toLowerCase()]).map(w => ({ find: w, replace: w[0] === w[0].toLowerCase() ? DEMO_TYPOS[w.toLowerCase()] : DEMO_TYPOS[w.toLowerCase()][0].toUpperCase() + DEMO_TYPOS[w.toLowerCase()].slice(1) }))),
+      }, {}, this.plugin.session);
+      const out = [];
+      for (const f of modelTypoFixes(res.text, words)) {
+        for (const w of words) if (w.word === f.find && !out.some(o => o.w === w)) out.push({ w, fix: f.replace });
+      }
+      return out;
+    } catch (e) {
+      this.tell('model-failed', `Autocorrect could not ask the model: ${String((e && e.message) || e).slice(0, 200)}`);
+      return [];
+    }
+  }
+  /* The pen writes the corrections, alongside the writer: one undo step. Without the pen they are made at once. */
+  async correct(view, located) {
+    const plugin = this.plugin;
+    const result = await runEdits(view, located, { pen: plugin.settings.showPen ? plugin.pen : null, concurrent: true, pens: 1, stay: true, how: { quick: true, stay: true } });
+    if (result.failure) { plugin.pen.destroy(); plugin.pen = createPen(plugin.app, plugin.settings); }
+    const doc = view.state.doc.toString();
+    for (const e of result.applied) {
+      // where the correction stands now: the nearest place that holds it
+      let best = -1;
+      for (let i = doc.indexOf(e.replace, Math.max(0, e.from - 300)); i >= 0 && i <= e.from + 300; i = doc.indexOf(e.replace, i + 1)) if (best < 0 || Math.abs(i - e.from) < Math.abs(best - e.from)) best = i;
+      if (best >= 0) this.recent.push({ view, from: best, typo: e.matched, fix: e.replace });
+    }
+    if (this.recent.length > AC_RECENT) this.recent.splice(0, this.recent.length - AC_RECENT);
+    return result;
+  }
+}
+
 class LagrangePlugin extends Plugin {
   async onload() {
     // One settings object for the plugin's lifetime: the pen keeps a reference to it.
@@ -9124,11 +9546,13 @@ class LagrangePlugin extends Plugin {
     this.edits = [];       // Lagrange's runs of edits, oldest first (see recordEdit); at most EDIT_RECORDS
     this.editClock = 0;    // counts the runs, so a rewind knows which came after a checkpoint
     this.pen = createPen(this.app, this.settings);
+    this.autocorrect = new Autocorrect(this);
 
     this.registerEditorExtension([
       runExtension(),
       this.pen.extension,
       EditorView.updateListener.of(update => this.trackEdits(update)),
+      this.autocorrect.extension(),
     ]);
     this.registerView(VIEW_TYPE, leaf => new LagrangeChatView(leaf, this));
     this.addRibbonIcon(ICON, 'Open Lagrange', () => { this.activateView(); });
@@ -9202,6 +9626,7 @@ class LagrangePlugin extends Plugin {
   }
 
   onunload() {
+    if (this.autocorrect) this.autocorrect.stop();
     if (this.pen) this.pen.destroy();
   }
 
@@ -9445,6 +9870,8 @@ class LagrangePlugin extends Plugin {
       result = { applied: located, skipped: [] };
     } else {
       const concurrent = Boolean(this.settings.editWhileWriting);
+      // (autocorrect may be writing a correction in this note: it is set down at once, and the request's edits follow)
+      if (this.autocorrect && this.autocorrect.running) { this.pen.finish(); await this.autocorrect.running.catch(() => {}); }
       const writing = this.settings.showPen
         ? new Notice(concurrent ? 'Lagrange is writing… (Esc to stop)' : 'Lagrange is writing… (Esc to stop; click or type in the note to have it all at once)', 0)
         : null;
@@ -9984,5 +10411,6 @@ Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERN
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
 Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: LagrangePlates.NAMES, codeLabel, openTail, openProse, tailInline, openDisplay, OPEN_MATH_HOLD, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
+Object.assign(LagrangePlugin.internals, { activeRuns, proseSkips, wordsToCheck, typoDistance, typoLimit, typoFix, DEMO_TYPOS, modelTypoFixes, meantWord, AUTOCORRECT_SYSTEM, AUTOCORRECT_MODES });
 Object.assign(LagrangePlugin.internals, { DEMO_MERMAID, diagramOrder, mermaidBlocks, mermaidState, SKETCH_MERMAID });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });

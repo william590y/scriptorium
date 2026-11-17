@@ -281,7 +281,7 @@
     const count = t => els.filter(e => e.type === t).length;
     const words = els.filter(e => e.type === 'text').map(e => e.text).join(' | ');
     info.push(`drawing: ${els.length} elements: ${['rectangle', 'diamond', 'ellipse', 'arrow', 'line', 'text'].map(t => `${count(t)} ${t}`).join(', ')}`);
-    if (count('rectangle') < 3) bad.push(`${count('rectangle')} rectangles (3 boxes and 3 label boxes expected)`);
+    if (count('rectangle') !== 3) bad.push(`${count('rectangle')} rectangles (3 boxes expected; an edge's label is a word alone)`);
     if (count('diamond') !== 1) bad.push(`${count('diamond')} diamonds`);
     if (count('ellipse') !== 2) bad.push(`${count('ellipse')} ellipses`);
     if (count('arrow') !== 5) bad.push(`${count('arrow')} arrows`);

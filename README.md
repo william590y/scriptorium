@@ -318,6 +318,27 @@ typing goes in as you type, the pen carries on, and an edit whose words you have
 and listed as such in the chat. **Esc** stops the pen either way (edits not yet written are not made). The chat keeps
 to its newest line while Lagrange thinks and writes, unless you scroll up.
 
+**Autocorrect.** With **Settings → Lagrange → Autocorrect as I write** on (it is off until you turn it on), the pen
+corrects slips of typing a moment after you make them, while you go on writing: when you pause (or every few
+seconds in a long spell of typing) the words you have finished since are looked at, and the pen strikes a misspelled
+one and writes the correction in, as it writes any edit. It never touches the word you are still typing, nor
+anything in code (blocks or inline), mathematics, front matter, links and embeds, tags, web addresses, comments or
+tables; it leaves a capitalised word inside a sentence (a name) and a word the note uses three times or more (a term
+of your own) alone. The pen does not take the keyboard: what you type while it writes goes in at the cursor as you
+type it, and neither the cursor nor the view moves. Each run of corrections is one undo step of its own (never
+joined to your typing), and a correction you undo is not made again in that session. Two ways to find the slips:
+- **With the spelling dictionary**: the dictionary Obsidian's spell-check uses (your system's, through Electron) says
+  which words are misspelled, and a word is corrected only when the dictionary's best suggestion is a slip of typing
+  away (one letter added, left out, changed, or two swapped, in a word of up to four letters; two in a longer one; a
+  word that would only change its capitals is left alone). Nothing leaves the computer. Not on a phone or tablet.
+- **With the model**: the paragraph you are typing, and the words you have just typed in it, go to the provider of
+  **Settings → Lagrange** a little after you pause (a request each time; it takes a second or more, and with a
+  subscription it counts against it); a correction is kept only when it is a slip of typing in one of those words,
+  so the model can tell "form" from "from" by the sense but cannot reword. In demo mode a small built-in list of
+  common slips stands in for it.
+With the pen off, the corrections are made at once. `plugins-tests/autocorrect.harness.js` checks all of this in a
+real Obsidian.
+
 **Undo and redo.** One **Undo** in the editor takes back all the edits of a request. The two arrows at the head of the
 chat do the same for Lagrange's edits only: **Undo** takes back its latest run of edits and **Redo** makes it again,
 run by run, and each run in the chat has its own **Undo Lagrange's edits** button. If you have typed in the note
@@ -361,15 +382,36 @@ folder of their own in your temporary folder, which only you can read, and delet
 Lagrange from ever rendering or capturing the page, turn off **Settings → Lagrange → Let Lagrange look at the
 rendered page**.
 
-**Diagrams.** Ask for a figure and Lagrange writes one into the note, and the pen draws it: a technical or
-mathematical figure (a graph, a construction, a circuit, a commutative diagram, a plot) as a `tikz` block, which the
-[TikZJax](https://github.com/artisticat1/obsidian-tikzjax) plugin sets, and a free-form sketch as an
+**Diagrams.** Ask for a figure and Lagrange writes one into the note, and the pen draws it: a diagram of flow or
+structure (a flowchart, a sequence of messages, states, classes or entities, a timeline, a Gantt chart, a mind map, a
+pie chart) as a `mermaid` block, which Obsidian draws itself with no plugin; a technical or mathematical figure (a
+graph, a construction, a circuit, a commutative diagram, a plot) as a `tikz` block, which the
+[TikZJax](https://github.com/artisticat1/obsidian-tikzjax) plugin sets; and a free-form sketch as an
 [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawing, a file next to the note that the note
-embeds. In Live Preview the figure is not typed out: it is kept unseen until the pen comes to it, then drawn line by
-line in its own order, its labels last; a key or a click shows it whole at once. In Source mode the pen writes the
-source. Both plugins are separate from Scriptorium and are installed with it (see
+embeds. In Live Preview the figure is not typed out: it is kept unseen until the pen comes to it, then drawn piece by
+piece as one would draw it by hand. A Mermaid flowchart grows from its first node: the node (its outline, then its
+words), then each arrow that leaves it with its label, then the node the arrow reaches, and so on; a sequence
+diagram draws its actors, their lifelines, then the messages in order; an Excalidraw drawing is drawn element by
+element in the order it was made, each shape and then its words; a TikZ figure line by line in its own order, its
+labels last. A key or a click shows it whole at once. In Source mode the pen writes the source. Every kind of Mermaid
+diagram Obsidian 1.15 draws was tried in it (flowcharts, sequence, class, state, entity-relationship, Gantt, pie,
+timeline, mind map, journey, git graph, quadrant and XY charts), and Lagrange is told which to use and how to keep a
+block readable; a block Obsidian cannot read shows its error in place of the diagram, so the pen does not wait for
+it and the chat says so. TikZJax and Excalidraw are separate from Scriptorium and are installed with it (see
 [The diagram plugins](#the-diagram-plugins)); where one is off, Lagrange is told so, does not write that kind of
-figure, and says why in the chat. In demo mode, with TikZJax on, *draw a diagram* shows the pen at it without a model.
+figure, offers a Mermaid diagram where one would serve, and says why in the chat.
+
+A sketch may also be asked of the model as a Mermaid flowchart: Obsidian draws the flowchart out of sight, and
+Lagrange turns what it drew (its boxes, diamonds and rounds, its arrows along their curves, and its words where they
+stand) into a hand-drawn Excalidraw drawing that you can then move about, restyle and add to in Excalidraw. The
+command **Lagrange: Turn this Mermaid diagram into an Excalidraw drawing** does the same for a Mermaid block of yours
+(the one the cursor is in, or the nearest): the pen puts the drawing's embed where the block was and draws it, and
+one Undo brings the block back (the drawing stays in the vault). (Excalidraw's own Mermaid import is not used: in
+Obsidian 1.15 it never finishes.) **Lagrange: Draw the diagram again** has the pen draw the diagram nearest the
+cursor in Live Preview (Mermaid, TikZ or Excalidraw, yours or Lagrange's), as it draws a new one; Escape, a click or
+a key shows it whole. In demo mode *draw a flowchart* writes a Mermaid diagram, *draw a diagram* a TikZ figure (with
+TikZJax on; a Mermaid diagram without), and *draw a sketch* (with Excalidraw on) makes a hand-drawn drawing from
+Mermaid. `plugins-tests/diagrams.harness.js` checks all of this in a real Obsidian.
 
 What TikZJax takes was tried construct by construct in Obsidian 1.15 with TikZJax 0.5.2, and Lagrange is told the
 same: a block is a whole document body (`\usepackage` lines, one `\usetikzlibrary{…}` line, `\begin{document}`, the
@@ -397,7 +439,8 @@ it comes. Notes are not affected either way: figures in Reading view and Live Pr
 in its own store as before. `plugins-tests/tikzjax-repair.harness.js` checks all of this in a real Obsidian.
 
 **What the chat shows.** Replies, and your own messages, are set as Obsidian sets a note: code with its colours and a
-copy button, inline and displayed mathematics, Mermaid diagrams, a `tikz` figure where TikZJax is on and an Excalidraw
+copy button, inline and displayed mathematics, Mermaid diagrams (drawn in the reply's ink, piece by piece in the
+pen's order, as they come; a `tikz` figure too, when TikZJax has set it; nothing moves with reduced motion), a `tikz` figure where TikZJax is on and an Excalidraw
 embed where Excalidraw is on (without the plugin, the source in a code block and a line that says why), pictures and
 video of the vault. A `tikz` figure that TikZJax cannot draw (an error in its TikZ), or has not drawn after 30
 seconds, gives way to its source under a line that says which, with what TeX said where Scriptorium's repair of

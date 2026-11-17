@@ -593,10 +593,11 @@ test('The replaceable sections are delimited once each, and their functions are 
   assert.equal(typeof Lagrange.rangeRects, 'function');
   assert.equal(Lagrange.rangeRects.length, 3);
   assert.doesNotMatch(js, /require\((['"])(fs|path|child_process|electron|http|https|os)\1\)/, 'no Node or Electron modules loaded at the top level');
-  // Node modules come only through nodeModule(), which refuses on mobile, and only the four the CLI providers need.
+  // Node modules come only through nodeModule(), which refuses on mobile: the four the CLI providers need, and
+  // Electron (its webFrame: the spelling dictionary autocorrect asks, on a computer).
   const loaded = [...js.matchAll(/nodeModule\((['"])([^'"]+)\1\)/g)].map(m => m[2]);
   assert.ok(loaded.length > 0);
-  for (const m of loaded) assert.ok(['child_process', 'fs', 'os', 'path'].includes(m), `unexpected Node module ${m}`);
+  for (const m of loaded) assert.ok(['child_process', 'fs', 'os', 'path', 'electron'].includes(m), `unexpected Node module ${m}`);
   assert.doesNotMatch(js, /\b(temperature|top_p|top_k)\b/, 'no sampling parameters (rejected on API version 2026-10-21)');
 });
 
