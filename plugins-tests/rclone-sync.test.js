@@ -690,13 +690,13 @@ test('the timer: soon after Obsidian starts, then every five minutes; off when n
 test('a change is synced a little after the last one, and the regular timer is not put off by a long spell of writing', async () => {
   const { e, c, runs } = engine();
   e.start(false);
-  for (let i = 0; i < 20; i++) { e.touch(); await c.advance(20000); }   // typing for almost seven minutes, a change every 20 s
+  for (let i = 0; i < 84; i++) { e.touch('Notes/a.md'); await c.advance(5000); }   // typing for seven minutes, Obsidian saving every few seconds
   assert.deepEqual(runs, ['timer'], 'the five-minute timer still ran; no run after each keystroke');
   await c.advance(S.SYNC_TIMES.onChange);
   assert.deepEqual(runs, ['timer', 'change']);
   assert.equal(e.pending(), false);
   e.touch();
-  assert.deepEqual(c.pending(), [S.SYNC_TIMES.onChange, 5 * MIN - 20000]);
+  assert.deepEqual(c.pending(), [S.SYNC_TIMES.onChange, 5 * MIN - 5000], 'the run came 15 s after the last save, 5 s before the end of the wait');
   assert.equal(e.pending(), true, 'something is waiting (asked before Obsidian quits)');
 });
 
@@ -917,4 +917,245 @@ test('an update keeps the sync: a vault that does not sync is told nothing about
   const dir = tmp(t, 'plain');
   fs.cpSync(path.join(__dirname, '..', 'vault'), dir, { recursive: true });
   assert.ok(!S.planVaultSetup(fs, path, S.setupPackage(fs, path, dir), dir).notes.includes(SYNC_KEPT));
+});
+
+/* ---------- A faster sync (1.5.0): fewer questions to Drive, no run that has nothing to do, Drive's changes sooner ---------- */
+
+test('every listing of Drive asks for many folders at once (--fast-list): the sync, the comparison, the sizes and retrieving', async t => {
+  const paths = S.syncPaths(path, tmp(t, 'fl'), process.platform);
+  const a = S.syncBisyncArgs({ path, local: '/v', link: { root: 'my', path: 'V' }, paths, id: 'x', settings: S.syncSettings({}), stamp: '2026-11-16' });
+  assert.ok(a.includes('--fast-list'));
+  for (const kept of ['--check-access', '--max-delete', '--backup-dir1', '--resilient', '--recover', '--conflict-resolve']) assert.ok(a.includes(kept), `${kept} is still there`);
+  const seen = [];
+  const api = S.rcloneApi({ spawn: (exe, args) => { seen.push(args); throw Object.assign(new Error('x'), { code: 'ENOENT' }); }, fs, path, exe: 'rclone', paths, env: {} });
+  const link = { root: 'my', path: 'V' };
+  await api.size(link, '/f').catch(() => {});
+  await api.compare('/v', link, '/f').catch(() => {});
+  await api.copy(link, '/v', '/f').catch(() => {});
+  assert.deepEqual(seen.map(x => x[5]), ['size', 'check', 'copy']);
+  for (const x of seen) assert.ok(x.includes('--fast-list'), x[5]);
+});
+
+test('where the time of a run went: bisync’s steps, from its log, in the order they came', () => {
+  assert.equal(S.syncPhaseOf('Building Path1 and Path2 listings'), 'listing');
+  assert.equal(S.syncPhaseOf('Path1 checking for diffs'), 'comparing');
+  assert.equal(S.syncPhaseOf('Applying changes'), 'copying');
+  assert.equal(S.syncPhaseOf('- Path1             Resync is copying files to                  - Path2'), 'copying');
+  assert.equal(S.syncPhaseOf('Updating listings'), 'recording');
+  assert.equal(S.syncPhaseOf('Resync updating listings'), 'recording');
+  assert.equal(S.syncPhaseOf('Bisync successful'), 'finishing');
+  assert.equal(S.syncPhaseOf('Copied (new)'), '');
+  const marks = [{ name: 'listing', at: 1800 }, { name: 'comparing', at: 3300 }, { name: 'copying', at: 3310 }, { name: 'recording', at: 4400 }, { name: 'finishing', at: 4450 }];
+  assert.deepEqual(S.syncPhases(marks, 1000, 4500), [
+    { name: 'start', ms: 800 }, { name: 'listing', ms: 1500 }, { name: 'comparing', ms: 10 }, { name: 'copying', ms: 1090 }, { name: 'recording', ms: 50 }, { name: 'finishing', ms: 50 }]);
+  assert.equal(S.syncPhasesText(S.syncPhases(marks, 1000, 4500)), 'start 0.8 s · listing 1.5 s · copying 1.1 s · recording 0.1 s · finishing 0.1 s');
+  // a first sync copies in both directions: one step, both times
+  const first = [{ name: 'listing', at: 100 }, { name: 'copying', at: 200 }, { name: 'copying', at: 300 }, { name: 'recording', at: 900 }];
+  assert.deepEqual(S.syncPhases(first, 0, 1000).map(p => [p.name, p.ms]), [['start', 100], ['listing', 100], ['copying', 700], ['recording', 100]]);
+  assert.deepEqual(S.syncPhases([], 0, 120), [{ name: 'start', ms: 120 }]);
+});
+
+test('the steps of a run are kept as rclone says them, with the moment each came, and reach the report', async t => {
+  const dir = tmp(t, 'marks');
+  const fail = path.join(dir, 'fail.json');
+  fs.writeFileSync(fail, JSON.stringify({ code: 0, lines: [{ level: 'info', msg: 'Building Path1 and Path2 listings' }, { level: 'info', msg: 'Path1 checking for diffs' }, { level: 'info', msg: 'No changes found' }, { level: 'info', msg: 'Updating listings' }, { level: 'info', msg: 'Bisync successful' }] }));
+  const paths = S.syncPaths(path, dir, process.platform);
+  fs.writeFileSync(paths.conf, '[scriptorium-drive]\ntype = alias\nremote = /tmp\n');
+  const runs = [];
+  const api = S.rcloneApi({ spawn: fakeSpawn, fs, path, exe: 'rclone', paths, env: Object.assign({}, process.env, { FAKE_RCLONE_FAIL: fail }), log: r => runs.push(r) });
+  const r = await api.bisync(S.syncBisyncArgs({ path, local: dir, link: { root: 'my', path: 'V' }, paths, id: 'x', settings: S.syncSettings({}), stamp: '2026-11-16' }));
+  assert.deepEqual(r.marks.map(m => m.name), ['listing', 'comparing', 'recording', 'finishing']);
+  assert.ok(r.marks.every((m, i) => i === 0 || m.at >= r.marks[i - 1].at));
+  assert.deepEqual(runs[0].phases.map(p => p.name), ['start', 'listing', 'comparing', 'recording', 'finishing']);
+  assert.equal(runs[0].phases.reduce((n, p) => n + p.ms, 0), runs[0].ms, 'the steps add up to the run');
+  const text = S.syncReport({ version: '1.5.0', rclone: {}, connected: true, type: 'drive', linked: true, first: true, settings: S.syncSettings({}), looks: { n: 42, at: '10:41:00', ms: 610 } },
+    [Object.assign({ at: '10:40:00', why: 'change' }, runs[0]), { at: '10:41:00', what: 'drive changed', ms: 0, code: 0, lines: [{ level: 'note', msg: '2 changes in Drive that the last sync has not seen: a sync follows.' }] },
+      { at: '10:41:01', what: 'sync', why: 'remote', ms: 2500, code: 0, lines: [], phases: [{ name: 'start', ms: 700 }, { name: 'listing', ms: 1600 }, { name: 'recording', ms: 200 }] }], '', []);
+  assert.ok(/10:40:00 sync \(after a change\): ended with 0 after \d+\.\d s \((start|listing) /.test(text), text);
+  assert.ok(text.includes('10:41:01 sync (Drive had changed): ended with 0 after 2.5 s (start 0.7 s · listing 1.6 s · recording 0.2 s)'), text);
+  assert.ok(text.includes('10:41:00 drive changed: 2 changes in Drive that the last sync has not seen: a sync follows.'));
+  assert.ok(text.includes('Looks at Drive for changes since Obsidian started: 42, the last at 10:41:00 UTC (0.6 s)'));
+  assert.ok(text.includes('every 5 min, 15 s after a change, and when Drive has changed (a look every 1 min)'));
+});
+
+test('rclone’s record of a side is read: files and folders, sizes, times to the nanosecond, names as Go quotes them', () => {
+  const text = [
+    '# bisync listing v1 from 2026-11-17T01:33:52.620700470+0000',
+    'd       -1 - - 2026-11-17T01:32:23.250854071+0000 ".obsidian"',
+    '-       25 - - 2026-10-18T01:32:24.147000074+0000 ".obsidian/app.json"',
+    '-     1234 md5:0123456789abcdef0123456789abcdef - 2026-11-16T20:00:00.5-0500 "Book/Chapter \\"One\\".md"',
+    '-        3 - - 2026-11-16T20:00:00Z "Caf\\u00e9/r\\xc3\\xa9sum\\xc3\\xa9.md"',
+    'not a line',
+    '',
+  ].join('\n');
+  const l = S.syncParseListing(text);
+  assert.equal(l.size, 4);
+  assert.deepEqual(l.get('.obsidian'), { dir: true, size: -1, mtime: Date.parse('2026-11-17T01:32:23Z') + 250.854071 });
+  assert.equal(l.get('.obsidian/app.json').size, 25);
+  assert.equal(l.get('.obsidian/app.json').mtime, Date.parse('2026-10-18T01:32:24Z') + 147.000074);
+  assert.equal(l.get('Book/Chapter "One".md').mtime, Date.parse('2026-11-17T01:00:00Z') + 500);
+  assert.ok(l.has('Café/résumé.md'));
+  assert.equal(S.goUnquote('"a\\tb\\\\c"'), 'a\tb\\c');
+  assert.equal(S.goUnquote('"\\U0001F600"'), '😀');
+  assert.ok(Number.isNaN(S.syncListTime('yesterday')));
+});
+
+test('a change needs no run when the file is exactly as the last sync left it (its own downloads); any other does', t => {
+  const listing = S.syncParseListing([
+    '-       10 - - 2026-11-16T20:00:00.123000000+0000 "Notes/a.md"',
+    '-        4 - - 2026-11-16T20:00:01.000000000+0000 "Notes/b.md"',
+    'd       -1 - - 2026-11-16T20:00:00.000000000+0000 "Notes"',
+  ].join('\n'));
+  const disk = {
+    'Notes/a.md': { dir: false, size: 10, mtime: Date.parse('2026-11-16T20:00:00.123Z') },        // downloaded by the sync
+    'Notes/b.md': { dir: false, size: 5, mtime: Date.parse('2026-11-16T20:00:09Z') },             // the writer changed it
+    'Notes': { dir: true, size: 0, mtime: 0 },
+    'Notes/c.md': { dir: false, size: 1, mtime: 1 },                                             // new since the sync
+  };
+  const stat = p => disk[p] || null;
+  assert.equal(S.syncSettled(listing, ['Notes/a.md'], stat), true);
+  assert.equal(S.syncSettled(listing, ['Notes', 'Notes/a.md'], stat), true, 'a folder the sync recorded');
+  assert.equal(S.syncSettled(listing, ['Gone/x.md'], stat), true, 'deleted, and the sync recorded it deleted');
+  assert.equal(S.syncSettled(listing, ['Notes/a.md', 'Notes/b.md'], stat), false, 'one changed file is enough');
+  assert.equal(S.syncSettled(listing, ['Notes/c.md'], stat), false, 'a new file');
+  assert.equal(S.syncSettled(listing, ['Notes/a.md'], p => (p === 'Notes/a.md' ? Object.assign({}, disk[p], { mtime: disk[p].mtime + 1 }) : null)), false, 'a millisecond later is a change');
+  assert.equal(S.syncSettled(listing, ['Notes/a.md'], p => (p === 'Notes/a.md' ? Object.assign({}, disk[p], { size: 11 }) : null)), false);
+  assert.equal(S.syncSettled(listing, ['Notes/b.md'], () => null), false, 'deleted since the sync');
+  assert.equal(S.syncSettled(listing, ['Notes'], () => ({ dir: false, size: 1, mtime: 1 })), false, 'a folder that became a file');
+  assert.equal(S.syncSettled(listing, [], stat), false, 'nothing to go by');
+  assert.equal(S.syncSettled(null, ['Notes/a.md'], stat), false, 'no record');
+  // the record on disk: the vault's own, not rclone's working copies
+  const dir = tmp(t, 'lst');
+  fs.writeFileSync(path.join(dir, 'local_v..scriptorium-drive_V.path1.lst-new'), 'new');
+  fs.writeFileSync(path.join(dir, 'local_v..scriptorium-drive_V.path2.lst'), 'two');
+  assert.equal(S.syncReadListing(fs, path, dir, 'path1'), null);
+  fs.writeFileSync(path.join(dir, 'local_v..scriptorium-drive_V.path1.lst'), 'one');
+  assert.equal(S.syncReadListing(fs, path, dir, 'path1'), 'one');
+  assert.equal(S.syncReadListing(fs, path, dir, 'path2'), 'two');
+  assert.equal(S.syncReadListing(fs, path, path.join(dir, 'none'), 'path1'), null);
+});
+
+test('the look at Drive: one question for forty folders, and only what the last sync has not seen counts', () => {
+  const ids = Array.from({ length: 85 }, (_, i) => `id${i}`);
+  const qs = S.syncPollQueries('2026-11-16T20:00:00Z', ids);
+  assert.equal(qs.length, 3);
+  assert.ok(qs[0].startsWith("modifiedTime > '2026-11-16T20:00:00Z' and ('id0' in parents or 'id1' in parents"));
+  assert.equal((qs[2].match(/in parents/g) || []).length, 5);
+  assert.deepEqual(S.syncPollQueries('2026-11-16T20:00:00Z', ["bad' or name contains 'x", 'ok_1-2']), ["modifiedTime > '2026-11-16T20:00:00Z' and ('ok_1-2' in parents)"], 'an id that is not an id is never put in a question');
+  const listing = S.syncParseListing([
+    '-       10 - - 2026-11-16T20:00:00.123000000+0000 "a.md"',
+    'd       -1 - - 2026-11-16T20:00:00.000000000+0000 "Book"',
+    '-        4 - - 2026-11-16T20:00:01.000000000+0000 "Book/one.md"',
+    '-        4 - - 2026-11-16T20:00:01.000000000+0000 "Book/gone.md"',
+  ].join('\n'));
+  const folders = { root: 'ROOT', map: new Map([['BOOK', 'Book']]) };
+  const f = (name, parent, size, time, more) => Object.assign({ name, parents: [parent], size: String(size), modifiedTime: time, mimeType: 'text/markdown' }, more);
+  assert.deepEqual(S.syncPollChanged([
+    f('a.md', 'ROOT', 10, '2026-11-16T20:00:00.123Z'),                       // uploaded by the last sync itself
+    f('one.md', 'BOOK', 4, '2026-11-16T20:00:01.000Z'),
+    f('other.md', 'ELSEWHERE', 4, '2026-11-16T20:05:00Z'),                   // somewhere else in Drive
+    f('Budget', 'BOOK', 0, '2026-11-16T20:05:00Z', { mimeType: 'application/vnd.google-apps.spreadsheet' }),
+  ], folders, listing), [], 'nothing new');
+  assert.deepEqual(S.syncPollChanged([f('one.md', 'BOOK', 5, '2026-11-16T20:06:00Z')], folders, listing), ['Book/one.md'], 'changed in Drive');
+  assert.deepEqual(S.syncPollChanged([f('new.md', 'ROOT', 1, '2026-11-16T20:06:00Z')], folders, listing), ['new.md'], 'new in Drive');
+  assert.deepEqual(S.syncPollChanged([f('gone.md', 'BOOK', 4, '2026-11-16T20:00:01.000Z', { trashed: true })], folders, listing), ['Book/gone.md'], 'put in the trash in Drive');
+  assert.deepEqual(S.syncPollChanged([f('never.md', 'BOOK', 4, '2026-11-16T20:00:01.000Z', { trashed: true })], folders, listing), [], 'in the trash and never synced');
+  assert.deepEqual(S.syncPollChanged([f('Part 2', 'BOOK', 0, '2026-11-16T20:06:00Z', { mimeType: 'application/vnd.google-apps.folder' })], folders, listing), ['Book/Part 2'], 'a new folder');
+  assert.deepEqual(S.syncPollChanged([f('Book', 'ROOT', 0, '2026-11-16T20:06:00Z', { mimeType: 'application/vnd.google-apps.folder' })], folders, listing), [], 'a folder the sync knows');
+  assert.notEqual(S.syncFoldersKey(listing), S.syncFoldersKey(S.syncParseListing('d -1 - - 2026-11-16T20:00:00Z "Other"')));
+  assert.equal(S.syncFoldersKey(listing), S.syncFoldersKey(S.syncParseListing('d -1 - - 2026-11-17T20:00:00Z "Book"\n- 3 - - 2026-11-17T20:00:00Z "x.md"')), 'only the folders count');
+});
+
+test('the sync’s own downloads set off no second run; a change of the writer’s, or one whose file is not known, does', async () => {
+  let settledAnswer = true, asked = [];
+  const x = engine({});
+  x.e.o.settled = async paths => { asked.push(paths.slice().sort()); return settledAnswer; };
+  x.e.start(false);
+  await x.e.run('timer');                               // a run that went through: there is a record to compare with
+  x.e.touch('Notes/downloaded.md'); x.e.touch('Notes/also.md');
+  await x.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual(x.runs, ['timer'], 'no run: both files are as the sync left them');
+  assert.deepEqual(asked, [['Notes/also.md', 'Notes/downloaded.md']]);
+  assert.equal(x.e.pending(), false, 'nothing waits (nothing to do as Obsidian quits)');
+  settledAnswer = false;
+  x.e.touch('Notes/mine.md');
+  await x.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual(x.runs, ['timer', 'change'], 'the writer’s change is synced');
+  x.e.touch();                                          // a change with no path: always synced
+  settledAnswer = true;
+  await x.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual(x.runs, ['timer', 'change', 'change']);
+  x.e.touch('a.md', 'old name.md');                     // a rename: both names are looked at
+  await x.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual(asked[asked.length - 1], ['a.md', 'old name.md']);
+  // a check that fails, or a sync whose last run failed, falls back to a run
+  x.e.o.settled = async () => { throw new Error('unreadable record'); };
+  x.e.touch('b.md');
+  await x.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual(x.runs.slice(-1), ['change']);
+  const y = engine({ result: () => { throw S.syncProblem('network', 'Offline.', '', ''); } });
+  let yAsked = 0;
+  y.e.o.settled = async () => { yAsked++; return true; };
+  y.e.start(false);
+  await y.e.run('timer');
+  y.e.touch('Notes/a.md');
+  await y.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual([y.runs, yAsked], [['timer', 'change'], 0], 'after a failed run the record is not trusted: the change is synced');
+  // changes made during a run are compared after it, with what that run recorded
+  let open;
+  const z = engine({});
+  const zAsked = [];
+  z.e.o.settled = async paths => { zAsked.push(paths.slice()); return true; };
+  z.o.gate = new Promise(r => { open = r; });
+  z.e.start(false);
+  const first = z.e.run('timer');
+  z.e.touch('Downloaded during the run.md');
+  z.o.gate = null; open(); await first;
+  await z.c.advance(S.SYNC_TIMES.onChange);
+  assert.deepEqual([z.runs, zAsked], [['timer'], [['Downloaded during the run.md']]]);
+});
+
+test('Drive is looked at every minute while nothing else goes on, and a change there is synced at once', async () => {
+  const looks = [];
+  let answer = false, fail = false;
+  const x = engine({});
+  x.e.o.poll = async since => { looks.push(since); if (fail) throw new Error('offline'); return answer; };
+  x.e.start(false);
+  assert.ok(x.c.pending().includes(S.SYNC_TIMES.poll));
+  await x.c.advance(S.SYNC_TIMES.poll);
+  assert.deepEqual(looks, [], 'no look before a run has gone through: there is nothing to compare with');
+  await x.e.run('manual');
+  const okAt = 1000000 + S.SYNC_TIMES.poll;            // the clock's start + the minute that passed
+  await x.c.advance(S.SYNC_TIMES.poll);
+  assert.equal(looks.length, 1);
+  assert.equal(looks[0], new Date(okAt - S.SYNC_TIMES.pollMargin).toISOString().replace(/\.\d+Z$/, 'Z'), 'since the last run began, less a margin for clocks');
+  assert.deepEqual(x.runs, ['manual'], 'nothing changed in Drive: no run');
+  answer = true;
+  await x.c.advance(S.SYNC_TIMES.poll);
+  assert.deepEqual(x.runs, ['manual', 'remote'], 'a change in Drive: a run at once');
+  answer = false; fail = true;
+  await x.c.advance(S.SYNC_TIMES.poll);
+  assert.equal(x.e.state.status, 'idle', 'a look that fails is no problem for the writer');
+  assert.ok(x.c.pending().includes(2 * S.SYNC_TIMES.poll), 'and the looks go on, less often after one that failed');
+  fail = false;
+  await x.c.advance(2 * S.SYNC_TIMES.poll);
+  assert.ok(x.c.pending().includes(S.SYNC_TIMES.poll), 'and every minute again once one goes through');
+  // no look while a change waits, while syncing by itself is off, or after stop
+  x.e.touch('a.md');
+  const before = looks.length;
+  await x.c.advance(S.SYNC_TIMES.onChange - 1);
+  x.o.settings = S.syncSettings({ sync: { auto: false } });
+  await x.c.advance(S.SYNC_TIMES.poll * 2);
+  assert.equal(looks.length, before);
+  x.e.stop();
+  assert.deepEqual(x.c.pending(), []);
+  // a problem that needs the writer stops the looks too
+  const p = engine({ result: () => { throw S.syncProblem('check', 'The check file is missing.', '', ''); } });
+  let pLooks = 0;
+  p.e.o.poll = async () => { pLooks++; return true; };
+  p.e.lastOk = 1;
+  p.e.start(false);
+  await p.e.run('manual');
+  await p.c.advance(S.SYNC_TIMES.poll * 3);
+  assert.equal(pLooks, 0);
 });

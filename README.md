@@ -742,11 +742,40 @@ computer (and withdraws it at Google where rclone can).
   to sleep, Obsidian was closed) is picked up by the next one (`--resilient --recover`).
 - **No token in the vault.** See **Where things are kept**.
 
-When does it sync? When Obsidian starts, every five minutes (a setting), about 45 seconds after the last change to a
-note, when you ask, and, if something is waiting, it tries once more as Obsidian quits (for a quarter of a minute at
-most; whatever is left is synced when Obsidian next starts). A
+When does it sync? When Obsidian starts, every five minutes (a setting), about 15 seconds after the last change to a
+note, within about a minute of a change in Drive, when you ask, and, if something is waiting, it tries once more as
+Obsidian quits (for a quarter of a minute at most; whatever is left is synced when Obsidian next starts). A
 problem that needs you (signing in again, a safety stop) pauses the timer until you have looked; anything else, such
 as being offline, is tried again by itself, more slowly each time.
+
+**How long it takes** (since 1.5.0). Each run reads both sides; reading Drive is most of the time of a run that has
+little to do, because Drive has to be asked folder by folder. rclone now asks for many folders at once
+(`--fast-list`). The sync's own downloads, which Obsidian reports as changes to the vault, no longer set off a second
+run: before a run that follows changes, the changed files are compared with rclone's record of the last run, and a
+file that is exactly as the sync left it needs nothing. And Drive is asked once a minute, in a single query for the
+vault's folders, whether anything changed there since the last run; if so, a run follows at once, so another
+computer's work arrives within about a minute instead of at the next five-minute run. That look only ever brings a run
+forward: the five-minute runs go on as before (they also catch what a look cannot see, such as a file put in Drive's
+trash), and a look that fails changes nothing. It is not made for a folder shared with you, nor when automatic syncing
+is off.
+
+Measured against a stand-in for Drive's API that rclone 1.76 talks to as it talks to Google (with Drive-like delays:
+about 35 ms on the network and 120 to 500 ms on Google's side for each request), with a vault of 300 files in 56
+folders (60 MB):
+
+| | 1.4 | 1.5 |
+|---|---|---|
+| a run with nothing to do | 3.3 s, 60 requests | 2.6 s, 31 requests |
+| a run that sends one edit up | 4.7 s | 4.1 s |
+| from your last keystroke until it is in Drive | 46 s on average | 19 s |
+| from a change in Drive until it is here | 2.6 min on average, up to 5 min | 34 s on average, up to about 1 min |
+| a second run after downloading | always | never |
+| requests to Drive in an idle hour | 720 | 490 |
+
+These are not measurements of the real Google Drive, whose delays vary with your connection and with Google. To see
+where the time goes with yours, sync, then run **Copy the Google Drive diagnostic report**: each sync is listed with
+what set it off (a change, the timer, a change in Drive, you) and its steps in seconds (rclone starting and finding the
+folder, reading both sides, copying, writing down the result).
 
 ### What is synced
 
@@ -799,8 +828,8 @@ sign-in is kept).
 
 Every failure is shown as a sentence, its likely cause and what to do, with the buttons that do it; rclone's own words
 are folded away under **Details**. **Copy diagnostic report** (in every such window, in the settings, and as a command)
-puts on the clipboard what was tried and how rclone answered: versions, whether you are signed in, the last runs and
-their errors. Tokens, secrets and your email are cut out, paths in your home folder start at `~`, and the names of
+puts on the clipboard what was tried and how rclone answered: versions, whether you are signed in, the last runs (what
+set each off, and how long its steps took) and their errors. Tokens, secrets and your email are cut out, paths in your home folder start at `~`, and the names of
 files are left out where Scriptorium recognises them; read it over before you post it.
 
 The ones you are most likely to meet:
