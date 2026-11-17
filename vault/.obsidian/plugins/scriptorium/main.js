@@ -3807,6 +3807,13 @@ function syncConflictName(rel, taken) {
    (measured: 59 to about 30 for a vault of 56 folders) and takes a quarter off the time of a run that has nothing
    to do. It costs a little memory for the listing, which a vault does not notice. */
 const SYNC_TRANSFER = ['--fast-list'];
+/* How many times rclone tries one request again before it gives up (rclone's default is 10). Google answers "User
+   rate limit exceeded" when new files come faster than it allows (rclone's documentation: "about 2 files per
+   second"); rclone waits and tries again, but with several uploads at once one of them can be refused ten times in a
+   row, and a first sync that fails like that has to be set up again. With a strict stand-in for that limit the first
+   sync of a 300-file vault failed so with 10 tries and went through with 20; a request that keeps failing for another
+   reason (no network) takes a little longer to be reported. Only the sync itself is given it. */
+const SYNC_RETRIES = ['--low-level-retries', '20'];
 
 /* The arguments of the sync itself. o: {local, link, paths (syncPaths), id, settings, resync, mode ('newer',
    'path1', 'path2'), force, stamp (a date for the folder of replaced files), dryRun}. */
@@ -3821,7 +3828,7 @@ function syncBisyncArgs(o) {
     '--max-delete', String(o.settings.maxDelete),
     '--backup-dir1', path.join(o.paths.kept, o.id, o.stamp),
     '--create-empty-src-dirs', '--drive-skip-gdocs', '--skip-links',
-  ], SYNC_TRANSFER, ['--stats', '2s', '-v']);
+  ], SYNC_TRANSFER, SYNC_RETRIES, ['--stats', '2s', '-v']);
   if (o.resync) a.push('--resync', '--resync-mode', o.mode || 'newer');
   if (o.force) a.push('--force');
   if (o.dryRun) a.push('--dry-run');
@@ -4021,11 +4028,14 @@ function rcloneApi(o) {
        {root, map: Map id -> path}. filters: the vault's filter rules, so that the folders are the sync's. */
     async folders(link, filters, signal) {
       const t = syncTarget(link);
-      const top = await must('look', ['lsjson', '--stat', '--no-mimetype', '--no-modtime', t.fs].concat(t.flags), { signal, timeout: 60000 });
+      // the folder's own id is in the listing of the folder above it (rclone gives no id for the folder it stands in)
+      const parts = String(link.path || '').split('/').filter(Boolean), name = parts.pop();
+      const up = syncTarget(Object.assign({}, link, { path: parts.join('/') }));
+      const top = await must('look', ['lsjson', up.fs, '--dirs-only', '--no-mimetype', '--no-modtime'].concat(up.flags), { signal, timeout: 60000 });
       let root = '';
-      try { root = String(JSON.parse(top.out).ID || ''); } catch (e) { root = ''; }
+      try { const hit = JSON.parse(top.out).find(d => d && d.IsDir && d.Name === name); root = hit ? String(hit.ID || '') : ''; } catch (e) { root = ''; }
       if (!root) throw syncExplain(Object.assign(top, { code: 1 }), 'list');
-      const r = await must('look', ['lsjson', '-R', '--dirs-only', '--fast-list', '--no-mimetype', '--no-modtime', '--filter-from', filters, t.fs].concat(t.flags), { signal, timeout: 5 * 60000 });
+      const r = await must('look', ['lsjson', t.fs, '-R', '--dirs-only', '--fast-list', '--no-mimetype', '--no-modtime', '--filter-from', filters].concat(t.flags), { signal, timeout: 5 * 60000 });
       const map = new Map();
       let list = [];
       try { list = JSON.parse(r.out); } catch (e) { throw syncExplain(Object.assign(r, { code: 1 }), 'list'); }
@@ -6205,6 +6215,6 @@ Object.assign(module.exports, {
   syncLink, syncSaveLink, rcloneAsset, rcloneCandidates, findRclone, rcloneVersion, rcloneOldEnough, zipEntry, syncFetch, rcloneInstall, syncProblem, rcloneEnv,
   syncLogLine, rcloneExec, syncConfRead, syncConnection, syncConfPrepare, syncParseClient, syncFilters, syncTarget, syncWhere, syncFolderName, syncParseDirs,
   syncParseCheck, syncConflictName, syncBisyncArgs, syncSummary, syncSummaryText, syncExplain, rcloneApi, syncLock, syncUnlock, syncClearStale, syncPrune, syncOnce, syncStamp,
-  SYNC_PHASES, syncPhaseOf, syncPhases, syncPhasesText, goUnquote, syncListTime, syncParseListing, syncReadListing, syncSettled, syncPollQueries, syncPollChanged, syncFoldersKey, SYNC_TRANSFER,
+  SYNC_PHASES, syncPhaseOf, syncPhases, syncPhasesText, goUnquote, syncListTime, syncParseListing, syncReadListing, syncSettled, syncPollQueries, syncPollChanged, syncFoldersKey, SYNC_TRANSFER, SYNC_RETRIES,
   inkSlant, uprightMissing, syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
 });

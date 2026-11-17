@@ -925,6 +925,7 @@ test('every listing of Drive asks for many folders at once (--fast-list): the sy
   const paths = S.syncPaths(path, tmp(t, 'fl'), process.platform);
   const a = S.syncBisyncArgs({ path, local: '/v', link: { root: 'my', path: 'V' }, paths, id: 'x', settings: S.syncSettings({}), stamp: '2026-11-16' });
   assert.ok(a.includes('--fast-list'));
+  assert.equal(a[a.indexOf('--low-level-retries') + 1], '20', 'a request refused for coming too fast is tried again up to twenty times');
   for (const kept of ['--check-access', '--max-delete', '--backup-dir1', '--resilient', '--recover', '--conflict-resolve']) assert.ok(a.includes(kept), `${kept} is still there`);
   const seen = [];
   const api = S.rcloneApi({ spawn: (exe, args) => { seen.push(args); throw Object.assign(new Error('x'), { code: 'ENOENT' }); }, fs, path, exe: 'rclone', paths, env: {} });
@@ -1158,4 +1159,34 @@ test('Drive is looked at every minute while nothing else goes on, and a change t
   await p.e.run('manual');
   await p.c.advance(S.SYNC_TIMES.poll * 3);
   assert.equal(pLooks, 0);
+});
+
+test('the look asks rclone for the folders’ ids once, then one query; a shared drive is asked as one', async t => {
+  const tree = path.join(tmp(t), 'tree.json'), record = path.join(tmp(t), 'calls.txt'), answer = path.join(tmp(t), 'query.json');
+  fs.writeFileSync(tree, JSON.stringify({ '': ['Vaults'], Vaults: ['Mine'], 'Vaults/Mine': ['Book', 'Notes'], 'drive:0A1:': ['Books'], 'drive:0A1:Books': ['Part'] }));
+  fs.writeFileSync(answer, JSON.stringify([{ id: 'x1', name: 'ch1.md', mimeType: 'text/markdown', size: '5', modifiedTime: '2026-11-16T20:06:00.000Z', parents: ['id-Book'] }]));
+  const { api, paths } = fakeApi(t, { FAKE_RCLONE_TREE: tree, FAKE_RCLONE_RECORD: record, FAKE_RCLONE_QUERY: answer });
+  signedIn(paths);
+  const link = { root: 'my', path: 'Vaults/Mine' };
+  const f = await api.folders(link, '/filters.txt');
+  assert.equal(f.root, 'id-Mine', 'the folder’s id, from the listing of the folder above it');
+  assert.deepEqual(Array.from(f.map.entries()), [['id-Book', 'Book'], ['id-Notes', 'Notes']]);
+  const q = S.syncPollQueries('2026-11-16T20:00:00Z', [f.root].concat(Array.from(f.map.keys())));
+  const found = await api.query(link, q[0]);
+  assert.deepEqual(S.syncPollChanged(found, f, S.syncParseListing('')), ['Book/ch1.md']);
+  const calls = fs.readFileSync(record, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.deepEqual(calls[0].slice(0, 2), ['lsjson', 'scriptorium-drive:Vaults']);
+  assert.ok(calls[1].includes('-R') && calls[1].includes('--fast-list') && calls[1].includes('--filter-from'));
+  assert.deepEqual(calls[2].slice(0, 4), ['backend', 'query', 'scriptorium-drive:', q[0]]);
+  // a shared drive: the same, inside it
+  const shared = await api.folders({ root: 'drive', driveId: '0A1', path: 'Books' }, '/filters.txt');
+  assert.equal(shared.root, 'id-Books');
+  await api.query({ root: 'drive', driveId: '0A1', path: 'Books' }, q[0]);
+  const last = fs.readFileSync(record, 'utf8').trim().split('\n').map(l => JSON.parse(l)).pop();
+  assert.deepEqual(last.slice(-2), ['--drive-team-drive', '0A1']);
+  // no match: rclone prints null
+  fs.writeFileSync(answer, 'null\n');
+  assert.deepEqual(await api.query(link, q[0]), []);
+  // the folder is not there (moved or deleted in Drive): a problem, which the engine takes as a failed look
+  await assert.rejects(api.folders({ root: 'my', path: 'Vaults/Gone' }, '/filters.txt'));
 });
