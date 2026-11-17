@@ -593,10 +593,11 @@ test('The replaceable sections are delimited once each, and their functions are 
   assert.equal(typeof Lagrange.rangeRects, 'function');
   assert.equal(Lagrange.rangeRects.length, 3);
   assert.doesNotMatch(js, /require\((['"])(fs|path|child_process|electron|http|https|os)\1\)/, 'no Node or Electron modules loaded at the top level');
-  // Node modules come only through nodeModule(), which refuses on mobile, and only the four the CLI providers need.
+  // Node modules come only through nodeModule(), which refuses on mobile: the four the CLI providers need, and
+  // Electron (its webFrame: the spelling dictionary autocorrect asks, on a computer).
   const loaded = [...js.matchAll(/nodeModule\((['"])([^'"]+)\1\)/g)].map(m => m[2]);
   assert.ok(loaded.length > 0);
-  for (const m of loaded) assert.ok(['child_process', 'fs', 'os', 'path'].includes(m), `unexpected Node module ${m}`);
+  for (const m of loaded) assert.ok(['child_process', 'fs', 'os', 'path', 'electron'].includes(m), `unexpected Node module ${m}`);
   assert.doesNotMatch(js, /\b(temperature|top_p|top_k)\b/, 'no sampling parameters (rejected on API version 2026-10-21)');
 });
 
@@ -2485,16 +2486,16 @@ test('A look: the properties are said to be on the page when the view shows them
 
 test('Diagrams: TikZ figures and Excalidraw drawings in an edit are told from the text the pen writes, and drawn shapes first', () => {
   const tikz = '```tikz\n\\begin{document}\n\\begin{tikzpicture}\n\\draw (0,0) circle (1);\n\\end{tikzpicture}\n\\end{document}\n```';
-  assert.deepEqual(L.figureKinds(`Before.\n\n${tikz}\n\nAfter.`), { tikz: 1, sketch: 0 });
-  assert.deepEqual(L.figureKinds(`${tikz}\n\n~~~tikz\nx\n~~~\n\n![[Orbit.excalidraw]] and ![[Sub/Two.excalidraw.md|300]]`), { tikz: 2, sketch: 2 });
-  assert.deepEqual(L.figureKinds('```python\nprint(1)\n```\n\n![[photo.png]] and the word tikz'), { tikz: 0, sketch: 0 });
-  assert.deepEqual(L.figureKinds(null), { tikz: 0, sketch: 0 });
+  assert.deepEqual(L.figureKinds(`Before.\n\n${tikz}\n\nAfter.`), { tikz: 1, sketch: 0, mermaid: 0 });
+  assert.deepEqual(L.figureKinds(`${tikz}\n\n~~~tikz\nx\n~~~\n\n![[Orbit.excalidraw]] and ![[Sub/Two.excalidraw.md|300]]`), { tikz: 2, sketch: 2, mermaid: 0 });
+  assert.deepEqual(L.figureKinds('```python\nprint(1)\n```\n\n![[photo.png]] and the word tikz'), { tikz: 0, sketch: 0, mermaid: 0 });
+  assert.deepEqual(L.figureKinds(null), { tikz: 0, sketch: 0, mermaid: 0 });
   assert.equal(L.withoutFigures(`Before.\n\n${tikz}\n\nAfter ![[Orbit.excalidraw]] it.`), 'Before.\n\n\n\nAfter  it.');
   assert.equal(L.withoutFigures('```python\nprint(1)\n```'), '```python\nprint(1)\n```', 'other code is still typed');
   assert.deepEqual(L.figureOrder([{ text: false }, { text: true }, { text: false }, { text: true }, { text: false }]), [0, 2, 4, 1, 3], 'labels last, each kind in the figure’s own order');
   assert.deepEqual(L.figureOrder([]), []);
   const css = fs.readFileSync(path.join(PLUGIN, 'styles.css'), 'utf8');
-  assert.match(css, /\.lagrange-pen-figures :is\(\.block-language-tikz svg, \.excalidraw-embedded-img svg, svg\.excalidraw-svg\):not\(\[data-lagrange-seen\]\) \{ opacity: 0 !important; \}/);
+  assert.match(css, /\.lagrange-pen-figures :is\(\.block-language-tikz svg, \.excalidraw-embedded-img svg, svg\.excalidraw-svg, \.mermaid > svg\):not\(\[data-lagrange-seen\]\) \{ opacity: 0 !important; \}/);
 });
 
 test('Diagrams: a drawing in a reply is read and made safe; the prompt says what the vault can draw', () => {
@@ -3008,13 +3009,17 @@ test('TikZJax: the model is told what the plugin takes (each point was tried in 
   assert.doesNotMatch(L.diagramStyle({ sketch: true }), /usetikzlibrary/);
 });
 
-test('Demo mode: a diagram for the pen where TikZJax is on, and a reply with mathematics, code and a figure', () => {
+test('Demo mode: a diagram for the pen (TikZ where TikZJax is on, else Mermaid), and a reply with mathematics, code and a figure', () => {
   const note = { title: 'On Balance', text: 'A note.\n' };
   const draw = L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, { tikz: true }));
   assert.equal(draw.ops.length, 1);
-  assert.deepEqual(L.figureKinds(draw.ops[0].text || draw.ops[0].append || JSON.stringify(draw.ops[0]).replace(/\\n/g, '\n').replace(/\\\\/g, '\\')), { tikz: 1, sketch: 0 });
-  assert.deepEqual(L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, { tikz: false })).ops, [], 'no figure is written where TikZJax is off');
-  assert.deepEqual(L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false)).ops, []);
+  assert.deepEqual(L.figureKinds(draw.ops[0].text || draw.ops[0].append || JSON.stringify(draw.ops[0]).replace(/\\n/g, '\n').replace(/\\\\/g, '\\')), { tikz: 1, sketch: 0, mermaid: 0 });
+  // where TikZJax is off, a Mermaid diagram (Obsidian draws it itself) instead of a TikZ figure
+  for (const have of [{ tikz: false }, undefined]) {
+    const off = L.parseAgentReply(L.demoChatReply('Draw a diagram', note, true, false, have)).ops;
+    assert.equal(off.length, 1);
+    assert.deepEqual(L.figureKinds(off[0].text), { tikz: 0, sketch: 0, mermaid: 1 }, 'no TikZ is written where TikZJax is off');
+  }
   // the figure keeps to what TikZJax takes: a whole document body, no \documentclass, no library, no blank line, ASCII
   const fig = L.DEMO_FIGURE;
   assert.match(fig, /^```tikz\n\\begin\{document\}\n\\begin\{tikzpicture\}/);

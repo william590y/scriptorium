@@ -25,5 +25,6 @@
   "penLines": 3,
   "severalPens": true,
   "maxPens": 3,
-  "editWhileWriting": false
+  "editWhileWriting": false,
+  "autocorrect": "off"
 }
