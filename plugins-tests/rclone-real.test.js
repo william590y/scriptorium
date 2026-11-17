@@ -221,6 +221,43 @@ test('steady syncing: edits, new files, renames and deletions travel both ways',
   assert.ok(r.summary.copied + r.summary.replaced >= 4 && r.summary.deleted >= 1, JSON.stringify(r.summary));   // macOS logs its own kind of copy
 });
 
+test('after a run, its record tells the sync’s own downloads from the writer’s changes; the run’s steps are timed', { skip }, async t => {
+  const d = drive(t), a = computer(t, d, 'a');
+  write(a.dir, 'a.md', 'one'); write(a.dir, 'b.md', 'two'); write(a.dir, 'c/d.md', 'three');
+  await a.first({});
+  write(d.folder, 'b.md', 'two, edited in Drive');
+  write(d.folder, 'New folder/n.md', 'new in Drive');
+  fs.unlinkSync(path.join(d.folder, 'c', 'd.md'));
+  const r = await a.sync();
+  assert.ok(r.summary.ok);
+  assert.equal(read(a.dir, 'b.md'), 'two, edited in Drive');
+  const work = path.join(a.paths.work, a.id);
+  const one = S.syncParseListing(S.syncReadListing(fs, path, work, 'path1'));
+  const stat = rel => { try { const st = fs.statSync(path.join(a.dir, ...rel.split('/'))); return { dir: st.isDirectory(), size: st.size, mtime: st.mtimeMs }; } catch (e) { return null; } };
+  // what the run brought down, made and removed here is as the run recorded it: no second run is needed for it
+  assert.equal(S.syncSettled(one, ['b.md', 'New folder', 'New folder/n.md', 'c/d.md', 'a.md'], stat), true);
+  // the writer's own change is not
+  write(a.dir, 'a.md', 'one, edited here');
+  assert.equal(S.syncSettled(one, ['a.md'], stat), false);
+  assert.equal(S.syncSettled(one, ['b.md'], stat), true);
+  write(a.dir, 'fresh.md', 'x');
+  assert.equal(S.syncSettled(one, ['fresh.md'], stat), false);
+  // the record of the other side is Drive's state after the run, file for file
+  const two = S.syncParseListing(S.syncReadListing(fs, path, work, 'path2'));
+  for (const rel of ['b.md', 'New folder/n.md']) {
+    const st = fs.statSync(path.join(d.folder, ...rel.split('/')));
+    assert.equal(two.get(rel).size, st.size, rel);
+    assert.ok(Math.abs(two.get(rel).mtime - st.mtimeMs) < 1, rel);
+  }
+  assert.ok(two.get('New folder').dir);
+  // the run's steps, from rclone's own log
+  const run = a.runs.filter(x => x.what === 'sync').pop();
+  assert.deepEqual(run.phases.map(p => p.name).slice(0, 2), ['start', 'listing']);
+  assert.ok(run.phases.some(p => p.name === 'copying'), JSON.stringify(run.phases));
+  assert.equal(run.phases.reduce((n, p) => n + p.ms, 0), run.ms);
+  assert.ok(a.runs.find(x => x.what === 'first').phases.some(p => p.name === 'copying'));
+});
+
 test('a file changed on both sides keeps both: the newer under its name, the older as name.conflict1.md', { skip }, async t => {
   const d = drive(t), a = computer(t, d, 'a');
   write(a.dir, 'Chapter.md', 'first words'); write(a.dir, 'other.md', 'x');

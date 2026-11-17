@@ -11,6 +11,7 @@
 // FAKE_RCLONE_AUTH=ok|denied|deleted|busy|hang   how `config update … scope=drive` (the sign-in) ends
 // FAKE_RCLONE_FAIL=file.json  {"code": 1, "lines": [{"level": "error", "msg": "…"}]}: fail any other command so
 // FAKE_RCLONE_RECORD=file     append each call's arguments, one JSON array per line
+// FAKE_RCLONE_QUERY=file.json what `backend query` prints (default: null, as rclone prints no match)
 //
 // Copyright (C) 2026 William Liaw. Licensed under the GNU General Public License, version 3 or later (see LICENSE).
 'use strict';
@@ -100,6 +101,8 @@ if (rest[0] === 'config' && rest[1] === 'update') {
     process.exit(0);
   }
   if (rest[0] === 'backend' && rest[1] === 'drives') { process.stdout.write(JSON.stringify(tree.drives || [])); process.exit(0); }
+  // FAKE_RCLONE_QUERY=file.json: what `backend query` answers (Drive's files, or null for none, as rclone prints it)
+  if (rest[0] === 'backend' && rest[1] === 'query') { process.stdout.write(env.FAKE_RCLONE_QUERY ? fs.readFileSync(env.FAKE_RCLONE_QUERY, 'utf8') : 'null\n'); process.exit(0); }
   if (rest[0] === 'size') { process.stdout.write('{"count":3,"bytes":1234,"sizeless":0}\n'); process.exit(0); }
   log('critical', `Fatal error: unknown command "${rest[0]}" for "rclone"`);
   process.exit(2);
