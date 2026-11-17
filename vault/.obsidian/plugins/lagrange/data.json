@@ -18,6 +18,13 @@
   "agenticEdits": true,
   "lookAtPage": true,
   "lookPictures": "auto",
+  "voice": false,
+  "voiceRoute": "openai",
+  "voiceModel": "",
+  "voiceServerUrl": "http://127.0.0.1:8080/v1",
+  "voiceServerKey": "",
+  "voiceLanguage": "",
+  "voicePause": 1,
   "loaderTheme": "cycle",
   "showPen": true,
   "penSpeed": 1,
@@ -25,5 +32,6 @@
   "penLines": 3,
   "severalPens": true,
   "maxPens": 3,
-  "editWhileWriting": false
+  "editWhileWriting": false,
+  "autocorrect": "off"
 }

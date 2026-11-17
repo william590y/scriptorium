@@ -18,8 +18,10 @@
  *      pen's script (with its mathematics) and trail, clipping notes, error messages, demo replies. They touch
  *      neither the DOM nor Obsidian; plugins-tests/lagrange.test.js tests them under Node.
  *   3. Providers: Anthropic Messages API, OpenAI API and OpenAI-compatible chat completions, a Claude subscription
- *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline). The only requests the plugin makes
- *      are to the provider chosen in its settings, when the writer asks for something.
+ *      through Claude Code, a ChatGPT subscription through Codex, Demo (offline); and, for voice control, a
+ *      transcription service (OpenAI's, or an OpenAI-compatible server). The only requests the plugin makes are to
+ *      the provider chosen in its settings, when the writer asks for something, and to the transcription service
+ *      chosen there, while it listens.
  *   4. The loader, a replaceable section:  mountLoader(containerEl, theme) -> { stop() }
  *   5. Pen helpers shared by any pen (rangeRects, sleep, nextFrame), then the pen, a replaceable section:
  *      createPen(app, settings) -> { edit(view, from, to, replacement, run, how), finish(), destroy(), extension, pens }
@@ -36,7 +38,10 @@
  *      plugin. A chat message may edit the note: the reply's edits block goes to the pen (applyChatEdits). A reply
  *      may also ask to look at the page (its look block: the plugin's lookAtPage), and the turn goes on with what
  *      was seen. Each run of edits can be undone and redone (recordEdit, undoEdit, redoEdit), and each message is a
- *      checkpoint the conversation and the note can be rewound to (rewind, restoreNote).
+ *      checkpoint the conversation and the note can be rewound to (rewind, restoreNote). Voice control (off until
+ *      turned on): a VoiceListener holds the microphone while Lagrange listens, cuts what is said into phrases and has
+ *      each transcribed; the plugin writes dictated phrases in at the cursor (dictate) or sends one to the chat
+ *      (speakToLagrange). Its pure parts are among the pure helpers ("Voice"), tested in lagrange-voice.test.js.
  */
 'use strict';
 
@@ -44,6 +49,9 @@ const obsidian = require('obsidian');
 const { Plugin, ItemView, Modal, Notice, PluginSettingTab, Setting, MarkdownRenderer, MarkdownView, Component, setIcon } = obsidian;
 const { StateField, StateEffect, EditorState, Transaction, ChangeSet, Annotation } = require('@codemirror/state');
 const { EditorView, Decoration, WidgetType } = require('@codemirror/view');
+// (a run of Lagrange's edits is an undo step of its own, never joined to the typing just after it; Obsidian gives
+// plugins @codemirror/commands, but nothing breaks without it)
+const isolateHistory = (() => { try { return require('@codemirror/commands').isolateHistory || null; } catch (e) { return null; } })();
 
 
 /* ---------------------------------------------------------------------------------------------------------------
@@ -85,6 +93,9 @@ const LOOK_PICTURES = ['auto', 'on', 'off'];
 const PEN_MAX = 4;                    // pens that may write at once, at most (the pen's styles know as many; see penLanes)
 
 const LOADER_THEMES = ['cycle', 'clockwork', 'alchemy', 'orbit'];
+// Voice control (see "Voice" among the pure helpers): who transcribes, and how long a pause ends a phrase, in seconds.
+const VOICE_ROUTES = ['openai', 'server', 'system'];
+const VOICE_PAUSES = [0.6, 0.8, 1, 1.4, 2];
 // Reasoning effort, where the provider and model take one; '' leaves it to the provider's own default.
 const EFFORTS = ['low', 'medium', 'high'];
 const CLAUDE_CODE_MODELS = ['sonnet', 'opus', 'haiku'];   // Claude Code's aliases for the latest of each
@@ -109,6 +120,14 @@ const DEFAULT_SETTINGS = {
   agenticEdits: true,                 // a chat message may edit the open note with the pen; off: the chat only talks
   lookAtPage: true,                   // Lagrange may look at the note as rendered; off: the page is never rendered or captured
   lookPictures: 'auto',               // 'auto' (pictures where the model takes them) | 'on' | 'off' (a description only)
+  voice: false,                       // voice control (dictation, speaking to Lagrange); off: the microphone is never opened
+  voiceRoute: 'openai',               // who transcribes: 'openai' (OpenAI's API, with the OpenAI API key above) | 'server' (an
+                                      // OpenAI-compatible transcription server, local or hosted) | 'system' (phones and tablets only)
+  voiceModel: '',                     // '' = gpt-4o-mini-transcribe (OpenAI) or whisper-1 (a server)
+  voiceServerUrl: 'http://127.0.0.1:8080/v1',
+  voiceServerKey: '',
+  voiceLanguage: '',                  // '' = the service detects it; else an ISO 639-1 code such as 'en' or 'fr'
+  voicePause: 1,                      // seconds of silence that end a phrase (VOICE_PAUSES)
   loaderTheme: 'cycle',               // 'cycle' (each plate in turn, the first by chance) | 'clockwork' | 'alchemy' | 'orbit'
   showPen: true,
   penSpeed: 1,                        // 0.5 (slow) to 3 (fast)
@@ -117,6 +136,7 @@ const DEFAULT_SETTINGS = {
   severalPens: true,                  // edits that stand well apart on the page are written at the same time, each by a pen of its own
   maxPens: 3,                         // how many pens may write at once (2 to 4; see penLanes)
   editWhileWriting: false,            // off: a click or a key in the note ends the pen's animation; on: the writer edits alongside it
+  autocorrect: 'off',                 // 'off' | 'dictionary' (this computer's spelling dictionary) | 'model' (the provider); see Autocorrect
 };
 
 function sanitizeSettings(saved) {
@@ -137,6 +157,10 @@ function sanitizeSettings(saved) {
   if (!(Number.isInteger(s.maxPens) && s.maxPens >= 2 && s.maxPens <= PEN_MAX)) s.maxPens = DEFAULT_SETTINGS.maxPens;
   if (!EFFORTS.includes(s.effort)) s.effort = '';
   if (!LOOK_PICTURES.includes(s.lookPictures)) s.lookPictures = DEFAULT_SETTINGS.lookPictures;
+  if (!['off', 'dictionary', 'model'].includes(s.autocorrect)) s.autocorrect = DEFAULT_SETTINGS.autocorrect;
+  if (!VOICE_ROUTES.includes(s.voiceRoute)) s.voiceRoute = DEFAULT_SETTINGS.voiceRoute;
+  if (!VOICE_PAUSES.includes(s.voicePause)) s.voicePause = DEFAULT_SETTINGS.voicePause;
+  s.voiceLanguage = voiceLanguage(s.voiceLanguage);
   return s;
 }
 
@@ -648,11 +672,13 @@ function splitAgentReply(reply) {
 
 /* One item of an edits block, as an operation: {op: 'replace', find, replace, reason}, {op: 'insert', after | before,
    text, reason} or {op: 'append', text, reason}. Null if it is none of these. */
-/* A drawing as a reply asks for it, made safe: {name, elements}. An element is {type: 'rect' | 'ellipse' | 'diamond',
-   x, y, w, h, text?}, {type: 'line' | 'arrow', points: [[x, y], …]} or {type: 'text', x, y, text}; numbers are
-   pixels on a canvas whose y grows downwards. Anything else is left out; null if nothing is left. At most
-   SKETCH_ELEMENTS elements. Pure. */
-const SKETCH_ELEMENTS = 80, SKETCH_PLACE = '![[drawing]]';
+/* A drawing as a reply asks for it, made safe: {name, elements} or {name, elements: [], mermaid}. An element is
+   {type: 'rect' | 'ellipse' | 'diamond', x, y, w, h, text?}, {type: 'line' | 'arrow', points: [[x, y], …]} or
+   {type: 'text', x, y, text}; numbers are pixels on a canvas whose y grows downwards. Anything else is left out. A
+   drawing may instead be given as a Mermaid diagram (its source, at most SKETCH_MERMAID characters, without the
+   fence), which Lagrange draws by hand in Excalidraw (see sketchFromSvg); elements, where there are any, win. Null
+   if nothing is left. At most SKETCH_ELEMENTS elements. Pure. */
+const SKETCH_ELEMENTS = 80, SKETCH_PLACE = '![[drawing]]', SKETCH_MERMAID = 4000;
 function sketchSpec(raw) {
   const num = v => (typeof v === 'number' && isFinite(v) ? Math.max(-20000, Math.min(20000, v)) : null);
   const words = v => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b-\u001f]/g, '').slice(0, 400) : '');
@@ -672,12 +698,14 @@ function sketchSpec(raw) {
       if (x !== null && y !== null && words(e.text)) out.push({ type, x, y, text: words(e.text) });
     }
   }
-  if (!out.length) return null;
+  const mermaid = typeof (raw && raw.mermaid) === 'string' ? raw.mermaid.replace(/^\s*(?:`{3,}|~{3,})\s*mermaid\s*\n|\n\s*(?:`{3,}|~{3,})\s*$/g, '').trim().slice(0, SKETCH_MERMAID) : '';
+  if (!out.length && !mermaid) return null;
   const name = words(raw.name).replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Drawing';
-  return { name, elements: out };
+  return mermaid && !out.length ? { name, elements: out, mermaid } : { name, elements: out };
 }
 
-/* What the model is told about diagrams, by which of the two plugins the vault has (have: {tikz, sketch}). Pure. */
+/* What the model is told about diagrams: Mermaid always (Obsidian draws it), and TikZ and sketches by which of the
+   two plugins the vault has (have: {tikz, sketch}). Pure. */
 function diagramStyle(have) {
   const h = have || {};
   // (what TikZJax 0.5.2 takes was tried, construct by construct, in real Obsidian: see the README, "Diagrams")
@@ -699,10 +727,19 @@ function diagramStyle(have) {
     'with coordinates in pixels (x to the right, y downwards; about 600 wide at most): {"type": "rect" | "ellipse" | "diamond", ' +
     '"x", "y", "w", "h", "text": "an optional label inside"}, {"type": "line" | "arrow", "points": [[x, y], [x, y], …]}, ' +
     '{"type": "text", "x", "y", "text"}. The plugin makes the drawing and puts it in the note.';
-  if (h.tikz && h.sketch) return `Diagrams: ${tikz} ${sketch} Use TikZ where exactness matters and a sketch where it does not.`;
-  if (h.tikz) return `Diagrams: ${tikz} Free-form sketches need the Excalidraw plugin, which this vault does not have turned on: if the writer asks for one, say so, and offer a TikZ figure where it would serve.`;
-  if (h.sketch) return `Diagrams: ${sketch} Technical figures in TikZ need the TikZJax plugin, which this vault does not have turned on: do not write a tikz block; if the writer asks for such a figure, say so, and offer a sketch where it would serve.`;
-  return 'Diagrams: this vault has neither the TikZJax plugin (technical figures) nor the Excalidraw plugin (free-form sketches) turned on, so do not write a tikz block or a drawing; if the writer asks for a diagram, tell them to turn one of the two on in Settings → Community plugins.';
+  // (Obsidian 1.15 draws every one of these kinds itself: each was tried in it, see the README, "Diagrams")
+  const mermaid = 'A diagram of flow or structure (a flowchart, a sequence of messages, the states of a thing, classes or entities and how they ' +
+    'relate, a timeline, a Gantt chart, a mind map, a pie chart) is written in Mermaid, in a code block fenced with ```mermaid, which ' +
+    'Obsidian draws itself, with no plugin: flowchart LR (or TD), sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram, timeline, ' +
+    'gantt, mindmap, pie, journey, gitGraph or quadrantChart, in Mermaid\'s own syntax. Keep labels short, and put a label that holds ' +
+    'punctuation, brackets or quotes in double quotes (A["Step 1: read"]). A block Obsidian cannot read shows its error in place of the ' +
+    'diagram, so write only what is sure to parse. Put the block in a paragraph of its own.';
+  const sketchMermaid = ' For boxes joined by arrows you may give the sketch as a Mermaid flowchart instead of elements, ' +
+    '{"name": "a short title", "mermaid": "flowchart LR\\n  A[One] --> B[Two]"}: it is drawn by hand in Excalidraw, and the writer can then move it about there.';
+  if (h.tikz && h.sketch) return `Diagrams: ${mermaid} ${tikz} ${sketch}${sketchMermaid} Use Mermaid for flow and structure, TikZ where mathematical exactness matters, and a sketch for a rough picture of an idea.`;
+  if (h.tikz) return `Diagrams: ${mermaid} ${tikz} Free-form sketches need the Excalidraw plugin, which this vault does not have turned on: if the writer asks for one, say so, and offer a Mermaid diagram or a TikZ figure where it would serve.`;
+  if (h.sketch) return `Diagrams: ${mermaid} ${sketch}${sketchMermaid} Technical figures in TikZ need the TikZJax plugin, which this vault does not have turned on: do not write a tikz block; if the writer asks for such a figure, say so, and offer a Mermaid diagram or a sketch where it would serve.`;
+  return `Diagrams: ${mermaid} This vault has neither the TikZJax plugin (technical figures) nor the Excalidraw plugin (free-form sketches) turned on, so do not write a tikz block or a drawing; if the writer asks for such a figure, offer a Mermaid diagram where it would serve, or tell them to turn one of the two on in Settings → Community plugins.`;
 }
 
 function normalizeOp(item) {
@@ -1473,20 +1510,213 @@ function plainInline(text) {
   return t.replace(/[\uE100-\uE1FF]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xE100));
 }
 
+/* ---- Autocorrect ----
+   With Settings → Lagrange → Autocorrect on, the pen corrects slips of typing a moment after they are typed: words
+   the writer has just finished (the word still being typed is left alone), in prose only. The pieces here are pure;
+   the plugin watches the typing, asks this computer's spelling dictionary (or the model) and gives the corrections
+   to the pen (see Autocorrect in the plugin).
+   proseSkips(text) -> [[from, to]]: where nothing is ever corrected: front matter, code (fenced, even unclosed, and
+   inline), mathematics ($…$, $$…$$, \(…\), \[…\]), comments, HTML, wikilinks and embeds, link and image
+   destinations, reference definitions, bare web addresses and e-mail addresses, tags, footnote marks, block ids,
+   callout types, the marker lines of aligned text, and tables. */
+function proseSkips(text) {
+  const t = String(text == null ? '' : text), skip = [];
+  const fm = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(t);
+  if (fm) skip.push([0, fm[0].length]);
+  const patterns = [
+    /^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[ \t]*(?=\n|$)|$)/gm,   // fenced code, to its end (or the note's)
+    /(`+)[^`\n]+?\1/g,                                // inline code
+    /\$\$[\s\S]*?(?:\$\$|$)/g,                       // displayed mathematics, closed or not
+    /\$(?=\S)[^$\n]*\S\$|\$(?=\S)[^$\n]*$/gm,        // inline mathematics, and an open $ to the end of its line
+    /\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/g,          // \( \) and \[ \]
+    /%%[\s\S]*?(?:%%|$)|<!--[\s\S]*?(?:-->|$)/g,     // comments
+    /<\/?[A-Za-z][^>\n]*>/g,                         // HTML tags
+    /!?\[\[[^\]\n]*(?:\]\]|$)/gm,                     // wikilinks and embeds
+    /\]\((?:[^()\n]|\([^()\n]*\))*\)/g,                 // link and image destinations
+    /^[ \t]*\[[^\]\n]+\]:.*$/gm,                        // reference definitions
+    /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>()]+|\bwww\.[^\s<>()]+/gi,   // web addresses
+    /[\w.+-]+@[\w-]+\.[\w.-]+/g,                        // e-mail addresses
+    /(^|\s)#[^\s#]+/g,                                   // tags
+    /\[\^[^\]\n]*\]/g,                                   // footnote marks
+    /\s\^[A-Za-z0-9-]+$/gm,                              // block ids
+    /^[ \t]*>?[ \t]*\[![^\]\n]*\]/gm,                    // callout types
+    /^[ \t]*:{3,}.*$/gm,                                 // the marker lines of aligned text
+    /^[ \t]*\|.*$/gm,                                    // tables
+  ];
+  for (const re of patterns) for (const m of t.matchAll(re)) skip.push([m.index, m.index + m[0].length]);
+  return skip;
+}
+
+/* A word as autocorrect reads it: letters, with an apostrophe or a hyphen inside. */
+const AC_WORD = /[\p{L}](?:[\p{L}\p{M}'’-]*[\p{L}\p{M}])?/gu;
+/* The words of text[from, to) that the writer has finished typing and that may be corrected: wholly inside the
+   range, followed by something that is not part of a word (a word that runs up to the cursor, or to the end of the
+   note, is still being typed), outside proseSkips, at least two letters, and not one that is set apart on purpose
+   (with a digit or an underscore next to it, in capitals, or with capitals inside, as in a name or an identifier).
+   cursor: the cursor's place. -> [{from, to, word}], in order. Pure. */
+function wordsToCheck(text, from, to, cursor, skips) {
+  const t = String(text == null ? '' : text);
+  const a = Math.max(0, from), b = Math.min(t.length, to);
+  if (b <= a) return [];
+  const skip = skips || proseSkips(t);
+  // the line around the range, so that a word that begins before it is read whole
+  const lo = t.lastIndexOf('\n', a - 1) + 1, hiNl = t.indexOf('\n', b), hi = hiNl < 0 ? t.length : hiNl;
+  const out = [];
+  for (const m of t.slice(lo, hi).matchAll(AC_WORD)) {
+    const s = lo + m.index, e = s + m[0].length, word = m[0];
+    if (e <= a || s >= b) continue;                                  // not touched by the typing
+    if (e === t.length || e === cursor) continue;                    // still being typed
+    if (/[\p{L}\p{N}_]/u.test(t[e] || '') || /[\p{N}_@./\\]/u.test(t[s - 1] || '') || /[\p{N}_]/u.test(t[e] || '')) continue;
+    if (/^[.@/\\]/.test(t[e] || '') && /[\p{L}\p{N}]/u.test(t[e + 1] || '')) continue;   // part of a name, an address or a path
+    if (word.length < 2 || /[\p{N}_]/u.test(word)) continue;
+    const letters = word.replace(/[^\p{L}]/gu, '');
+    if (letters.length > 1 && letters === letters.toUpperCase()) continue;              // capitals: an abbreviation
+    if (/\p{Ll}\p{Lu}/u.test(word)) continue;                                         // capitals inside: a name or an identifier
+    if (skip.some(([x, y]) => s < y && x < e)) continue;
+    out.push({ from: s, to: e, word });
+  }
+  return out;
+}
+
+/* The optimal string alignment distance between two words (Damerau–Levenshtein without repeated edits of one
+   place): a letter added, left out, changed, or two letters side by side swapped each count one. Pure. */
+function typoDistance(a, b) {
+  const s = Array.from(String(a)), t = Array.from(String(b));
+  const d = Array.from({ length: s.length + 1 }, (_, i) => [i].concat(new Array(t.length).fill(0)));
+  for (let j = 1; j <= t.length; j++) d[0][j] = j;
+  for (let i = 1; i <= s.length; i++) {
+    for (let j = 1; j <= t.length; j++) {
+      const c = s[i - 1] === t[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + c);
+      if (i > 1 && j > 1 && s[i - 1] === t[j - 2] && s[i - 2] === t[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[s.length][t.length];
+}
+
+/* The most common words of English: between two corrections equally near what was typed, the common one is the one
+   meant ("wiht" is "with", not "whit"). */
+const COMMON_WORDS = new Set(('the of and to a in is it you that he was for on are with as his they be at one have this from or ' +
+  'had by hot but some what there we can out other were all your when up use word how said an each she which do their time if will ' +
+  'way about many then them would write like so these her long make thing see him two has look more day could go come did my sound ' +
+  'no most number who over know water than call first people may down side been now find any new work part take get place made live ' +
+  'where after back little only round man year came show every good me give our under name very through just form great think say ' +
+  'help low line before turn cause same mean differ move right boy old too does tell sentence set three want air well also play small ' +
+  'end put home read hand port large spell add even land here must big high such follow act why ask men change went light kind off ' +
+  'need house picture try us again animal point mother world near build self earth father head stand own page should country found ' +
+  'answer school grow study still learn plant cover food sun four thought let keep eye never last door between city tree cross since ' +
+  'hard start might story saw far sea draw left late run while press close night real life few stop open seem together next white ' +
+  'children begin got walk example ease paper often always music those both mark book letter until mile river car feet care second ' +
+  'group carry took rain eat room friend began idea fish mountain north once base hear horse cut sure watch color face wood main enough ' +
+  'plain girl usual young ready above ever red list though feel talk bird soon body dog family direct pose leave song measure state ' +
+  'product black short numeral class wind question happen complete ship area half rock order fire south problem piece told knew pass ' +
+  'farm top whole king size heard best hour better true during hundred am remember step early hold west ground interest reach fast five ' +
+  'sing listen six table travel less morning ten simple several vowel toward war lay against pattern slow center love person money ' +
+  'serve appear road map science rule govern pull cold notice voice fall power town fine certain fly unit lead cry dark machine note ' +
+  'wait plan figure star box noun field rest correct able pound done beauty drive stood contain front teach week final gave green oh ' +
+  'quick develop sleep warm free minute strong special mind behind clear tail produce fact street inch lot nothing course stay wheel full ' +
+  'force blue object decide surface deep moon island foot yet busy test record boat common gold possible plane age dry wonder laugh ' +
+  'thousand ago ran check game shape yes miss brought heat snow bed bring sit perhaps fill east weight language among').split(' '));
+
+/* How far a correction may be from what was typed and still be a slip of typing: one letter in a short word, two
+   in a longer one. */
+function typoLimit(word) {
+  return Array.from(String(word)).length <= 4 ? 1 : 2;
+}
+
+/* The correction of a misspelled word from a dictionary's suggestions (best first), or null. Of the suggestions
+   that are a slip of typing away (typoLimit, case aside), not the same word in other capitals, and made of letters
+   (with an apostrophe, a hyphen, or a space between two words), the one taken is the nearest that keeps the word's
+   first letter (or only swaps its first two: "hte"), the first letter being the one least often mistyped; failing
+   that, the nearest; between equals, a common word (COMMON_WORDS) before a rarer one, a word in small letters before
+   a name, and letters swapped before a letter changed. It takes the word's capitals: a capital first letter stays one; a word typed in small letters
+   that the dictionary knows only with a capital (a name) is left alone. Pure. */
+function typoFix(word, suggestions) {
+  const w = String(word || '');
+  if (!w) return null;
+  const lower = w.toLowerCase(), cap = w[0] !== w[0].toLowerCase();
+  const near = [];
+  (suggestions || []).forEach((raw, i) => {
+    const s = String(raw || ''), sl = s.toLowerCase();
+    if (!s || sl === lower || !/^[\p{L}\p{M}'’ -]+$/u.test(s) || /^[ '’-]|[ '’-]$/.test(s)) return;
+    const d = typoDistance(lower, sl);
+    if (d > typoLimit(w)) return;
+    const start = sl[0] === lower[0] || (sl[0] === lower[1] && sl[1] === lower[0]);
+    const swap = Array.from(sl).sort().join('') === Array.from(lower).sort().join('');   // the same letters, in another order
+    near.push({ s, d, i, start, swap, plain: s[0] === s[0].toLowerCase(), common: COMMON_WORDS.has(sl) });
+  });
+  const first = (x, y, k) => (x[k] === y[k] ? 0 : x[k] ? -1 : 1);
+  near.sort((a, b) => first(a, b, 'start') || a.d - b.d || first(a, b, 'common') || first(a, b, 'plain') || first(a, b, 'swap') || a.i - b.i);
+  const best = near[0];
+  if (!best) return null;
+  const s = best.s;
+  if (!cap && s[0] !== s[0].toLowerCase()) return null;            // a name the writer did not capitalise: theirs to say
+  if (/\p{Lu}/u.test(s.slice(1))) return null;                      // capitals inside: not a slip of typing
+  return cap ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/* The demo's own little dictionary of slips (demo mode, and where this computer has no spelling dictionary to ask in
+   the tests). */
+const DEMO_TYPOS = {
+  teh: 'the', adn: 'and', hte: 'the', taht: 'that', recieve: 'receive', recieved: 'received', seperate: 'separate',
+  definately: 'definitely', wierd: 'weird', occured: 'occurred', untill: 'until', becuase: 'because', thier: 'their',
+  wich: 'which', freind: 'friend', tommorow: 'tomorrow', accomodate: 'accommodate', beleive: 'believe', goverment: 'government',
+  enviroment: 'environment', existance: 'existence', foriegn: 'foreign', lenght: 'length', neccessary: 'necessary',
+  occassion: 'occasion', publically: 'publicly', reccomend: 'recommend', succesful: 'successful', truely: 'truly', wirte: 'write',
+};
+
+/* The corrections a model proposes for a passage it was given (its reply: a JSON list of {"find", "replace"}), kept
+   only where each is a slip of typing in the words that were asked about: find is one of those words, as typed, and
+   replace is a slip of typing away from it (typoLimit, case aside; a word may become two). Anything else, a
+   rewording or a correction of a word that was not asked about, is left out. words: [{word}] the words asked
+   about. -> [{find, replace}]. Pure. */
+function modelTypoFixes(reply, words) {
+  const asked = new Set((words || []).map(w => w.word));
+  let list = null;
+  for (const value of jsonValuesIn(String(reply || ''))) {
+    list = Array.isArray(value) ? value : (value && Array.isArray(value.edits) ? value.edits : null);
+    if (list) break;
+  }
+  const out = [];
+  for (const item of list || []) {
+    if (!item || typeof item.find !== 'string' || typeof item.replace !== 'string') continue;
+    const find = item.find.trim(), replace = item.replace.trim();
+    if (!asked.has(find) || !replace || replace === find || !/^[\p{L}\p{M}'’ -]+$/u.test(replace)) continue;
+    if (typoDistance(find.toLowerCase(), replace.toLowerCase()) > typoLimit(find)) continue;
+    if (out.some(o => o.find === find)) continue;
+    out.push({ find, replace });
+  }
+  return out;
+}
+
 /* ---- Diagrams ----
-   Two community plugins draw diagrams in a note, and the pen draws what they render instead of writing its source:
-   TikZJax sets a ```tikz code block as a figure (for technical and mathematical figures), and Excalidraw shows an
-   embedded drawing, ![[Name.excalidraw]] (free-form sketches). Both put an <svg> in the note in Live Preview.
-   figureKinds(text) -> {tikz, sketch}: how many of each a piece of Markdown holds. withoutFigures(text): the text
-   with them taken out, which is what is left for the pen to write by hand. Pure. */
+   Diagrams in a note are drawn by the pen where the note shows them, instead of having their source written out:
+   Obsidian itself sets a ```mermaid code block as a diagram (flowcharts, sequences, states and the like), and two
+   community plugins draw the others: TikZJax sets a ```tikz code block as a figure (technical and mathematical
+   figures), and Excalidraw shows an embedded drawing, ![[Name.excalidraw]] (free-form sketches). All three put an
+   <svg> in the note in Live Preview.
+   figureKinds(text) -> {tikz, sketch, mermaid}: how many of each a piece of Markdown holds. withoutFigures(text):
+   the text with them taken out, which is what is left for the pen to write by hand. Pure. */
 const TIKZ_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*tikz[ \t]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
+const MERMAID_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[ \t]*mermaid[ \t]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
 const SKETCH_EMBED = /!\[\[[^\]\n]*\.excalidraw(?:\.md)?(?:[|#][^\]\n]*)?\]\]/g;
 function figureKinds(text) {
   const t = String(text == null ? '' : text);
-  return { tikz: (t.match(TIKZ_FENCE) || []).length, sketch: (t.match(SKETCH_EMBED) || []).length };
+  return { tikz: (t.match(TIKZ_FENCE) || []).length, sketch: (t.match(SKETCH_EMBED) || []).length, mermaid: (t.match(MERMAID_FENCE) || []).length };
 }
 function withoutFigures(text) {
-  return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(SKETCH_EMBED, '');
+  return String(text == null ? '' : text).replace(TIKZ_FENCE, '$1').replace(MERMAID_FENCE, '$1').replace(SKETCH_EMBED, '');
+}
+/* The Mermaid blocks of a piece of Markdown: [{from, to, source}], from and to around the whole fenced block, source
+   its lines between the fences. Pure. */
+function mermaidBlocks(text) {
+  const t = String(text == null ? '' : text), out = [];
+  for (const m of t.matchAll(MERMAID_FENCE)) {
+    const from = m.index + m[1].length, block = m[0].slice(m[1].length);
+    const lines = block.split('\n');
+    out.push({ from, to: from + block.length, source: lines.slice(1, -1).join('\n') });
+  }
+  return out;
 }
 
 /* How a ```tikz block stands on the page. TikZJax (0.5.2) puts a <script type="text/tikz"> in the block, replaces it
@@ -1498,6 +1728,14 @@ function tikzState(block) {
   if (block.querySelector('svg')) return 'drawn';
   // (the broken picture, or what Scriptorium's "Repair TikZJax rendering" puts in its place: TeX's own words)
   return block.querySelector('img') || block.querySelector('.scriptorium-tikz-error') ? 'failed' : 'waiting';
+}
+/* How a ```mermaid block stands on the page: Obsidian draws it as an <svg> in a .mermaid box, or, when it cannot read
+   the diagram, writes what is wrong there instead. -> 'waiting' | 'drawn' | 'failed'. Pure. */
+function mermaidState(block) {
+  const box = block && block.querySelector('.mermaid');
+  if (!box) return 'waiting';
+  if (box.querySelector('svg')) return 'drawn';
+  return String(box.textContent || '').trim() ? 'failed' : 'waiting';
 }
 /* How long a figure is waited for before its source is shown in its place. TikZJax sets its figures one after
    another: a plain one takes well under a second, pgfplots or circuitikz a second or two, a thousand shapes half a
@@ -1517,12 +1755,81 @@ function tikzTrouble(kind, where, wait) {
     : `TikZJax has not drawn this figure after ${secs} seconds, so its source is shown:`;
 }
 
-/* The order in which the pen draws a figure's parts: shapes first, in the order the figure has them (which is the
-   order TikZ and Excalidraw drew them in), then its labels. parts: [{text: boolean}] -> their indexes. Pure. */
+/* The order in which the pen draws a TikZ figure's parts: shapes first, in the order the figure has them (which is
+   the order TikZ drew them in), then its labels. parts: [{text: boolean}] -> their indexes. Pure. */
 function figureOrder(parts) {
   const shapes = [], labels = [];
   (parts || []).forEach((p, i) => (p && p.text ? labels : shapes).push(i));
   return shapes.concat(labels);
+}
+
+/* The order in which a Mermaid diagram is drawn, piece by piece, as one would draw it by hand (by the pen in the
+   note, and by the chat's ink when a reply brings one). parts: one for each drawable part of the svg, in the svg's
+   own order, [{kind, id, text, footer}]: kind is what the part belongs to ('node', 'edge', 'label': an edge's label,
+   'line': a lifeline under an actor, 'cluster': a box around nodes, '' for anything else), id its group's own id
+   (an edge and its label in a flowchart are "L_<from>_<to>_<n>", in a sequence "i<n>" in the order of the
+   messages), text whether the part is words, footer whether it is an actor's copy at the foot of a sequence.
+   - A flowchart (edges named L_<from>_<to>_<n>) grows from its first node: a node is drawn (its shape, then its
+     words), then each edge that leaves what is drawn (the line, its arrowhead, its label) and the node it comes to,
+     and so on; nodes nothing reaches start again in their own order.
+   - Anything else (a sequence, states, classes…): boxes around nodes, the nodes, the lines under them, the edges
+     in their order with their labels, then the copies at the foot.
+   Parts that belong to nothing come first (shapes) and last (words). -> the parts' indexes, each once. Pure. */
+function diagramOrder(parts) {
+  const list = parts || [];
+  const groups = new Map(), loose = [];
+  list.forEach((p, i) => {
+    if (!p || !p.kind || p.id == null || p.id === '') { loose.push(i); return; }
+    const key = `${p.kind}\u0000${p.id}\u0000${p.footer ? 1 : 0}`;
+    if (!groups.has(key)) groups.set(key, { kind: p.kind, id: String(p.id), footer: Boolean(p.footer), parts: [] });
+    groups.get(key).parts.push(i);
+  });
+  const inOrder = g => g.parts.filter(i => !list[i].text).concat(g.parts.filter(i => list[i].text));
+  const all = Array.from(groups.values());
+  const nodes = all.filter(g => g.kind === 'node' && !g.footer), edges = all.filter(g => g.kind === 'edge');
+  const labelOf = id => all.find(g => g.kind === 'label' && g.id === id);
+  const out = [], done = new Set();
+  const take = g => { if (g && !done.has(g)) { done.add(g); out.push(...inOrder(g)); } };
+  out.push(...loose.filter(i => !(list[i] && list[i].text)));
+  for (const g of all.filter(x => x.kind === 'cluster')) take(g);
+  const byId = new Map(nodes.map(g => [g.id, g]));
+  // an edge's two ends: "L_a_b_0" splits more than one way when the ids hold "_"; the split whose halves are both nodes
+  const endsOf = g => {
+    const m = /^L_(.+)_\d+$/.exec(g.id);
+    if (!m) return null;
+    const bits = m[1].split('_');
+    for (let k = 1; k < bits.length; k++) {
+      const a = bits.slice(0, k).join('_'), b = bits.slice(k).join('_');
+      if (byId.has(a) && byId.has(b)) return [a, b];
+    }
+    return null;
+  };
+  const links = edges.map(g => ({ g, ends: endsOf(g) }));
+  if (links.length && links.every(l => l.ends)) {
+    const drawn = new Set();
+    for (const n of nodes) {
+      if (drawn.has(n.id)) continue;
+      drawn.add(n.id);
+      take(n);
+      for (let again = true; again;) {
+        again = false;
+        for (const l of links) {
+          if (done.has(l.g) || !drawn.has(l.ends[0])) continue;
+          take(l.g); take(labelOf(l.g.id));
+          if (!drawn.has(l.ends[1])) { drawn.add(l.ends[1]); take(byId.get(l.ends[1])); }
+          again = true;
+        }
+      }
+    }
+  } else {
+    for (const g of nodes) take(g);
+    for (const g of all.filter(x => x.kind === 'line')) take(g);
+    const seq = id => { const m = /^i(\d+)$/.exec(id); return m ? Number(m[1]) : Infinity; };
+    for (const g of edges.slice().sort((a, b) => seq(a.id) - seq(b.id))) { take(g); take(labelOf(g.id)); }
+  }
+  for (const g of all) { take(g); if (g.kind === 'edge') take(labelOf(g.id)); }   // the foot, and what is not named above
+  out.push(...loose.filter(i => list[i] && list[i].text));
+  return out;
 }
 
 /* (plain: the text is written as Live Preview shows it, without its Markdown marks; see plainInline) */
@@ -2051,10 +2358,21 @@ const DEMO_FIGURE = ['```tikz', '\\begin{document}', '\\begin{tikzpicture}[scale
   '\\fill (1,1.732) circle (0.04) node[above] {$L_4$};',
   '\\fill (1,-1.732) circle (0.04) node[below] {$L_5$};',
   '\\end{tikzpicture}', '\\end{document}', '```'].join('\n');
+/* The demo's Mermaid diagram (Obsidian draws it without any plugin): why a small body rests at the first point. */
+const DEMO_MERMAID = ['```mermaid', 'flowchart LR',
+  '  S((Sun)) -->|pull| B[Small body]',
+  '  E((Earth)) -->|pull| B',
+  '  B --> Q{Pulls and turning balance?}',
+  '  Q -->|yes| R[It rests at L1]',
+  '  Q -->|no| D[It drifts away]', '```'].join('\n');
 function demoChatEdits(question, note, have) {
   const q = String(question || '').toLowerCase();
   let ops = null;
-  if (/\b(diagram|figure|draw|tikz)/.test(q) && have && have.tikz) {
+  if (/\b(sketch|excalidraw)/.test(q) && have && have.sketch) {
+    ops = [{ sketch: { name: 'Balance at L1', mermaid: DEMO_MERMAID.split('\n').slice(1, -1).join('\n') } }];
+  } else if (/\b(flow ?chart|mermaid|chart)/.test(q) || (/\b(diagram|figure|draw)/.test(q) && !(have && have.tikz))) {
+    ops = [{ append: `Why a small body can rest at the first point:\n\n${DEMO_MERMAID}` }];
+  } else if (/\b(diagram|figure|draw|tikz)/.test(q) && have && have.tikz) {
     ops = [{ append: `The five points, with the two masses:\n\n${DEMO_FIGURE}` }];
   } else if (/\b(equation|formula|math)/.test(q)) {
     ops = [{ append: 'The Euler–Lagrange equation: $$\\frac{d}{dt}\\frac{\\partial L}{\\partial \\dot{q}} - \\frac{\\partial L}{\\partial q} = 0$$' }];
@@ -2105,7 +2423,7 @@ function demoChatReply(question, note, agentic, look, have) {
   parts.push(`You asked: “${excerpt(String(question || '').replace(/\s+/g, ' '), 160)}” A model would answer here, ` +
     'with the note in mind.');
   parts.push('The edits work offline in demo mode:\n\n' +
-    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation*, to *add some code* or (with TikZJax on) to *draw a diagram*, and the pen does it.\n' : '') +
+    (agentic ? '- Ask here to *fix the typography*, to *add a line*, to *add an equation*, to *add some code*, to *draw a flowchart* (or, with TikZJax on, *a diagram*; with Excalidraw on, *a sketch*), and the pen does it.\n' : '') +
     '- Ask me to *explain* something, and the reply shows how the chat sets mathematics, code and a figure.\n' +
     '- **Proofread note** finds typographic slips (straight quotes, spaced hyphens, doubled spaces) and sets the ' +
     'corrections down with the pen.\n' +
@@ -2134,6 +2452,315 @@ function demoLookReply(look) {
   if (wide.length) parts.push(`${pl(wide.length, 'block')} ${wide.length === 1 ? 'is' : 'are'} too wide for the column (${wide.map(b => b.kind).slice(0, 4).join(', ')}).`);
   if (look.page && look.page.margin) parts.push('The footnotes are set in the margin.');
   return parts.join('\n\n');
+}
+
+
+/* ---- Voice ----
+   Voice control, off until the writer turns it on (Settings → Lagrange → Voice). While Lagrange listens, the sound of
+   the microphone is cut into phrases where the speaker pauses (createVad); each phrase is resampled to 16 kHz mono
+   (resample), written as a WAV file in memory (encodeWav) and sent as a form (multipartBody, transcriptionRequest) to
+   the transcription service the writer chose: OpenAI's, or a server of their own that speaks OpenAI's
+   /audio/transcriptions (a local Whisper, for one). What comes back is read for the few commands that may be said aloud
+   (voiceParse) and joined to the note at the cursor (dictationPoint, dictationJoin), or sent to the chat. The Claude API
+   takes no sound, and neither subscription offers transcription to a plugin; Obsidian on a computer has no working
+   built-in recognition (Electron has the browser's SpeechRecognition but not Google's service behind it: it fails with
+   "network"). Pure; plugins-tests/lagrange-voice.test.js tests them. */
+
+const VOICE_RATE = 16000;                       // what every transcription service takes
+const VOICE_MAX_SECONDS = 30;                   // a phrase longer than this is sent in parts
+const VOICE_DEFAULT_MODEL = { openai: 'gpt-4o-mini-transcribe', server: 'whisper-1' };
+const VOICE_FALLBACK_MODEL = 'whisper-1';       // OpenAI's older model, for an account that has not the default
+const OPENAI_AUDIO_URL = 'https://api.openai.com/v1';
+
+/* A language code for the service: '' (the service detects it) or an ISO 639-1 code like 'en' ('en-US' -> 'en'). */
+function voiceLanguage(value) {
+  const m = /^\s*([a-z]{2,3})(?:[-_][a-z0-9]+)?\s*$/i.exec(String(value == null ? '' : value));
+  return m ? m[1].toLowerCase() : '';
+}
+
+/* The model asked for: the writer's, or the route's default. */
+function voiceModel(s) {
+  return String((s && s.voiceModel) || '').trim() || VOICE_DEFAULT_MODEL[s && s.voiceRoute] || VOICE_FALLBACK_MODEL;
+}
+
+/* What keeps the chosen route from working, in words, or ''. env: {desktop, system (whether the system's speech
+   recognition exists here)}. */
+function voiceProblem(s, env) {
+  const e = env || {};
+  if (s.voiceRoute === 'openai') {
+    if (!String(s.openaiPlatformKey || '').trim()) return 'Voice needs an OpenAI API key to transcribe what you say: paste one in Settings → Lagrange → Voice, or choose a transcription server there.';
+    return '';
+  }
+  if (s.voiceRoute === 'server') {
+    const url = String(s.voiceServerUrl || '').trim();
+    if (!url) return 'Give the address of the transcription server in Settings → Lagrange → Voice.';
+    if (!/^https?:\/\/[^\s/]+/i.test(url)) return `“${url}” is not a web address: the transcription server’s address starts with http:// or https://.`;
+    return '';
+  }
+  if (s.voiceRoute === 'system') {
+    if (e.desktop) return 'Obsidian on a computer has no speech recognition of its own that works (the browser it is built on comes without the service behind it). Choose OpenAI or a transcription server in Settings → Lagrange → Voice.';
+    if (!e.system) return 'This device offers Obsidian no speech recognition. Choose OpenAI or a transcription server in Settings → Lagrange → Voice.';
+    return '';
+  }
+  return 'Choose who transcribes what you say in Settings → Lagrange → Voice.';
+}
+
+/* Resamples mono sound from one rate to another: each output sample is the mean of the input it covers when the rate
+   goes down (which also keeps out most of what the lower rate cannot hold), a straight line between neighbours when
+   it goes up. -> Float32Array */
+function resample(input, from, to) {
+  const n = input ? input.length : 0;
+  if (!n || !(from > 0) || !(to > 0)) return new Float32Array(0);
+  if (from === to) return Float32Array.from(input);
+  const ratio = from / to, m = Math.max(1, Math.floor(n / ratio)), out = new Float32Array(m);
+  if (ratio > 1) {
+    for (let i = 0; i < m; i++) {
+      const a = i * ratio, b = Math.min(n, a + ratio);
+      let sum = 0, w = 0;
+      for (let j = Math.floor(a); j < b; j++) {
+        const k = Math.min(b, j + 1) - Math.max(a, j);
+        if (k > 0) { sum += input[j] * k; w += k; }
+      }
+      out[i] = w ? sum / w : 0;
+    }
+  } else {
+    for (let i = 0; i < m; i++) {
+      const x = i * ratio, j = Math.floor(x), f = x - j;
+      out[i] = input[j] * (1 - f) + (j + 1 < n ? input[j + 1] : input[j]) * f;
+    }
+  }
+  return out;
+}
+
+/* A WAV file (16-bit PCM, mono) of samples in [-1, 1] at `rate`. -> Uint8Array */
+function encodeWav(samples, rate) {
+  const n = samples ? samples.length : 0, bytes = new Uint8Array(44 + n * 2), v = new DataView(bytes.buffer);
+  const tag = (o, t) => { for (let i = 0; i < 4; i++) bytes[o + i] = t.charCodeAt(i); };
+  tag(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); tag(8, 'WAVE');
+  tag(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  tag(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const x = Math.max(-1, Math.min(1, Number(samples[i]) || 0));
+    v.setInt16(44 + i * 2, x < 0 ? Math.round(x * 32768) : Math.round(x * 32767), true);
+  }
+  return bytes;
+}
+
+/* The loudness of a block of samples (root mean square). */
+function rmsOf(block) {
+  let s = 0;
+  for (let i = 0; i < block.length; i++) s += block[i] * block[i];
+  return block.length ? Math.sqrt(s / block.length) : 0;
+}
+
+/* Tells speech from silence, block by block, for cutting what is said into phrases. Its sense of silence follows the
+   room: the noise floor is the quietest block of the last windowMs (speech has gaps between its words, so a steady hum
+   becomes the floor even while it is mistaken for speech), sinking quickly and rising slowly, and speech is what
+   stands `ratio` times above it (never less than minLevel). A phrase begins after `startFrames` loud blocks in a row (it is
+   dated from the first of them) and ends after silenceMs of quiet (a little below the threshold that began it, so
+   that it does not end on a soft syllable); one with less than minSpeechMs of speech in it is a cough or a click
+   (keep: false). A phrase longer than maxMs is cut there and goes on as a new one. push(rms, ms) takes one block's
+   loudness and length and gives null, {type: 'start', at}, or {type: 'end' | 'cut', from, to, speech, keep}, the
+   times in ms from the first block. */
+function createVad(opts) {
+  const o = Object.assign({ silenceMs: 1000, minSpeechMs: 250, maxMs: VOICE_MAX_SECONDS * 1000, startFrames: 3, floor: 0.004, minLevel: 0.006, ratio: 3, windowMs: 2500 }, opts);
+  let floor = o.floor, speaking = false, loud = 0, loudMs = 0, quiet = 0, speech = 0, from = 0, t = 0;
+  const recent = [];   // [time, level] of the last windowMs: speech has gaps between words, so its quietest block is the room
+  const threshold = () => Math.max(o.minLevel, floor * o.ratio);
+  return {
+    get speaking() { return speaking; },
+    get floor() { return floor; },
+    get threshold() { return threshold(); },
+    push(rms, ms) {
+      const level = Number(rms) || 0, dt = Number(ms) > 0 ? Number(ms) : 20;
+      t += dt;
+      const th = threshold();
+      recent.push([t, level]);
+      while (recent.length && recent[0][0] <= t - o.windowMs) recent.shift();
+      let low = Infinity;
+      for (const r of recent) if (r[1] < low) low = r[1];
+      // the floor follows the quietest block of the window: down at once to a quieter room, up slowly to a louder one
+      // (and only once the window is full, so that the first words of a phrase are not taken for the room)
+      if (low < floor) floor += (low - floor) * 0.3;
+      else if (t >= o.windowMs) floor += (low - floor) * 0.04;
+      floor = Math.min(0.05, Math.max(0.0003, floor));
+      if (!speaking) {
+        if (level > th) {
+          loud++; loudMs += dt;
+          if (loud >= o.startFrames) {
+            speaking = true; from = t - loudMs; speech = loudMs; quiet = 0; loud = 0; loudMs = 0;
+            return { type: 'start', at: from };
+          }
+          return null;
+        }
+        loud = 0; loudMs = 0;
+        return null;
+      }
+      if (level > th * 0.75) { quiet = 0; speech += dt; } else quiet += dt;
+      if (quiet >= o.silenceMs) {
+        speaking = false;
+        const ev = { type: 'end', from, to: t - quiet, speech, keep: speech >= o.minSpeechMs };
+        quiet = 0;
+        return ev;
+      }
+      if (t - from >= o.maxMs) {
+        const ev = { type: 'cut', from, to: t, speech, keep: speech >= o.minSpeechMs };
+        from = t; speech = 0; quiet = 0;
+        return ev;
+      }
+      return null;
+    },
+  };
+}
+
+/* A form (multipart/form-data) with text fields and one file {name, type, bytes}; empty fields are left out.
+   -> {body: Uint8Array, contentType} */
+function multipartBody(fields, file, boundary) {
+  const enc = t => new TextEncoder().encode(t);
+  const parts = [];
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v === undefined || v === null || v === '') continue;
+    parts.push(enc(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+  }
+  parts.push(enc(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`));
+  parts.push(file.bytes, enc(`\r\n--${boundary}--\r\n`));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return { body: out, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+/* The request that transcribes one phrase (a WAV file), for the route in the settings. -> {url, method, headers, body,
+   contentType}. The OpenAI key is the one Lagrange holds for its OpenAI API provider; it goes to api.openai.com only. */
+function transcriptionRequest(s, wav, model, boundary) {
+  const openai = s.voiceRoute === 'openai';
+  const base = openai ? OPENAI_AUDIO_URL : String(s.voiceServerUrl || '').trim().replace(/\/+$/, '');
+  const key = String((openai ? s.openaiPlatformKey : s.voiceServerKey) || '').trim();
+  const { body, contentType } = multipartBody({ model, response_format: 'json', language: voiceLanguage(s.voiceLanguage) },
+    { name: 'speech.wav', type: 'audio/wav', bytes: wav }, boundary);
+  const headers = { 'Content-Type': contentType };
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return { url: `${base}/audio/transcriptions`, method: 'POST', headers, body, contentType };
+}
+
+/* The words in a transcription service's answer: {"text": …} as OpenAI gives it, or plain text from a server asked for
+   text. Markers some servers put in for silence or music ([BLANK_AUDIO], (silence)) are taken out. */
+function transcriptText(body) {
+  const raw = String(body == null ? '' : body).trim();
+  let text = raw;
+  if (/^[{[]/.test(raw)) {
+    try {
+      const d = JSON.parse(raw);
+      text = typeof d === 'string' ? d : d && typeof d.text === 'string' ? d.text
+        : Array.isArray(d && d.segments) ? d.segments.map(x => (x && x.text) || '').join(' ') : '';
+    } catch (e) { text = raw; }
+  }
+  return String(text).replace(/\[(?:BLANK_AUDIO|blank_audio|silence|SILENCE|music|MUSIC|inaudible)\]|\((?:silence|music|inaudible|Music)\)/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/* ---- Voice commands ----
+   Said as a phrase of their own while dictating, these are done, not written (English only): "new line", "new
+   paragraph", "scratch that" (takes the last phrase dictated back out), "stop listening", and "Lagrange, …" at the
+   start of a phrase, which gives the rest of the phrase to the chat as a message. */
+const VOICE_COMMANDS = [
+  { kind: 'paragraph', re: /^(?:new paragraph|next paragraph)$/ },
+  { kind: 'newline', re: /^(?:new line|newline|next line)$/ },
+  { kind: 'scratch', re: /^(?:scratch that|strike that|delete that)$/ },
+  { kind: 'stop', re: /^(?:stop listening|stop dictation|stop dictating)$/ },
+];
+// "Lagrange," as transcription services hear it ("La Grange", "Le Grange"), with "hey" or "okay" before it at most, and
+// set off by a comma or the like (the services write the pause that way): "Lagrange points" is only words
+const VOICE_WAKE = /^\s*(?:(?:hey|okay|ok)[\s,]+)?(?:la\s*grange|le\s*grange|lagrange)\s*(?:[,.:;!?—–-]+\s*|$)/i;
+
+function voiceKey(text) {
+  return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/* What a dictated phrase asks for, in order: [{kind: 'text', text} | {kind: 'paragraph' | 'newline' | 'scratch' |
+   'stop'} | {kind: 'ask', text}]. A command is a sentence of its own in the phrase (the services end it with a full
+   stop, or it is the whole phrase); "Lagrange, …" counts only at the start of a phrase, and the rest of the phrase is
+   the message. */
+function voiceParse(text) {
+  const t = transcriptText(text);
+  if (!t) return [];
+  const wake = VOICE_WAKE.exec(t);
+  let said = t;
+  if (wake) {
+    const rest = t.slice(wake[0].length).trim();
+    if (!rest) return [];
+    if (!VOICE_COMMANDS.some(c => c.re.test(voiceKey(rest)))) return [{ kind: 'ask', text: rest[0].toUpperCase() + rest.slice(1) }];
+    said = rest;   // "Lagrange, stop listening"
+  }
+  const out = [];
+  for (const sentence of said.match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*)?\s*|[.!?…]+\s*/g) || [said]) {
+    const key = voiceKey(sentence);
+    if (!key) {
+      if (out.length && out[out.length - 1].kind === 'text') out[out.length - 1].text += sentence;
+      continue;
+    }
+    const cmd = VOICE_COMMANDS.find(c => c.re.test(key));
+    if (cmd) { out.push({ kind: cmd.kind }); continue; }
+    if (out.length && out[out.length - 1].kind === 'text') out[out.length - 1].text += sentence;
+    else out.push({ kind: 'text', text: sentence });
+  }
+  for (const a of out) if (a.kind === 'text') a.text = a.text.trim();
+  return out.filter(a => a.kind !== 'text' || a.text);
+}
+
+/* The message a phrase said to Lagrange makes: the phrase without a "Lagrange," before it; '' when the phrase was
+   only that, or "stop listening". */
+function voiceMessage(text) {
+  let t = transcriptText(text);
+  const wake = VOICE_WAKE.exec(t);
+  if (wake) t = t.slice(wake[0].length).trim();
+  if (!t || VOICE_COMMANDS.some(c => c.kind === 'stop' && c.re.test(voiceKey(t)))) return '';
+  return t[0].toUpperCase() + t.slice(1);
+}
+
+/* Where dictation goes when the cursor stands inside a word: after that word, never into its middle. before and
+   after: the text on either side of the cursor. -> how many characters to move forward. */
+function dictationPoint(before, after) {
+  const word = /[\p{L}\p{N}_]$/u;
+  if (!word.test(String(before || '')) || !/^[\p{L}\p{N}_]/u.test(String(after || ''))) return 0;
+  return /^[\p{L}\p{N}_'’-]*/u.exec(after)[0].replace(/['’-]+$/, '').length;
+}
+
+// Common words, never taken for names (see dictationJoin).
+const VOICE_LOWER = new Set(('a an the and but or nor so yet for of to in on at by with from into onto over under about after before ' +
+  'between through during without within as if then than that this these those there here it its it\'s is are was were be been being ' +
+  'has have had do does did will would shall should can could may might must not no yes we you he she they them their our your his her ' +
+  'my me us what which who whom whose when where why how all some any each every more most much many such also just only even still ' +
+  'very well now once again because while though although until unless since whether both either neither one two three').split(' '));
+
+/* The words of a phrase as they join the note: a space before them unless the cursor follows a space, the start of a
+   line or an opening bracket, and none before punctuation; a capital at the start of a sentence (after a full stop,
+   a question or exclamation mark, at the start of a line or of a list item, quotation or heading), and in the middle
+   of one, the capital the service gave the phrase's first word taken off, unless that word looks like a name: "I",
+   capitals inside it (NASA, iPhone), or written with a capital in the text before the cursor (and not a common word,
+   VOICE_LOWER); no full stop of theirs before punctuation that follows the cursor; a space after them when a word
+   follows.
+   before and after: the text on either side of the cursor (a line's worth is enough). -> what to insert, or ''. */
+function dictationJoin(before, text, after) {
+  let t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  const b = String(before || ''), a = String(after || '');
+  const line = b.slice(b.lastIndexOf('\n') + 1).replace(/^\s*(?:(?:[-*+]|\d+[.)])\s+(?:\[.\]\s+)?|>\s*|#{1,6}\s+)*/, '');
+  const start = !line.trim() || /[.!?…]["'”’)\]]*\s*$/.test(line);
+  const m = /^(["'“‘(]*)(\p{L})/u.exec(t);
+  if (m) {
+    const i = m[1].length, first = /^[\p{L}\p{N}'’-]+/u.exec(t.slice(i))[0];
+    const bare = first.replace(/['’].*$/, '');
+    const name = bare === 'I' || !/^\p{Lu}[\p{Ll}'’-]*$/u.test(first)
+      || (!VOICE_LOWER.has(bare.toLowerCase()) && new RegExp(`(^|[^\\p{L}])${bare}(?![\\p{L}])`, 'u').test(b));
+    if (start) t = t.slice(0, i) + t[i].toUpperCase() + t.slice(i + 1);
+    else if (!name) t = t.slice(0, i) + t[i].toLowerCase() + t.slice(i + 1);
+  }
+  if (/^[.!?…,;:]/.test(a)) t = t.replace(/[.!?…]+$/, '');   // the text after the cursor has its own punctuation
+  if (!t) return '';
+  const lead = b && !/[\s([{“‘"'/—–-]$/.test(b) && !/^[,.;:!?…)\]}”’]/.test(t) ? ' ' : '';
+  const tail = /^[\p{L}\p{N}(“‘"'[]/u.test(a) ? ' ' : '';
+  return lead + t + tail;
 }
 
 
@@ -2816,7 +3443,7 @@ async function checkCli(which, custom) {
 
 async function streamDemo(req, hooks) {
   const text = typeof req.demo === 'function' ? String(req.demo()) : 'Demo mode has no reply for this.';
-  await sleep(req.purpose === 'chat' ? 900 : 1200, hooks.signal);
+  await sleep(req.purpose === 'chat' ? 900 : req.purpose === 'autocorrect' ? 250 : 1200, hooks.signal);
   const pieces = text.match(/\s*\S+|\s+$/g) || [];
   const pause = req.purpose === 'chat' ? 22 : 0;
   let out = '';
@@ -2940,6 +3567,51 @@ function drawDropcap(settings, req, hooks, session) {
   return drawSvg(settings, req, hooks, session);
 }
 
+
+/* ---- Transcription (voice; see "Voice" among the pure helpers) ----
+   transcribe(settings, wav, hooks) -> the words of one phrase. hooks: {request(req) -> {status, text} (Obsidian's
+   requestUrl in the plugin, which a local server's CORS does not stop; a fake in the tests), env (for voiceProblem),
+   boundary, session ({voiceModel: the model that worked}), retryDelays, timeout (ms a request may take: 60 s)}. An OpenAI account without the default model
+   gets the older whisper-1, once and then for the session. Errors come as LagrangeErrors in plain words. */
+async function transcribe(s, wav, hooks) {
+  const h = hooks || {};
+  const problem = voiceProblem(s, h.env);
+  if (problem) throw new LagrangeError(problem, { kind: 'setup' });
+  const session = h.session || {};
+  const own = String(s.voiceModel || '').trim();
+  let model = !own && s.voiceRoute === 'openai' && session.voiceModel ? session.voiceModel : voiceModel(s);
+  const delays = h.retryDelays || [1200];
+  for (let attempt = 0, retries = 0; ; attempt++) {
+    const req = transcriptionRequest(s, wav, model, h.boundary || `----lagrange${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`);
+    let res, timer = null;
+    try {
+      res = await Promise.race([h.request(req), new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('timed out'), { timedOut: true })), h.timeout || 60000);
+      })]);
+    } catch (e) {
+      if (e && e.timedOut) throw new LagrangeError(`The transcription service did not answer within ${Math.round((h.timeout || 60000) / 1000)} seconds, so that phrase was dropped.`, { kind: 'network' });
+      let host = req.url;
+      try { host = new URL(req.url).host; } catch (x) { /* keep the address */ }
+      throw new LagrangeError(s.voiceRoute === 'openai' ? 'Could not reach api.openai.com to transcribe what you said. Check your internet connection.'
+        : `Could not reach the transcription server at ${host}. Is it running, at the address in Settings → Lagrange → Voice?`, { kind: 'network', cause: e });
+    } finally {
+      clearTimeout(timer);
+    }
+    const status = Number(res && res.status) || 0;
+    if (status >= 200 && status < 300) {
+      if (s.voiceRoute === 'openai' && !own) session.voiceModel = model;
+      return transcriptText(res.text);
+    }
+    const info = parseErrorBody(res && res.text);
+    if (s.voiceRoute === 'openai' && !own && model !== VOICE_FALLBACK_MODEL && (status === 404 || ((status === 400 || status === 403) && /model/i.test(info.message || '')))) {
+      model = VOICE_FALLBACK_MODEL;
+      continue;
+    }
+    if (RETRY_STATUSES.has(status) && retries < delays.length) { await sleep(delays[retries++]); continue; }
+    throw new LagrangeError(`The transcription failed. ${describeError({ provider: 'openai', status, type: info.type, message: info.message, model })}`
+      .replace('Settings → Lagrange.', 'Settings → Lagrange → Voice.'), { kind: 'http', status });
+  }
+}
 
 /* ---- Prompts ---- */
 
@@ -4296,6 +4968,191 @@ function prefersReducedMotion(win) {
   try { return (win || window).matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
 }
 
+/* Which kind of diagram an <svg> is: 'mermaid' (a ```mermaid block as Obsidian draws it), 'sketch' (an Excalidraw
+   drawing), 'tikz', or ''. */
+function diagramKind(svg) {
+  if (!svg || !svg.closest) return '';
+  if (svg.closest('.mermaid') || (svg.classList && svg.classList.contains('pele'))) return 'mermaid';
+  if (svg.closest('.block-language-tikz')) return 'tikz';
+  if ((svg.classList && svg.classList.contains('excalidraw-svg')) || svg.closest('.excalidraw-embedded-img, .excalidraw-svg')) return 'sketch';
+  return '';
+}
+/* The drawable parts of a diagram's <svg>: its strokes, shapes, words and pictures, in the svg's own order, without
+   what is only referred to (markers, patterns and the like) and without the pieces of a text. */
+function diagramParts(svg) {
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  // (an Excalidraw drawing's paper: a rect at the root as large as the picture, which is there from the first)
+  const ground = n => n.parentElement === svg && n.tagName.toLowerCase() === 'rect' && vb && vb.width > 0 &&
+    Math.abs((parseFloat(n.getAttribute('width')) || 0) - vb.width) < 1 && Math.abs((parseFloat(n.getAttribute('height')) || 0) - vb.height) < 1;
+  return Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text, foreignObject, image'))
+    .filter(n => !n.closest('defs, mask, clipPath, marker, metadata, pattern, symbol') && !(n.tagName.toLowerCase() !== 'text' && n.closest('text')) && !ground(n));
+}
+/* The order in which a diagram's parts are drawn (parts: as diagramParts gives them). A Mermaid diagram as
+   diagramOrder has it, read from what Obsidian's renderer marks on its groups (data-id, and pele-node, pele-edge,
+   pele-edge-label, pele-lifeline, pele-cluster); an Excalidraw drawing element by element, in the drawing's own
+   order (each shape and then its words, as they were made); a TikZ figure as figureOrder has it. Reads the DOM. */
+function drawOrder(svg, parts) {
+  const words = n => /^(text|foreignObject|image)$/i.test(n.tagName);
+  const kind = diagramKind(svg);
+  if (kind === 'sketch') return parts.map((n, i) => i);
+  if (kind !== 'mermaid') return figureOrder(parts.map(n => ({ text: words(n) })));
+  return diagramOrder(parts.map(n => {
+    const g = n.closest('[data-id]');
+    if (!g || !svg.contains(g) || g === svg) return { kind: '', id: '', text: words(n) };
+    const c = g.classList, is = name => c.contains(name);
+    const kind = is('pele-edge-label') ? 'label' : is('pele-edge') ? 'edge' : is('pele-node') ? 'node' : is('pele-lifeline') ? 'line'
+      : ['pele-cluster', 'pele-cluster-title', 'pele-subgraph', 'pele-quadrant', 'pele-section-label'].some(is) ? 'cluster' : 'other';
+    return { kind, id: g.getAttribute('data-id'), text: words(n), footer: is('pele-actor-footer') };
+  }));
+}
+
+/* A Mermaid diagram as Obsidian has drawn it, as the elements of a sketch (sketchSpec's shapes): its boxes, rounds
+   and diamonds, its lines and arrows (followed along their curves), and its words where they stand and at their
+   size, in the order the diagram is drawn (drawOrder), so that the pen draws the sketch as it would draw the
+   diagram. Coordinates are the diagram's own from its top left corner, a quarter larger (SKETCH_SCALE: a hand-
+   written font is wider than Obsidian's, and the words keep their size). Arrowheads are not elements of their own:
+   the line they end becomes an arrow. Parts that show nothing (neither stroke nor fill) are left out. The svg must
+   be laid out (on the page, if out of sight). Reads the DOM. -> [{type, …}] */
+const SKETCH_SCALE = 1.25;
+function sketchFromSvg(svg) {
+  const win = (svg.ownerDocument && svg.ownerDocument.defaultView) || window;
+  const root = svg.getScreenCTM && svg.getScreenCTM();
+  if (!root) return [];
+  const inv = root.inverse(), vb = svg.viewBox && svg.viewBox.baseVal, ox = vb ? vb.x : 0, oy = vb ? vb.y : 0;
+  const round = v => Math.round(v * 10) / 10;
+  // (a little larger than the diagram, the words at their size: a hand-written font is wider than Obsidian's)
+  const at = (n, x, y) => { const p = new win.DOMPoint(x, y).matrixTransform(inv.multiply(n.getScreenCTM())); return [round((p.x - ox) * SKETCH_SCALE), round((p.y - oy) * SKETCH_SCALE)]; };
+  const box = n => {
+    const b = n.getBBox(), c = [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]].map(q => at(n, q[0], q[1]));
+    const xs = c.map(q => q[0]), ys = c.map(q => q[1]), x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: round(Math.max(...xs) - x), h: round(Math.max(...ys) - y) };
+  };
+  // four corners at the middle of each side of their box: a diamond
+  const diamond = pts => {
+    if (pts.length !== 4) return false;
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2, tol = Math.max(2, (x1 - x0 + y1 - y0) * 0.04);
+    return pts.every(p => (Math.abs(p[0] - mx) < tol && (Math.abs(p[1] - y0) < tol || Math.abs(p[1] - y1) < tol)) || (Math.abs(p[1] - my) < tol && (Math.abs(p[0] - x0) < tol || Math.abs(p[0] - x1) < tol)));
+  };
+  const parts = diagramParts(svg), out = [];
+  for (const i of drawOrder(svg, parts)) {
+    const n = parts[i], tag = n.tagName.toLowerCase(), cs = win.getComputedStyle(n);
+    try {
+      if (tag === 'text' || tag === 'foreignobject') {
+        const text = String(n.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text) out.push(Object.assign({ type: 'text', text, size: Math.round(parseFloat(cs.fontSize) || 16) }, box(n)));
+        continue;
+      }
+      // (an edge label's box is only the paper behind its word: the word is enough in a sketch)
+      if (tag === 'image' || n.classList.contains('pele-marker') || (tag === 'rect' && n.closest('.pele-edge-label'))) continue;
+      const stroked = cs.stroke && cs.stroke !== 'none' && parseFloat(cs.strokeWidth) !== 0, filled = cs.fill && cs.fill !== 'none' && cs.fillOpacity !== '0';
+      if (!stroked && !filled) continue;
+      const dashed = Boolean(cs.strokeDasharray && cs.strokeDasharray !== 'none');
+      if (tag === 'rect') out.push(Object.assign({ type: 'rect' }, box(n)));
+      else if (tag === 'circle' || tag === 'ellipse') out.push(Object.assign({ type: 'ellipse' }, box(n)));
+      else if (tag === 'polygon' || tag === 'polyline') {
+        const pts = Array.from(n.points || []).map(p => at(n, p.x, p.y));
+        if (tag === 'polygon' && diamond(pts)) out.push(Object.assign({ type: 'diamond' }, box(n)));
+        else if (pts.length >= 2) out.push({ type: 'line', points: tag === 'polygon' ? pts.concat([pts[0]]) : pts, dashed });
+      } else if (tag === 'line') {
+        const g = k => (n[k] && n[k].baseVal ? n[k].baseVal.value : 0);
+        out.push({ type: 'line', points: [at(n, g('x1'), g('y1')), at(n, g('x2'), g('y2'))], dashed });
+      } else if (tag === 'path') {
+        const len = n.getTotalLength();
+        if (!(len > 0.5)) continue;
+        const steps = Math.max(1, Math.min(24, Math.round(len / 14))), pts = [];
+        for (let k = 0; k <= steps; k++) { const q = n.getPointAtLength(len * k / steps); pts.push(at(n, q.x, q.y)); }
+        const edge = n.closest('.pele-edge');
+        out.push({ type: edge && edge.querySelector('.pele-marker') ? 'arrow' : 'line', points: pts, dashed });
+      }
+    } catch (e) { /* a part that cannot be measured is left out */ }
+  }
+  return out;
+}
+
+/* Puts a sketch's elements (sketchSpec's shapes, or sketchFromSvg's) into an ExcalidrawAutomate, in their order:
+   each label inside its shape, and each piece of text, centred where it was meant to stand once Excalidraw has
+   measured it in its own (hand-written) font. */
+function addSketchElements(ea, elements) {
+  const st = ea.style || {}, size0 = st.fontSize, stroke0 = st.strokeStyle;
+  const centre = (id, cx, cy) => {
+    const el = typeof ea.getElement === 'function' ? ea.getElement(id) : null;
+    if (el && el.width > 0 && el.height > 0) { el.x = cx - el.width / 2; el.y = cy - el.height / 2; }
+  };
+  for (const e of elements || []) {
+    if (e.type === 'rect') ea.addRect(e.x, e.y, e.w, e.h);
+    else if (e.type === 'ellipse') ea.addEllipse(e.x, e.y, e.w, e.h);
+    else if (e.type === 'diamond') ea.addDiamond(e.x, e.y, e.w, e.h);
+    else if (e.type === 'line' || e.type === 'arrow') {
+      st.strokeStyle = e.dashed ? 'dashed' : stroke0;
+      if (e.type === 'arrow') ea.addArrow(e.points); else ea.addLine(e.points);
+      st.strokeStyle = stroke0;
+    } else if (e.type === 'text') {
+      if (e.size) st.fontSize = Math.max(10, Math.min(36, e.size));
+      const id = ea.addText(e.x, e.y, e.text);
+      if (e.w > 0 && e.h > 0) centre(id, e.x + e.w / 2, e.y + e.h / 2);
+      st.fontSize = size0;
+    }
+    if (e.text && e.type !== 'text') {
+      const id = ea.addText(e.x + 4, e.y + 4, e.text);
+      centre(id, e.x + e.w / 2, e.y + e.h / 2);
+    }
+  }
+}
+
+/* A diagram that draws itself in ink where it stands, without the pen (the chat, when a reply brings a Mermaid
+   diagram or a TikZ figure): its parts in drawOrder, each line along its length and each label uncovered from left
+   to right, in about a second and a half in all. Nothing moves with reduced motion, nor for a diagram of very many
+   parts; the diagram is whole again if it leaves the page meanwhile. Resolves when it is done. */
+async function inkDraw(svg) {
+  const win = (svg && svg.ownerDocument && svg.ownerDocument.defaultView) || window;
+  if (!svg || !svg.isConnected || svg.hasAttribute('data-lagrange-inked') || prefersReducedMotion(win)) return;
+  svg.setAttribute('data-lagrange-inked', '');
+  const parts = diagramParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
+  if (!parts.length || parts.length > 300) return;
+  const order = drawOrder(svg, parts);
+  const keys = ['opacity', 'fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset', 'clipPath'];
+  const whole = () => { for (const n of parts) for (const p of keys) n.style[p] = ''; svg.removeAttribute('data-lagrange-drawing'); };
+  for (const n of parts) n.style.opacity = '0';
+  svg.setAttribute('data-lagrange-drawing', '');
+  const each = Math.max(30, Math.min(220, 1500 / parts.length));
+  const tween = (ms, fn) => new Promise(resolve => {
+    const t0 = win.performance.now();
+    const step = now => {
+      if (!svg.isConnected) { resolve(false); return; }
+      const t = Math.min(1, (now - t0) / ms);
+      fn(t);
+      if (t < 1) win.requestAnimationFrame(step); else resolve(true);
+    };
+    win.requestAnimationFrame(step);
+  });
+  try {
+    for (const i of order) {
+      const n = parts[i];
+      if (/^(text|foreignObject|image)$/i.test(n.tagName)) {
+        n.style.clipPath = 'inset(-20% 100% -20% -10%)';
+        n.style.opacity = '';
+        if (!await tween(each, t => { n.style.clipPath = `inset(-20% ${((1 - t) * 100).toFixed(1)}% -20% -10%)`; })) break;
+        n.style.clipPath = '';
+        continue;
+      }
+      let len = 0;
+      try { len = n.getTotalLength ? n.getTotalLength() : 0; } catch (e) { len = 0; }
+      if (!len) { n.style.opacity = ''; continue; }
+      const cs = win.getComputedStyle(n), bare = cs.stroke === 'none' || parseFloat(cs.strokeWidth) === 0;
+      n.style.fillOpacity = '0';
+      if (bare) { n.style.stroke = cs.fill && cs.fill !== 'none' ? cs.fill : 'currentColor'; n.style.strokeWidth = '0.6'; }
+      n.style.strokeDasharray = `${len} ${len}`;
+      n.style.strokeDashoffset = String(len);
+      n.style.opacity = '';
+      if (!await tween(Math.max(each * 0.6, Math.min(each * 1.8, len * 2.2)), t => { n.style.strokeDashoffset = (len * (1 - t)).toFixed(2); })) break;
+      for (const p of ['fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset']) n.style[p] = '';
+    }
+  } finally {
+    whole();
+  }
+}
+
 /* Screen rectangles, in viewport coordinates (as getBoundingClientRect gives), covering the document range [from, to]
    of a CodeMirror 6 EditorView: one per visual line, in reading order, each {left, top, right, bottom, width, height}.
    Measured from the DOM CodeMirror has drawn, with view.coordsAtPos as the fallback, so a pen can fly to the text.
@@ -4994,11 +5851,13 @@ function createPen(app, settings) {
      unseen from the moment they come (the styles: .lagrange-pen-figures, until an svg is marked data-lagrange-seen),
      so a figure never pops in ahead of the pen. TikZJax compiles a figure before it shows it, which takes a moment,
      and longer the first time in a session: the pen waits for as many figures as the edit holds, for at most `wait` ms. */
-  const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg';
+  const FIGURES = '.block-language-tikz svg, .excalidraw-embedded-img svg, svg.excalidraw-svg, .mermaid > svg';
   // (TikZJax's spinner is an <svg> in the block too: it is not a figure, and is never drawn by the pen)
   const figureList = view => Array.from(view.contentDOM.querySelectorAll(FIGURES)).filter(svg => !svg.parentElement.closest('svg') && !svg.querySelector(':scope > circle > animate'));
   // the ```tikz blocks TikZJax has given up on (a broken picture), that the pen has not yet counted
-  const figureFailures = view => Array.from(view.contentDOM.querySelectorAll('.block-language-tikz:not([data-lagrange-seen])')).filter(b => tikzState(b) === 'failed');
+  // (and the ```mermaid blocks Obsidian could not read: it shows what is wrong in place of the diagram)
+  const figureFailures = view => Array.from(view.contentDOM.querySelectorAll('.block-language-tikz:not([data-lagrange-seen]), .cm-lang-mermaid:not([data-lagrange-seen])'))
+    .filter(b => (b.classList.contains('cm-lang-mermaid') ? mermaidState(b) : tikzState(b)) === 'failed');
   const awaitFigures = async (L, view, want, wait) => {
     const until = L.win.performance.now() + wait;
     for (;;) {
@@ -5012,8 +5871,9 @@ function createPen(app, settings) {
     }
   };
   const FIGURE_STYLES = ['opacity', 'fillOpacity', 'stroke', 'strokeWidth', 'strokeDasharray', 'strokeDashoffset', 'clipPath'];
-  const figureParts = svg => Array.from(svg.querySelectorAll('path, line, polyline, polygon, rect, circle, ellipse, text, foreignObject, image'))
-    .filter(n => !n.closest('defs, mask, clipPath, marker, metadata, pattern, symbol') && !(n.tagName.toLowerCase() !== 'text' && n.closest('text')));
+  const figureParts = diagramParts;
+  // (what is drawn: the parts that take some room on the screen)
+  const visibleParts = svg => figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
   const restoreFigure = svg => {
     svg.setAttribute('data-lagrange-seen', '');
     svg.removeAttribute('data-lagrange-drawing');
@@ -5028,8 +5888,8 @@ function createPen(app, settings) {
      -> how many parts are drawn, or -1 when the whole figure is. */
   const drawFigure = async (L, svg, k, from) => {
     const win = L.win;
-    const parts = figureParts(svg).filter(n => { const r = n.getBoundingClientRect(); return r.width > 0.3 || r.height > 0.3; });
-    const order = figureOrder(parts.map(n => ({ text: /^(text|foreignObject|image)$/i.test(n.tagName) })));
+    const parts = visibleParts(svg);
+    const order = drawOrder(svg, parts);
     const at = n => { const r = rel(L, n.getBoundingClientRect()); return { x: r.left, y: r.top + r.height * 0.6 }; };
     if (!parts.length || parts.length > 220) {
       svg.style.clipPath = 'inset(0 100% 0 0)';
@@ -5217,9 +6077,9 @@ function createPen(app, settings) {
       const doc = view.dom.ownerDocument, win = doc.defaultView || window;
       const still = prefersReducedMotion(win);
       const speed = Number(settings && settings.penSpeed) > 0 ? Number(settings.penSpeed) : 1;
-      const k = 1 / speed;
-      const text = String(replacement == null ? '' : replacement);
       const h = how || {};
+      const k = 1 / (speed * (h.quick ? 2.5 : 1));      // (quick: a correction made while the writer types, see Autocorrect)
+      const text = String(replacement == null ? '' : replacement);
       const tally = h.tally || run;                     // whose time this edit's handwriting counts against (penLines)
       // The pen that writes it: the one asked for or, if that one is at another edit of this note, one that is free.
       const busy = new Set(Array.from(current).filter(c => c.view === view).map(c => c.slot));
@@ -5409,8 +6269,8 @@ function createPen(app, settings) {
           const before = live && maths.length ? new Set(view.contentDOM.querySelectorAll('mjx-container')) : null;
           // Diagrams in the text (Live Preview draws them): those already in the note are marked as seen, and the
           // ones this edit brings stay unseen until the pen draws them.
-          const figs = live ? figureKinds(text) : { tikz: 0, sketch: 0 };
-          const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch;
+          const figs = live ? figureKinds(text) : { tikz: 0, sketch: 0, mermaid: 0 };
+          const wantFigures = at.dirty ? 0 : figs.tikz + figs.sketch + figs.mermaid;
           if (wantFigures) {
             for (const svg of figureList(view)) svg.setAttribute('data-lagrange-seen', '');
             for (const b of figureFailures(view)) b.setAttribute('data-lagrange-seen', '');
@@ -5773,6 +6633,64 @@ function createPen(app, settings) {
     /* Ends every edit being written, at once and before it returns: their changes are made in the note if they had
        not been yet, the handwriting, the ink and the pens go, and the marks on the note come off. Returns whether
        there was an edit to end. (The promises edit() gave resolve a moment later.) */
+    /* The diagrams the note shows in an editor (Live Preview): each one's <svg>, in the order of the note. */
+    figures(view) {
+      return figureList(view);
+    },
+    /* Draws diagrams the note already shows, where they stand (the command "Draw the diagram again", and a drawing
+       Lagrange has added to): the pen comes in, draws each one as it draws a new figure (drawFigure), from part
+       opts.from on (the parts before it stay as they are), and goes. A click or a key in the note, or finish(),
+       shows them whole at once; with reduced motion nothing moves and they stay as they are. Resolves when done. */
+    async redraw(view, svgs, opts) {
+      if (destroyed) throw new Error('The pen was put away.');
+      const o = opts || {};
+      const doc = view.dom.ownerDocument, win = doc.defaultView || window;
+      const list = (svgs || []).filter(svg => svg && svg.isConnected);
+      if (!list.length || prefersReducedMotion(win)) return;
+      const speed = Number(settings && settings.penSpeed) > 0 ? Number(settings.penSpeed) : 1, k = 1 / speed;
+      const busy = new Set(Array.from(current).filter(c => c.view === view).map(c => c.slot));
+      const slot = SLOTS.find(i => !busy.has(i));
+      if (slot === undefined) return;
+      install(view);
+      const S = layerFor(view);
+      S.fit();
+      const L = penOn(S, slot);
+      const ctx = context();
+      L.ctx = ctx;
+      const from = Math.max(0, Math.round(Number(o.from) || 0));
+      // every figure is unseen from the start (each from its own first new part), so none shows ahead of the pen
+      for (const svg of list) {
+        const parts = visibleParts(svg);
+        if (parts.length && parts.length <= 220) drawOrder(svg, parts).forEach((i, at) => { if (at >= from) parts[i].style.opacity = '0'; });
+        svg.setAttribute('data-lagrange-drawing', '');
+      }
+      const showAll = () => { for (const svg of list) restoreFigure(svg); };
+      const me = { ctx, view, slot, finish() { ctx.stop(); showAll(); putAway(L); } };
+      current.add(me);
+      try {
+        win.clearTimeout(L.idle);
+        L.busy = (L.busy || 0) + 1;
+        L.lift = 0;
+        const vr = rel(L, view.scrollDOM.getBoundingClientRect());
+        const r0 = rel(L, list[0].getBoundingClientRect());
+        if (!L.pos) { const door = doorIn(L, vr, r0.top); place(L, door.x, door.y); }
+        L.pen.style.display = '';
+        for (const svg of list) {
+          if (ctx.stopped) break;
+          await drawFigure(L, svg, k, from);
+          restoreFigure(svg);
+        }
+        await fly(L, Math.min(vr.right - 12, L.pos.x + 30), L.pos.y - 18, 280 * k, 10);
+      } catch (e) {
+        if (e !== STOP) throw e;
+      } finally {
+        current.delete(me);
+        showAll();
+        if (L.ctx === ctx) L.ctx = null;
+        ctx.stop();
+        if (L.pos && !destroyed) park(L, view, 160);
+      }
+    },
     finish() {
       const all = Array.from(current);
       for (const me of all) { try { me.finish(); } catch (e) { console.error('Lagrange: the pen', e); } }
@@ -6021,7 +6939,7 @@ async function runEdits(view, located, opts) {
     for (const e of located) if (!ok.includes(e)) skipped.push(Object.assign({}, e, { why: 'the text changed' }));
     if (!ok.length) return { applied, skipped, changes: ChangeSet.empty(docBefore.length), docBefore, docAfter: docBefore };
     const changes = ChangeSet.of(ok.map(e => ({ from: e.from, to: e.to, insert: e.replace })), docBefore.length);
-    view.dispatch({ changes, userEvent: 'lagrange.edit', scrollIntoView: true });
+    view.dispatch({ changes, userEvent: 'lagrange.edit', scrollIntoView: !opts.stay, annotations: isolateHistory ? [isolateHistory.of('full')] : [] });
     return { applied: ok, skipped, changes, docBefore, docAfter: view.state.doc };
   }
 
@@ -6054,7 +6972,7 @@ async function runEdits(view, located, opts) {
       const redo = undo.invert(after);
       view.dispatch({ changes: undo, annotations: own });
       const without = view.state.doc;
-      view.dispatch({ changes: redo, selection, userEvent: 'lagrange.edit' });
+      view.dispatch({ changes: redo, selection, userEvent: 'lagrange.edit', annotations: isolateHistory ? [isolateHistory.of('full')] : [] });
       result = { changes: redo, docBefore: without, docAfter: view.state.doc };
     }
     if (opts.onDone) { try { opts.onDone(result); } catch (e) { console.error('Lagrange', e); } }
@@ -6145,7 +7063,7 @@ async function runEdits(view, located, opts) {
           several, () => !run.closed && !run.cancelled);
         if (run.closed) break;
       }
-      if (!lanes) { await write(i); continue; }
+      if (!lanes) { await write(i, opts.how); continue; }
       await Promise.all(lanes.map(async (lane, slot) => {
         const tally = tallies[slot] || (tallies[slot] = { spent: 0 });
         for (let n = 0; n < lane.length && !run.closed && !failure; n++) {
@@ -7013,6 +7931,262 @@ function attachmentEnv(win) {
 let pickerUid = 0;   // radio groups need a name of their own in each picker drawn
 let attachUid = 0;
 
+/* ---- Voice: listening, dictation, and speaking to Lagrange ----
+   A VoiceListener holds the microphone while Lagrange listens, and only then: mode 'dictate' (phrases go into the
+   note at the cursor until the writer stops), 'talk' (one phrase becomes a message in the chat, then the microphone
+   is closed) or 'test' (a few seconds, for the settings' "Test the microphone"). The sound is read by an AudioWorklet
+   (a ScriptProcessor where there is none), cut into phrases by createVad, and each phrase is transcribed in turn
+   while listening goes on; nothing is written to disk. The phrase being said when the writer stops is still
+   transcribed (Esc in 'talk' mode drops it). On a phone or tablet the system's own recognition may be chosen instead
+   (route 'system'), where the system offers it; Obsidian on a computer does not. */
+
+const VOICE_WORKLET = `class LagrangeTap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(1024); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) { this.buf[this.n++] = ch[i]; if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; } }
+    return true;
+  }
+}
+registerProcessor('lagrange-tap', LagrangeTap);`;
+const VOICE_PREROLL = 0.3, VOICE_TAIL = 0.2;   // seconds kept before a phrase begins and after it ends
+
+/* What a failure to open the microphone means, in words (the DOMException's name decides). */
+function micProblem(e, platform) {
+  const name = e && e.name;
+  if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+    const where = platform === 'darwin' ? 'On a Mac: System Settings → Privacy & Security → Microphone, turn on Obsidian, then restart Obsidian.'
+      : platform === 'win32' ? 'On Windows: Settings → Privacy & security → Microphone, turn on “Microphone access” and “Let desktop apps access your microphone”.'
+        : platform === 'linux' ? 'On Linux: check that the microphone is not muted (PulseAudio or PipeWire), and, if Obsidian came as a Flatpak or a Snap, that it is allowed to use audio.'
+          : 'Allow Obsidian to use the microphone in the system’s settings (privacy, microphone).';
+    return `Obsidian is not allowed to use the microphone. ${where}`;
+  }
+  if (name === 'NotFoundError' || name === 'OverconstrainedError' || name === 'DevicesNotFoundError') return 'No microphone was found. Connect one, or choose it as the system’s sound input, and try again.';
+  if (name === 'NotReadableError' || name === 'TrackStartError' || name === 'AbortError') return 'The microphone could not be opened: another program may be using it. Close that program and try again.';
+  return `The microphone could not be opened${e && e.message ? ` (${e.message})` : ''}.`;
+}
+
+class VoiceListener {
+  /* o: {mode, settings, desktop, platform, transcribe(wav) -> text, onState(listener), onText(text, listener),
+     onError(message, listener), onEnd(listener), maxMs (test mode)} */
+  constructor(o) {
+    this.o = o;
+    this.mode = o.mode;
+    this.state = 'starting';     // 'starting' | 'listening' | 'hearing' (a phrase is being said) | 'stopping' | 'off'
+    this.level = 0;              // 0..1, for the meter
+    this.busy = 0;               // phrases being transcribed
+    this.heard = 0;              // phrases sent to be transcribed
+    this.peak = 0;
+    this.blocks = []; this.offset = 0; this.total = 0;   // the sound kept: blocks from sample `offset`, `total` read in all
+    this.jobs = Promise.resolve();
+    this.closed = false;
+  }
+
+  async start() {
+    const md = typeof navigator !== 'undefined' && navigator.mediaDevices;
+    if (!md || typeof md.getUserMedia !== 'function') throw new LagrangeError('This device gives Obsidian no microphone.', { kind: 'mic' });
+    try {
+      this.stream = await md.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (e) {
+      throw new LagrangeError(micProblem(e, this.o.platform), { kind: 'mic', cause: e });
+    }
+    if (this.closed) { this.release(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    if (this.ctx.state === 'suspended') { try { await this.ctx.resume(); } catch (e) { /* it starts with the stream */ } }
+    this.rate = this.ctx.sampleRate;
+    const pause = Math.round((Number(this.o.settings.voicePause) || 1) * 1000);
+    this.vad = createVad({ silenceMs: this.mode === 'talk' ? Math.min(pause, 1400) : pause });
+    this.source = this.ctx.createMediaStreamSource(this.stream);
+    this.mute = this.ctx.createGain();
+    this.mute.gain.value = 0;
+    this.mute.connect(this.ctx.destination);
+    let tap = null;
+    try {
+      const url = URL.createObjectURL(new Blob([VOICE_WORKLET], { type: 'application/javascript' }));
+      try { await this.ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      tap = new AudioWorkletNode(this.ctx, 'lagrange-tap');
+      tap.port.onmessage = ev => this.take(ev.data);
+    } catch (e) {
+      tap = this.ctx.createScriptProcessor(2048, 1, 1);
+      tap.onaudioprocess = ev => this.take(ev.inputBuffer.getChannelData(0).slice(0));
+    }
+    this.tap = tap;
+    if (this.closed) { this.release(); return; }   // stopped while the microphone was being opened
+    this.source.connect(tap);
+    tap.connect(this.mute);
+    this.state = 'listening';
+    this.began = Date.now();
+    this.notify();
+  }
+
+  notify() { try { this.o.onState(this); } catch (e) { console.error('Lagrange: voice', e); } }
+
+  /* One block of sound from the microphone. */
+  take(block) {
+    if (this.closed || !block || !block.length) return;
+    this.blocks.push(block);
+    this.total += block.length;
+    const rms = rmsOf(block);
+    this.level = Math.min(1, Math.sqrt(rms) * 2.2);
+    this.peak = Math.max(this.peak, rms);
+    const ev = this.vad.push(rms, block.length / this.rate * 1000);
+    if (ev && ev.type === 'start') { this.state = 'hearing'; this.phraseAt = ev.at; }
+    else if (ev && (ev.type === 'end' || ev.type === 'cut')) {
+      if (ev.type === 'end') this.state = 'listening';
+      else this.phraseAt = ev.to;   // a long phrase cut here goes on from here
+      if (ev.keep) this.phrase(ev.from, ev.to, ev.type === 'cut');
+      if (ev.type === 'end' && (this.mode === 'talk' || this.mode === 'test') && ev.keep) { void this.stop(false); return; }
+    }
+    if (this.mode === 'test' && Date.now() - this.began > (this.o.maxMs || 6000)) { void this.stop(true); return; }
+    // keep a little before the phrase, or before now when no phrase is being said
+    const keepFrom = Math.floor(((this.vad.speaking ? this.phraseAt : this.total / this.rate * 1000) / 1000 - VOICE_PREROLL - 0.2) * this.rate);
+    while (this.blocks.length > 1 && this.offset + this.blocks[0].length < keepFrom) { this.offset += this.blocks[0].length; this.blocks.shift(); }
+    if (!this.raf) this.raf = window.requestAnimationFrame(() => { this.raf = 0; this.notify(); });
+  }
+
+  /* The sound from ms `from` to `to` (plus a little either side), sent to be transcribed after the phrases before it. */
+  phrase(from, to, cut) {
+    const a = Math.max(this.offset, Math.floor((from / 1000 - (cut ? 0 : VOICE_PREROLL)) * this.rate));
+    const b = Math.min(this.total, Math.ceil((to / 1000 + (cut ? 0 : VOICE_TAIL)) * this.rate));
+    if (b <= a) return;
+    const samples = new Float32Array(b - a);
+    let at = this.offset;
+    for (const block of this.blocks) {
+      const s = Math.max(a, at), e = Math.min(b, at + block.length);
+      if (e > s) samples.set(block.subarray(s - at, e - at), s - a);
+      at += block.length;
+      if (at >= b) break;
+    }
+    this.heard++;
+    this.busy++;
+    this.notify();
+    const wav = encodeWav(resample(samples, this.rate, VOICE_RATE), VOICE_RATE);
+    this.jobs = this.jobs.then(async () => {
+      try {
+        const text = await this.o.transcribe(wav, this);
+        if (text) await this.o.onText(text, this);
+      } catch (e) {
+        this.o.onError((e && e.message) || String(e), this, e);
+        if (e && e.kind === 'setup') void this.stop(false);
+      } finally {
+        this.busy--;
+        this.notify();
+      }
+    });
+  }
+
+  /* Stops listening. flush: the phrase being said is still transcribed (if it has enough speech in it). Resolves
+     when every phrase has been transcribed and dealt with. */
+  async stop(flush = true) {
+    if (!this.closed) {
+      this.closed = true;
+      if (flush && this.vad && this.vad.speaking && this.rate) {
+        const now = this.total / this.rate * 1000;
+        if (now - this.phraseAt >= 250) this.phrase(this.phraseAt, now, false);
+      }
+      this.release();
+      this.state = 'stopping';
+      this.notify();
+    }
+    await this.jobs;
+    if (this.state !== 'off') {
+      this.state = 'off';
+      this.notify();
+      try { this.o.onEnd(this); } catch (e) { console.error('Lagrange: voice', e); }
+    }
+  }
+
+  release() {
+    if (this.raf) { try { window.cancelAnimationFrame(this.raf); } catch (e) { /* gone */ } this.raf = 0; }
+    try { if (this.tap) { this.tap.disconnect(); if (this.tap.port) this.tap.port.onmessage = null; this.tap.onaudioprocess = null; } } catch (e) { /* already */ }
+    try { if (this.source) this.source.disconnect(); } catch (e) { /* already */ }
+    if (this.stream) for (const t of this.stream.getTracks()) { try { t.stop(); } catch (e) { /* already */ } }
+    if (this.ctx && this.ctx.state !== 'closed') { try { void this.ctx.close(); } catch (e) { /* already */ } }
+    this.stream = null;
+    this.level = 0;
+  }
+}
+
+/* The system's own speech recognition, for phones and tablets that have it (route 'system'): the same face as a
+   VoiceListener (start, stop, state, level, busy), each final result a phrase. */
+class SystemListener {
+  constructor(o) {
+    this.o = o; this.mode = o.mode; this.state = 'starting'; this.level = 0; this.busy = 0; this.heard = 0; this.peak = 0; this.closed = false;
+  }
+  async start() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) throw new LagrangeError('This device offers Obsidian no speech recognition.', { kind: 'setup' });
+    const r = new SR();
+    this.rec = r;
+    r.continuous = this.mode === 'dictate';
+    r.interimResults = false;
+    const lang = voiceLanguage(this.o.settings.voiceLanguage);
+    if (lang) r.lang = lang;
+    this.chain = Promise.resolve();
+    r.onspeechstart = () => { this.state = 'hearing'; this.level = 0.6; this.o.onState(this); };
+    r.onspeechend = () => { this.state = 'listening'; this.level = 0; this.o.onState(this); };
+    r.onresult = ev => {
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const res = ev.results[i];
+        if (!res.isFinal) continue;
+        const text = res[0] && res[0].transcript;
+        this.heard++;
+        this.chain = this.chain.then(() => this.o.onText(String(text || ''), this)).catch(e => this.o.onError(e.message || String(e), this, e));
+      }
+    };
+    r.onerror = ev => {
+      const why = ev.error === 'not-allowed' || ev.error === 'service-not-allowed' ? micProblem({ name: 'NotAllowedError' }, this.o.platform)
+        : ev.error === 'audio-capture' ? micProblem({ name: 'NotFoundError' }) : ev.error === 'network' ? 'The system’s speech recognition could not reach its service.'
+          : ev.error === 'no-speech' || ev.error === 'aborted' ? '' : `The system’s speech recognition stopped (${ev.error}).`;
+      if (why) this.o.onError(why, this);
+    };
+    r.onend = () => { if (!this.closed && this.mode === 'dictate') { try { r.start(); return; } catch (e) { /* ends below */ } } void this.stop(false); };
+    r.start();
+    this.state = 'listening';
+    this.o.onState(this);
+  }
+  async stop() {
+    if (!this.closed) { this.closed = true; try { this.rec.stop(); } catch (e) { /* already */ } }
+    await this.chain;
+    if (this.state !== 'off') { this.state = 'off'; this.o.onState(this); try { this.o.onEnd(this); } catch (e) { /* gone */ } }
+  }
+}
+
+/* In the editor: the last phrase dictated (for "scratch that"), kept on its words as the note changes and given up
+   when they are edited; and a moment of rubric ink on each phrase as it comes in. */
+let voiceCm = null;   // {setLast, ink, inkDone, last, inkField}, made on first use (CodeMirror is Obsidian's)
+function voiceEditor() {
+  if (voiceCm) return voiceCm;
+  const setLast = StateEffect.define(), ink = StateEffect.define(), inkDone = StateEffect.define();
+  const last = StateField.define({
+    create: () => null,
+    update(value, tr) {
+      for (const e of tr.effects) if (e.is(setLast)) return e.value;
+      if (!value || !tr.docChanged) return value;
+      let touched = false;
+      tr.changes.iterChangedRanges((fa, ta) => { if (fa < value.to && ta > value.from) touched = true; });
+      if (touched) return null;
+      return { from: tr.changes.mapPos(value.from, 1), to: tr.changes.mapPos(value.to, -1), text: value.text };
+    },
+  });
+  const mark = Decoration.mark({ class: 'lagrange-voice-ink' });
+  const inkField = StateField.define({
+    create: () => Decoration.none,
+    update(deco, tr) {
+      deco = deco.map(tr.changes);
+      for (const e of tr.effects) {
+        if (e.is(ink) && e.value.to > e.value.from) deco = deco.update({ add: [mark.range(e.value.from, e.value.to)] });
+        if (e.is(inkDone)) deco = Decoration.none;
+      }
+      return deco;
+    },
+    provide: f => EditorView.decorations.from(f),
+  });
+  voiceCm = { setLast, ink, inkDone, last, inkField, extension: [last, inkField] };
+  return voiceCm;
+}
+
 class LagrangeChatView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -7119,6 +8293,10 @@ class LagrangeChatView extends ItemView {
     const clip = left.createEl('button', { cls: 'lagrange-attach clickable-icon', attr: { type: 'button', 'aria-label': 'Attach pictures, video or files' } });
     setIcon(clip, 'paperclip');
     clip.addEventListener('click', () => pick.click());
+    // Speak to Lagrange (with voice control on): one phrase, sent as a message. Click again to send at once.
+    this.micEl = left.createEl('button', { cls: 'lagrange-mic clickable-icon', attr: { type: 'button', 'aria-label': 'Speak to Lagrange' } });
+    setIcon(this.micEl, 'mic');
+    this.micEl.addEventListener('click', () => { void this.plugin.toggleTalk(); });
     // The model and effort in use: a button that opens the picker (openPicker).
     this.modelEl = left.createEl('button', {
       cls: 'lagrange-model',
@@ -7136,7 +8314,20 @@ class LagrangeChatView extends ItemView {
     this.refreshSubject();
     this.refreshFoot();
     this.refreshHistory();
+    this.refreshVoice();
     this.showEmpty();
+  }
+
+  /* The microphone at the foot of the chat: shown with voice control on, and listening while Lagrange listens for a
+     message. */
+  refreshVoice() {
+    if (!this.micEl) return;
+    const p = this.plugin, l = p.voice, talk = Boolean(l && l.mode === 'talk' && l.state !== 'off');
+    this.micEl.toggle(Boolean(p.settings.voice));
+    this.micEl.toggleClass('is-listening', talk);
+    this.micEl.dataset.state = talk ? l.state : '';
+    this.micEl.style.setProperty('--lagrange-level', talk ? (l.level || 0).toFixed(2) : '0');
+    this.micEl.setAttr('aria-label', !talk ? 'Speak to Lagrange' : l.state === 'stopping' ? 'Transcribing…' : 'Listening: click to send what you have said');
   }
 
   /* The Undo and Redo buttons are live only when there is a run of Lagrange's edits to take back or to make again. */
@@ -7397,12 +8588,25 @@ class LagrangeChatView extends ItemView {
       const opts = this.plugin.chatRenderOptions(), apart = Boolean(opts.tikz && figureKinds(md).tikz);
       const rendered = (apart ? renderApart : renderMarkdown)(this.app, chatMarkdown(md, opts), el, sourcePath || '', component);
       const done = apart ? rendered.then(figures => { this.watchFigures(figures); }) : rendered;
-      return Promise.resolve(done).then(() => { this.labelCode(el); this.scrollDown(); }, e => { console.error('Lagrange: rendering a message', e); });
+      return Promise.resolve(done).then(() => { this.labelCode(el); this.scrollDown(); this.inkDiagrams(el, md); }, e => { console.error('Lagrange: rendering a message', e); });
     } catch (e) {
       console.error('Lagrange: rendering a message', e);
       el.setText(md);
       return Promise.resolve();
     }
+  }
+
+  /* The Mermaid diagrams a reply brings draw themselves in ink as they come into the log (inkDraw), as the pen draws
+     them in the note; not in the list of edits, nor in the writer's own messages. Obsidian may draw a diagram a
+     moment after the block is set: it is looked for for a second or two. */
+  async inkDiagrams(el, md) {
+    if (!figureKinds(md).mermaid || !el.closest('.lagrange-turn--reply') || el.closest('.lagrange-edit-md')) return;
+    for (let i = 0; i < 25; i++) {
+      const boxes = Array.from(el.querySelectorAll('.mermaid'));
+      if (boxes.length && boxes.every(b => b.querySelector(':scope > svg') || String(b.textContent || '').trim())) break;
+      await sleep(80).catch(() => {});
+    }
+    for (const svg of el.querySelectorAll('.mermaid > svg:not([data-lagrange-inked])')) void inkDraw(svg);
   }
 
   /* Each code block of a rendered message is given its language's name (shown in its corner, as the editor shows
@@ -7427,6 +8631,8 @@ class LagrangeChatView extends ItemView {
         if (!f.block.isConnected) return false;
         const state = tikzState(f.block);
         if (state === 'waiting' && Date.now() <= until) return true;
+        // (a figure that has come draws itself in ink, as a Mermaid diagram does: see inkDiagrams)
+        if (state === 'drawn' && f.block.closest('.lagrange-turn--reply') && !f.block.closest('.lagrange-edit-md')) void inkDraw(f.block.querySelector('svg'));
         if (state !== 'drawn') {
           const said = f.block.querySelector('.scriptorium-tikz-error pre');     // what TeX said, where Scriptorium shows it
           const words = said ? said.textContent.trim() : '';
@@ -7592,7 +8798,7 @@ class LagrangeChatView extends ItemView {
     box.addClass('is-block');
     const cut = editPreview(text);
     const short = box.createDiv({ cls: 'lagrange-edit-short' });
-    if (figureKinds(cut.head).tikz || figureKinds(cut.head).sketch || /^\s*(?:`{3,}|~{3,})\s*mermaid\b/m.test(cut.head)) short.addClass('has-figure');
+    if ((f => f.tikz || f.sketch || f.mermaid)(figureKinds(cut.head))) short.addClass('has-figure');
     else if (!mdBlocks(cut.head).some(b => b.kind !== 'text')) short.addClass('is-prose');     // (prose alone is clipped sooner than code or a formula)
     this.renderChat(cut.head, short, sourcePath, this);
     const more = box.createEl('button', { cls: 'lagrange-edit-more', attr: { type: 'button', 'aria-expanded': 'false' } });
@@ -8493,7 +9699,9 @@ class LagrangeSettingTab extends PluginSettingTab {
     containerEl.createEl('p', {
       cls: 'setting-item-description',
       text: 'Lagrange sends the open note and your messages (and, when it looks at the page, pictures of the note as ' +
-        'it is rendered) to the provider chosen here, and only when you ask it something or run one of its commands. ' +
+        'it is rendered) to the provider chosen here, and only when you ask it something or run one of its commands ' +
+        '(or, with Autocorrect “With the model”, when you pause in typing: then the paragraph you are typing). ' +
+        'With voice control on, what you say while it listens goes to the transcription service chosen under Voice. ' +
         'It makes no other network requests and collects nothing.',
     });
 
@@ -8657,6 +9865,20 @@ class LagrangeSettingTab extends PluginSettingTab {
       .setDesc('When you ask in the chat for a change to the open note, Lagrange makes it with its pen (one undo takes ' +
         'it back). Off: the chat only talks, and edits come from the Revise selection and Proofread note commands.')
       .addToggle(t => t.setValue(s.agenticEdits).onChange(async v => { s.agenticEdits = v; await save(); }));
+    new Setting(containerEl)
+      .setName('Autocorrect as I write')
+      .setDesc('The pen corrects slips of typing a moment after you type them, while you go on writing: a word you have ' +
+        'finished, never the one you are typing, and never in code, mathematics, front matter, links or tags. Each ' +
+        'correction is one undo step; a correction you undo is not made again. With this computer’s spelling ' +
+        'dictionary (the one spell-check uses) nothing leaves the computer, and only a word with one clear correction ' +
+        'is changed. With the model, the paragraph you are typing goes to the provider above a moment after you pause, ' +
+        'which costs a request each time and takes a second or more; it can tell “form” from “from” by the sense.')
+      .addDropdown(d => d
+        .addOption('off', 'Off')
+        .addOption('dictionary', 'With the spelling dictionary')
+        .addOption('model', 'With the model')
+        .setValue(s.autocorrect)
+        .onChange(async v => { s.autocorrect = v; if (v === 'off' && this.plugin.autocorrect) this.plugin.autocorrect.stop(); await save(); }));
 
     new Setting(containerEl).setName('Looking at the page').setHeading();
     new Setting(containerEl)
@@ -8681,6 +9903,100 @@ class LagrangeSettingTab extends PluginSettingTab {
       .addDropdown(d => d.addOption('auto', 'Where the model takes them').addOption('on', 'Always').addOption('off', 'Never: words only')
         .setValue(s.lookPictures).onChange(async v => { s.lookPictures = v; await save(); }))
       .setDisabled(!s.lookAtPage || !desktop);
+
+    new Setting(containerEl).setName('Voice').setHeading();
+    new Setting(containerEl)
+      .setName('Voice control')
+      .setDesc('Dictate into the note, and speak to Lagrange. The microphone is opened only when you start listening ' +
+        '(the microphone in the ribbon or in the chat, or a command) and closed when you stop; what you say while it ' +
+        'listens goes to the transcription service chosen below, and nowhere else. Nothing is recorded to disk.')
+      .addToggle(t => t.setValue(s.voice).onChange(async v => {
+        s.voice = v;
+        if (!v) await this.plugin.stopVoice(false);
+        await save(true);
+      }));
+    if (s.voice) {
+      const env = this.plugin.voiceEnv(), offerSystem = (!env.desktop && env.system) || s.voiceRoute === 'system';
+      new Setting(containerEl)
+        .setName('Transcription')
+        .setDesc('Who turns what you say into words. Claude cannot: the Claude API takes no sound, and neither the Claude ' +
+          'nor the ChatGPT subscription offers transcription to plugins.' + (env.desktop ? ' Obsidian on a computer has no ' +
+          'speech recognition of its own that works (the browser inside it comes without the service behind it).' : ''))
+        .addDropdown(d => {
+          d.addOption('openai', 'OpenAI (an OpenAI API key)');
+          d.addOption('server', 'A transcription server (on this computer, or hosted)');
+          if (offerSystem) d.addOption('system', 'This device’s speech recognition');
+          d.setValue(s.voiceRoute).onChange(async v => { s.voiceRoute = v; await save(true); });
+        });
+      if (s.voiceRoute === 'openai') {
+        new Setting(containerEl)
+          .setName('OpenAI API key')
+          .setDesc('The same key as the OpenAI API provider’s above (platform.openai.com). Sent only to api.openai.com, with ' +
+            'each phrase you say. OpenAI charges for transcription by the minute of sound.')
+          .addText(t => {
+            t.inputEl.type = 'password';
+            t.inputEl.autocomplete = 'off';
+            t.inputEl.spellcheck = false;
+            t.setPlaceholder('sk-…').setValue(s.openaiPlatformKey).onChange(async v => { s.openaiPlatformKey = v.trim(); await save(); });
+          });
+        new Setting(containerEl)
+          .setName('Transcription model')
+          .setDesc('Blank: gpt-4o-mini-transcribe (whisper-1 for an account without it). gpt-4o-transcribe is more accurate and costs more.')
+          .addText(t => t.setPlaceholder(VOICE_DEFAULT_MODEL.openai).setValue(s.voiceModel).onChange(async v => { s.voiceModel = v.trim(); await save(); }));
+      } else if (s.voiceRoute === 'server') {
+        new Setting(containerEl)
+          .setName('Server address')
+          .setDesc('A server that speaks OpenAI’s transcription API, its address ending in /v1. A Whisper on this computer keeps ' +
+            'what you say on it: whisper.cpp (whisper-server --inference-path /v1/audio/transcriptions --port 8080, then ' +
+            'http://127.0.0.1:8080/v1), Speaches (http://localhost:8000/v1) or LocalAI. Hosted: Groq (https://api.groq.com/openai/v1), and others.')
+          .addText(t => t.setPlaceholder('http://127.0.0.1:8080/v1').setValue(s.voiceServerUrl).onChange(async v => { s.voiceServerUrl = v.trim(); await save(); }));
+        new Setting(containerEl)
+          .setName('Model')
+          .setDesc('The model name the server knows. Blank: whisper-1. whisper.cpp ignores it; Speaches: Systran/faster-whisper-small, for one; Groq: whisper-large-v3-turbo.')
+          .addText(t => t.setPlaceholder(VOICE_DEFAULT_MODEL.server).setValue(s.voiceModel).onChange(async v => { s.voiceModel = v.trim(); await save(); }));
+        new Setting(containerEl)
+          .setName('API key')
+          .setDesc('Only if the server asks for one. Stored in plain text in this vault’s .obsidian/plugins/lagrange/data.json.')
+          .addText(t => {
+            t.inputEl.type = 'password';
+            t.inputEl.autocomplete = 'off';
+            t.setPlaceholder('optional').setValue(s.voiceServerKey).onChange(async v => { s.voiceServerKey = v.trim(); await save(); });
+          });
+      } else {
+        containerEl.createEl('p', {
+          cls: 'setting-item-description',
+          text: voiceProblem(s, env) || 'The device recognises what you say. Apple’s and Google’s recognition may send the sound to their servers to do it.',
+        });
+      }
+      new Setting(containerEl)
+        .setName('Language')
+        .setDesc('Blank: the service works it out. Or a two-letter code (en, fr, de, …), which helps with short phrases.')
+        .addText(t => t.setPlaceholder('detect').setValue(s.voiceLanguage).onChange(async v => { s.voiceLanguage = voiceLanguage(v); await save(); }));
+      new Setting(containerEl)
+        .setName('A pause ends a phrase after')
+        .setDesc('Each phrase is written in when you pause this long.')
+        .addDropdown(d => {
+          for (const p of VOICE_PAUSES) d.addOption(String(p), `${p} s`);
+          d.setValue(String(s.voicePause)).onChange(async v => { s.voicePause = Number(v); await save(); });
+        });
+      const test = new Setting(containerEl)
+        .setName('Test the microphone')
+        .setDesc('Listens for six seconds: say a sentence.');
+      const outcome = containerEl.createEl('p', { cls: 'setting-item-description lagrange-voice-test' });
+      test.addButton(b => b.setButtonText('Test').onClick(async () => {
+        b.setDisabled(true);
+        b.setButtonText('Listening…');
+        outcome.setText('');
+        try { await this.plugin.testVoice(text => outcome.setText(text)); } finally { b.setDisabled(false); b.setButtonText('Test'); }
+      }));
+      containerEl.createEl('p', {
+        cls: 'setting-item-description',
+        text: 'Dictate with the microphone in the ribbon (or Lagrange: Dictate into the note); each phrase goes in at the cursor when ' +
+          'you pause. Said as a phrase of their own: “new line”, “new paragraph”, “scratch that” (takes the last phrase out ' +
+          'again), “stop listening”, and “Lagrange, …”, which sends the rest to the chat. The microphone in the chat (or ' +
+          'Lagrange: Speak to Lagrange) listens for one message and sends it. Esc stops listening.',
+      });
+    }
 
     new Setting(containerEl).setName('Appearance').setHeading();
     new Setting(containerEl)
@@ -8743,6 +10059,225 @@ class LagrangeSettingTab extends PluginSettingTab {
   }
 }
 
+/* ---------------------------------------------------------------------------------------------------------------
+ * Autocorrect (Settings → Lagrange → Autocorrect; off unless the writer turns it on)
+ *
+ * Watches what the writer types in every editor. A moment after they stop typing (AC_IDLE; with the model,
+ * AC_MODEL_IDLE), or every AC_EVERY in a long spell of typing, the words they have finished since are looked at
+ * (wordsToCheck: never the word at the cursor, nor code, mathematics, front matter, links and the like), and the
+ * slips among them are given to the pen (runEdits, alongside the writer's typing: the pen never takes the keyboard
+ * or moves the cursor or the view), each run of corrections one undo step of its own. A correction the writer takes
+ * back with Undo is not made again in the session. The slips are found
+ *   - 'dictionary': by this computer's spelling dictionary (the one Obsidian's spell-check uses, asked through
+ *     Electron), when it has a correction that is a slip of typing away (typoFix); nothing leaves the computer;
+ *   - 'model': by the provider of Settings → Lagrange, which is given the paragraph and the words just typed, and
+ *     whose corrections are kept only where each is a slip of typing (modelTypoFixes).
+ * ------------------------------------------------------------------------------------------------------------- */
+const AC_IDLE = 900, AC_MODEL_IDLE = 1800, AC_EVERY = 4000, AC_RECENT = 40;
+const AUTOCORRECT_MODES = ['off', 'dictionary', 'model'];
+const AUTOCORRECT_SYSTEM =
+  'You are the autocorrect of Lagrange, a writing companion inside Obsidian. You are given a passage the writer is typing and ' +
+  'a list of words they have just typed in it. Correct only slips of typing and misspellings among those words, judging by the ' +
+  'passage: a letter left out, added, doubled, swapped or mistyped, a well-known misspelling, or two words run together. Change ' +
+  'nothing else: not the grammar, the style, the punctuation or the wording; not names, technical terms, or words in another ' +
+  'language; not a word that is right as it stands. Reply with only a JSON array, with nothing before or after it: ' +
+  '[{"find": "the word as typed", "replace": "the corrected word"}], or [] when every word is right.';
+
+/* Whether a misspelled word looks meant: a capitalised word that does not begin a sentence (a name), or a word the
+   note uses three times or more (a term of the writer's own). text: the note; w: {from, to, word}. Pure. */
+function meantWord(text, w) {
+  const t = String(text || '');
+  if (/^\p{Lu}/u.test(w.word)) {
+    const before = t.slice(Math.max(0, w.from - 12), w.from);
+    if (!/(^|[.!?…:]["”’)\]]*\s+|^\s*(?:[-*+]|\d+[.)]|#{1,6}|>)\s+|\n\s*)$/u.test(before) && w.from > 0) return true;
+  }
+  let n = 0;
+  for (const m of t.matchAll(AC_WORD)) if (m[0] === w.word && ++n >= 3) return true;
+  return false;
+}
+
+class Autocorrect {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.views = new Map();       // EditorView -> {ranges: [[from, to]] typed since the last look, timer, first, words: the words being asked about}
+    this.declined = new Set();    // words (in small letters) the writer has taken a correction of back, this session
+    this.recent = [];             // corrections made: {view, from, typo, fix}, to tell when one is taken back
+    this.running = null;          // the run of corrections being written, a promise
+    this.told = new Set();        // what the writer has been told once already this session
+  }
+  get mode() { return AUTOCORRECT_MODES.includes(this.plugin.settings.autocorrect) ? this.plugin.settings.autocorrect : 'off'; }
+  extension() { return EditorView.updateListener.of(update => this.watch(update)); }
+  watch(update) {
+    let st = this.views.get(update.view);
+    if (this.mode === 'off') { if (st) this.drop(update.view); return; }
+    if (!update.docChanged) return;
+    let typed = false;
+    for (const tr of update.transactions) {
+      if (!tr.docChanged) continue;
+      // (the editor of a pane is given another note's text when another note is opened in it, with no transaction:
+      // what was kept of the note before is then out of place, and is forgotten)
+      const len = tr.changes.length, fits = (...ps) => ps.every(p => p >= 0 && p <= len);
+      if (st) {
+        st.ranges = st.ranges.filter(([a, b]) => fits(a, b)).map(([a, b]) => [tr.changes.mapPos(a, -1), tr.changes.mapPos(b, 1)]);
+        for (const w of st.words || []) {
+          if (!fits(w.from, w.to)) { w.spoilt = true; continue; }
+          tr.changes.iterChangedRanges((fa, ta) => { if (fa < w.to && ta > w.from) w.spoilt = true; });
+          [w.from, w.to] = [tr.changes.mapPos(w.from, 1), tr.changes.mapPos(w.to, -1)];
+        }
+      }
+      this.recent = this.recent.filter(r => r.view !== update.view || fits(r.from));
+      for (const r of this.recent) if (r.view === update.view) r.from = tr.changes.mapPos(r.from, -1);
+      if (tr.isUserEvent('undo')) this.noteUndo(update.view, tr.state.doc);
+      if (!tr.isUserEvent('input.type') || tr.isUserEvent('input.type.compose')) continue;
+      if (!st) { st = { ranges: [], timer: 0, first: 0, words: null }; this.views.set(update.view, st); }
+      tr.changes.iterChangedRanges((fa, ta, fb, tb) => { st.ranges.push([fb, tb]); });
+      if (!st.first) st.first = Date.now();
+      typed = true;
+    }
+    if (st && st.ranges.length > 1) {
+      // what was typed, as few ranges as will cover it
+      const merged = [];
+      for (const [a, b] of st.ranges.slice().sort((x, y) => x[0] - y[0])) {
+        const last = merged[merged.length - 1];
+        if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b); else merged.push([a, b]);
+      }
+      st.ranges = merged;
+    }
+    if (typed) this.schedule(update.view, st);
+  }
+  schedule(view, st, ms) {
+    const win = view.dom.ownerDocument.defaultView || window;
+    if (st.timer) win.clearTimeout(st.timer);
+    const idle = this.mode === 'model' ? AC_MODEL_IDLE : AC_IDLE;
+    const wait = ms != null ? ms : (st.first && Date.now() - st.first > AC_EVERY ? 120 : idle);
+    st.timer = win.setTimeout(() => { st.timer = 0; void this.check(view); }, wait);
+  }
+  drop(view) {
+    const st = this.views.get(view);
+    if (st && st.timer) (view.dom.ownerDocument.defaultView || window).clearTimeout(st.timer);
+    this.views.delete(view);
+  }
+  stop() { for (const view of Array.from(this.views.keys())) this.drop(view); }
+  /* A correction taken back by Undo: the word as it was typed stands at its place again. */
+  noteUndo(view, doc) {
+    this.recent = this.recent.filter(r => {
+      if (r.view !== view) return true;
+      if (r.from + r.typo.length > doc.length || doc.sliceString(r.from, r.from + r.typo.length) !== r.typo) return true;
+      this.declined.add(r.typo.toLowerCase());
+      return false;
+    });
+  }
+  tell(key, text) {
+    if (this.told.has(key)) return;
+    this.told.add(key);
+    new Notice(text, 10000);
+  }
+  /* This computer's spelling dictionary, as Obsidian's spell-check uses it (Electron's), or null (on a phone or a
+     tablet, or when Electron does not offer it). */
+  dictionary() {
+    try {
+      if (obsidian.Platform && obsidian.Platform.isDesktopApp === false) return null;
+      const wf = nodeModule('electron').webFrame;
+      return wf && typeof wf.isWordMisspelled === 'function' && typeof wf.getWordSuggestions === 'function' ? wf : null;
+    } catch (e) { return null; }
+  }
+  /* Looks at the words finished since the last look, and has the pen correct the slips among them. */
+  async check(view) {
+    const st = this.views.get(view);
+    if (!st) return;
+    if (this.mode === 'off' || !view.dom.isConnected) { this.drop(view); return; }
+    // never in the way: while the pen is at work, Lagrange is editing, or the writer is composing a character
+    if (this.running || this.plugin.editing || activeRuns.get(view) || view.composing || st.words) { this.schedule(view, st, 600); return; }
+    const state = view.state, text = state.doc.toString(), head = state.selection.main.head;
+    const skips = proseSkips(text);
+    const words = [];
+    for (const [a, b] of st.ranges.filter(([x, y]) => y <= text.length)) for (const w of wordsToCheck(text, a, b, head, skips)) if (!words.some(x => x.from === w.from)) words.push(w);
+    // what is still being typed (the word at the cursor) is looked at again later; the rest is done
+    let start = head;
+    while (start > 0 && /[\p{L}\p{M}'’-]/u.test(text[start - 1])) start--;
+    st.ranges = start < head ? [[start, head]] : [];
+    st.first = st.ranges.length ? Date.now() : 0;
+    const sel = state.selection.ranges.filter(r => !r.empty);
+    const open = words.filter(w => !this.declined.has(w.word.toLowerCase()) && !sel.some(r => r.from < w.to && r.to > w.from)).sort((x, y) => x.from - y.from);
+    if (!open.length) return;
+    let fixes = [];
+    if (this.mode === 'dictionary') {
+      const wf = this.dictionary();
+      if (!wf) { this.tell('no-dictionary', 'Autocorrect: this device has no spelling dictionary Lagrange can ask (Obsidian on a phone or tablet). Choose “With the model” in Settings → Lagrange → Autocorrect instead.'); return; }
+      for (const w of open) {
+        let fix = null;
+        try {
+          if (wf.isWordMisspelled(w.word) && !meantWord(text, w)) {
+            // (a word with a capital first letter, at the head of a sentence: its suggestions in small letters first)
+            const lower = w.word.toLowerCase(), sugg = w.word !== lower ? wf.getWordSuggestions(lower).concat(wf.getWordSuggestions(w.word)) : wf.getWordSuggestions(w.word);
+            fix = typoFix(w.word, sugg);
+          }
+        } catch (e) { fix = null; }
+        if (fix) fixes.push({ w, fix });
+      }
+    } else {
+      st.words = open.map(w => Object.assign({}, w));
+      try {
+        fixes = await this.askModel(view, text, st.words);
+      } finally {
+        const asked = st.words;
+        st.words = null;
+        fixes = fixes.filter(f => !asked.find(w => w === f.w).spoilt);
+      }
+    }
+    if (!fixes.length || this.mode === 'off' || !view.dom.isConnected) return;
+    const doc = view.state.doc;
+    const located = fixes
+      .filter(f => doc.sliceString(f.w.from, f.w.to) === f.w.word && f.w.to !== view.state.selection.main.head &&
+        !/[\p{L}\p{M}\p{N}_'’-]/u.test(doc.sliceString(Math.max(0, f.w.from - 1), f.w.from) + doc.sliceString(f.w.to, Math.min(doc.length, f.w.to + 1))))
+      .map(f => ({ from: f.w.from, to: f.w.to, matched: f.w.word, replace: f.fix, reason: 'a slip of typing' }));
+    if (!located.length) return;
+    if (this.running || this.plugin.editing || activeRuns.get(view)) return;
+    this.running = this.correct(view, located);
+    try { await this.running; } finally { this.running = null; }
+  }
+  /* The model's corrections of the words just typed, in the paragraph they are in: [{w, fix}]. A failure is said
+     once, quietly, and autocorrect goes on. */
+  async askModel(view, text, words) {
+    const first = words[0], last = words[words.length - 1];
+    const a = Math.max(0, text.lastIndexOf('\n\n', first.from) + 1, first.from - 700), b0 = text.indexOf('\n\n', last.to);
+    const b = Math.min(b0 < 0 ? text.length : b0, last.to + 300);
+    const passage = text.slice(a, b);
+    const list = [...new Set(words.map(w => w.word))];
+    try {
+      const res = await complete(this.plugin.settings, {
+        purpose: 'autocorrect',
+        system: AUTOCORRECT_SYSTEM,
+        messages: [{ role: 'user', content: `The passage:\n<passage>\n${passage}\n</passage>\n\nThe words just typed: ${list.join(', ')}` }],
+        demo: () => JSON.stringify(list.filter(w => DEMO_TYPOS[w.toLowerCase()]).map(w => ({ find: w, replace: w[0] === w[0].toLowerCase() ? DEMO_TYPOS[w.toLowerCase()] : DEMO_TYPOS[w.toLowerCase()][0].toUpperCase() + DEMO_TYPOS[w.toLowerCase()].slice(1) }))),
+      }, {}, this.plugin.session);
+      const out = [];
+      for (const f of modelTypoFixes(res.text, words)) {
+        for (const w of words) if (w.word === f.find && !out.some(o => o.w === w)) out.push({ w, fix: f.replace });
+      }
+      return out;
+    } catch (e) {
+      this.tell('model-failed', `Autocorrect could not ask the model: ${String((e && e.message) || e).slice(0, 200)}`);
+      return [];
+    }
+  }
+  /* The pen writes the corrections, alongside the writer: one undo step. Without the pen they are made at once. */
+  async correct(view, located) {
+    const plugin = this.plugin;
+    const result = await runEdits(view, located, { pen: plugin.settings.showPen ? plugin.pen : null, concurrent: true, pens: 1, stay: true, how: { quick: true, stay: true } });
+    if (result.failure) { plugin.pen.destroy(); plugin.pen = createPen(plugin.app, plugin.settings); }
+    const doc = view.state.doc.toString();
+    for (const e of result.applied) {
+      // where the correction stands now: the nearest place that holds it
+      let best = -1;
+      for (let i = doc.indexOf(e.replace, Math.max(0, e.from - 300)); i >= 0 && i <= e.from + 300; i = doc.indexOf(e.replace, i + 1)) if (best < 0 || Math.abs(i - e.from) < Math.abs(best - e.from)) best = i;
+      if (best >= 0) this.recent.push({ view, from: best, typo: e.matched, fix: e.replace });
+    }
+    if (this.recent.length > AC_RECENT) this.recent.splice(0, this.recent.length - AC_RECENT);
+    return result;
+  }
+}
+
 class LagrangePlugin extends Plugin {
   async onload() {
     // One settings object for the plugin's lifetime: the pen keeps a reference to it.
@@ -8752,11 +10287,13 @@ class LagrangePlugin extends Plugin {
     this.edits = [];       // Lagrange's runs of edits, oldest first (see recordEdit); at most EDIT_RECORDS
     this.editClock = 0;    // counts the runs, so a rewind knows which came after a checkpoint
     this.pen = createPen(this.app, this.settings);
+    this.autocorrect = new Autocorrect(this);
 
     this.registerEditorExtension([
       runExtension(),
       this.pen.extension,
       EditorView.updateListener.of(update => this.trackEdits(update)),
+      this.autocorrect.extension(),
     ]);
     this.registerView(VIEW_TYPE, leaf => new LagrangeChatView(leaf, this));
     this.addRibbonIcon(ICON, 'Open Lagrange', () => { this.activateView(); });
@@ -8782,6 +10319,26 @@ class LagrangePlugin extends Plugin {
       },
     });
     this.addCommand({
+      id: 'redraw-diagram',
+      name: 'Draw the diagram again (Mermaid, TikZ or Excalidraw)',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) void this.redrawDiagram(view);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'mermaid-to-sketch',
+      name: 'Turn this Mermaid diagram into an Excalidraw drawing',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || !view.file) return false;
+        if (!checking) void this.mermaidToSketch(view);
+        return true;
+      },
+    });
+    this.addCommand({
       id: 'draw-dropcap',
       name: 'Draw a drop cap (or change one)',
       checkCallback: checking => {
@@ -8801,16 +10358,278 @@ class LagrangePlugin extends Plugin {
         return true;
       },
     });
+    // Voice control (offered once it is turned on in the settings; see "Voice: listening, dictation, …")
+    this.addCommand({
+      id: 'voice-dictate',
+      name: 'Dictate into the note (start or stop)',
+      checkCallback: checking => {
+        if (!this.settings.voice) return false;
+        if (!checking) void this.toggleDictation();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'voice-talk',
+      name: 'Speak to Lagrange',
+      checkCallback: checking => {
+        if (!this.settings.voice) return false;
+        if (!checking) void this.toggleTalk();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'voice-stop',
+      name: 'Stop listening',
+      checkCallback: checking => {
+        if (!this.voice || this.voice.closed) return false;
+        if (!checking) void this.stopVoice(true);
+        return true;
+      },
+    });
     this.addSettingTab(new LagrangeSettingTab(this.app, this));
 
     this.lastMarkdownLeaf = null;
     this.registerEvent(this.app.workspace.on('active-leaf-change', leaf => {
       if (leaf && leaf.view instanceof MarkdownView) this.lastMarkdownLeaf = leaf;
     }));
+
+    // Voice control, off until the writer turns it on: a microphone in the ribbon (dictation) and in the chat
+    // (speaking to Lagrange), a word in the status bar while listening, Esc to stop.
+    this.voice = null;            // the VoiceListener (or SystemListener) while Lagrange listens
+    this.voiceSession = {};       // {voiceModel}: the OpenAI model that worked
+    this.voiceErrors = [];        // the last few messages about voice, newest last (shown as notices; kept for tests)
+    this.registerEditorExtension(voiceEditor().extension);
+    this.voiceRibbon = this.addRibbonIcon('mic', 'Dictate into the note (Lagrange)', () => { void this.toggleDictation(); });
+    this.voiceRibbon.addClass('lagrange-voice-ribbon');
+    this.voiceBar = this.addStatusBarItem();
+    this.voiceBar.addClass('lagrange-voice-bar');
+    this.voiceBar.createSpan({ cls: 'lagrange-voice-dot' });
+    this.voiceWords = this.voiceBar.createSpan({ cls: 'lagrange-voice-words' });
+    this.voiceBar.createSpan({ cls: 'lagrange-voice-meter' }).createSpan();
+    this.voiceBar.setAttr('aria-label', 'Lagrange is listening: click to stop');
+    this.registerDomEvent(this.voiceBar, 'click', () => { void this.stopVoice(true); });
+    this.registerDomEvent(document, 'keydown', ev => this.voiceKeydown(ev), true);
+    this.refreshVoice();
   }
 
   onunload() {
+    if (this.autocorrect) this.autocorrect.stop();
     if (this.pen) this.pen.destroy();
+    if (this.voice) void this.voice.stop(false);
+  }
+
+  /* ---- Voice (see "Voice: listening, dictation, and speaking to Lagrange") ---- */
+
+  voiceEnv() {
+    const P = obsidian.Platform || {};
+    return { desktop: Boolean(P.isDesktopApp), system: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition) };
+  }
+
+  /* Sends a transcription request through Obsidian's requestUrl (a local server's CORS does not stop it). */
+  voiceRequest() {
+    return async req => {
+      const headers = Object.assign({}, req.headers);
+      delete headers['Content-Type'];
+      const body = req.body.buffer.slice(req.body.byteOffset, req.body.byteOffset + req.body.byteLength);
+      const r = await obsidian.requestUrl({ url: req.url, method: req.method, headers, contentType: req.contentType, body, throw: false });
+      return { status: r.status, text: r.text };
+    };
+  }
+
+  /* Starts listening: mode 'dictate', 'talk' or 'test'. Asking for the mode that is already listening stops it. */
+  async startVoice(mode) {
+    if (!this.settings.voice) { new Notice('Turn on voice control first: Settings → Lagrange → Voice.'); return null; }
+    if (this.voice) {
+      const same = this.voice.mode === mode;
+      await this.stopVoice(true);
+      if (same) return null;
+    }
+    const s = this.settings, env = this.voiceEnv();
+    const problem = voiceProblem(s, env);
+    if (problem && mode !== 'test') { this.voiceError(problem); return null; }
+    let target = null;
+    if (mode === 'dictate') {
+      target = this.targetMarkdownView();
+      if (!target || !target.editor || !target.editor.cm || target.getMode() !== 'source') {
+        new Notice(target ? 'Switch the note to editing (Live Preview or Source mode) to dictate into it.' : 'Open a note to dictate into first.');
+        return null;
+      }
+    }
+    const Listener = s.voiceRoute === 'system' && !problem ? SystemListener : VoiceListener;
+    const listener = new Listener({
+      mode, settings: s, platform: typeof process !== 'undefined' ? process.platform : '',
+      transcribe: wav => (problem ? Promise.resolve('') : transcribe(s, wav, { request: this.voiceRequest(), env, session: this.voiceSession })),
+      onState: () => this.refreshVoice(),
+      onText: (text, l) => this.voiceHeard(text, l),
+      onError: (message, l) => this.voiceError(message, l),
+      onEnd: l => { if (this.voice === l) this.voice = null; this.refreshVoice(); },
+    });
+    listener.target = target;
+    listener.problem = problem;
+    this.voice = listener;
+    this.refreshVoice();
+    try {
+      await listener.start();
+    } catch (e) {
+      if (this.voice === listener) this.voice = null;
+      this.refreshVoice();
+      this.voiceError((e && e.message) || String(e), listener);
+      return null;
+    }
+    return listener;
+  }
+
+  async stopVoice(flush = true) {
+    const l = this.voice;
+    if (l) await l.stop(flush);
+  }
+
+  toggleDictation() { return this.voice && this.voice.mode === 'dictate' && !this.voice.closed ? this.stopVoice(true) : this.startVoice('dictate'); }
+  toggleTalk() { return this.voice && this.voice.mode === 'talk' && !this.voice.closed ? this.stopVoice(true) : this.startVoice('talk'); }
+
+  /* Esc stops listening (in 'talk' mode it drops what was being said), unless a window of Obsidian's is open. */
+  voiceKeydown(ev) {
+    if (ev.key !== 'Escape' || !this.voice || this.voice.closed || this.voice.mode === 'test') return;
+    if (document.querySelector('.modal-container')) return;
+    void this.stopVoice(this.voice.mode !== 'talk');
+  }
+
+  /* A phrase has been transcribed. */
+  async voiceHeard(text, l) {
+    if (l.mode === 'test') { l.result = text; return; }
+    if (l.mode === 'talk') {
+      const message = voiceMessage(text);
+      if (message) await this.speakToLagrange(message);
+      return;
+    }
+    for (const a of voiceParse(text)) {
+      if (a.kind === 'text') this.dictate(l, a.text);
+      else if (a.kind === 'paragraph' || a.kind === 'newline') this.dictateBreak(l, a.kind);
+      else if (a.kind === 'scratch') this.scratchDictation(l);
+      else if (a.kind === 'stop') { void l.stop(false); break; }
+      else if (a.kind === 'ask') await this.speakToLagrange(a.text);
+    }
+  }
+
+  /* The editor dictation goes into, while it is open; otherwise dictation stops. */
+  voiceCm(l) {
+    const view = l && l.target, cm = view && view.editor && view.editor.cm;
+    if (!cm || !view.containerEl.isConnected) {
+      this.voiceError('The note you were dictating into is no longer open, so dictation has stopped.', l);
+      void l.stop(false);
+      return null;
+    }
+    return cm;
+  }
+
+  voiceDispatch(cm, spec) {
+    if (isolateHistory) spec.annotations = isolateHistory.of('full');   // each phrase is an undo step of its own
+    cm.dispatch(spec);
+  }
+
+  /* Writes a phrase in at the cursor (after the word the cursor is in, never into its middle), joined to what stands
+     there (dictationJoin), with a moment of rubric ink (not with reduced motion). */
+  dictate(l, text) {
+    const cm = this.voiceCm(l);
+    if (!cm) return false;
+    const V = voiceEditor(), doc = cm.state.doc, sel = cm.state.selection.main;
+    let from = sel.from, to = sel.to;
+    if (from === to) from = to = from + dictationPoint(doc.sliceString(Math.max(0, from - 2), from), doc.sliceString(from, Math.min(doc.length, from + 200)));
+    const line = doc.lineAt(from);
+    const insert = dictationJoin(doc.sliceString(Math.max(line.from, from - 400), from), text, doc.sliceString(to, Math.min(doc.lineAt(to).to, to + 40)));
+    if (!insert) return false;
+    const effects = [V.setLast.of({ from, to: from + insert.length, text: insert })];
+    const a = from + (insert.length - insert.trimStart().length), b = from + insert.trimEnd().length;
+    if (!prefersReducedMotion(window) && b > a) effects.push(V.ink.of({ from: a, to: b }));
+    this.voiceDispatch(cm, { changes: { from, to, insert }, selection: { anchor: from + insert.length }, scrollIntoView: true, userEvent: 'input.dictate', effects });
+    window.clearTimeout(this.voiceInkTimer);
+    this.voiceInkTimer = window.setTimeout(() => { try { cm.dispatch({ effects: V.inkDone.of(null) }); } catch (e) { /* the editor is gone */ } }, 1800);
+    return true;
+  }
+
+  /* "New line" and "new paragraph": a line break, or a blank line (none if the cursor already stands after one). */
+  dictateBreak(l, kind) {
+    const cm = this.voiceCm(l);
+    if (!cm) return false;
+    const doc = cm.state.doc, sel = cm.state.selection.main;
+    let from = sel.from;
+    const before = doc.sliceString(Math.max(0, from - 2), from);
+    if (from > 0 && / $/.test(before)) from--;   // no space left at the end of the line
+    const insert = kind === 'newline' ? '\n' : from === 0 || doc.sliceString(Math.max(0, from - 2), from) === '\n\n' ? '' : doc.sliceString(from - 1, from) === '\n' ? '\n' : '\n\n';
+    if (!insert && from === sel.to) return false;
+    this.voiceDispatch(cm, { changes: { from, to: sel.to, insert }, selection: { anchor: from + insert.length }, scrollIntoView: true, userEvent: 'input.dictate' });
+    return true;
+  }
+
+  /* "Scratch that": takes the last phrase dictated back out, if its words are still as they were written in. */
+  scratchDictation(l) {
+    const cm = this.voiceCm(l);
+    if (!cm) return false;
+    const V = voiceEditor(), last = cm.state.field(V.last, false);
+    if (!last || cm.state.doc.sliceString(last.from, last.to) !== last.text) {
+      new Notice('Nothing to scratch: the last words dictated have been changed since, or are gone already.');
+      return false;
+    }
+    this.voiceDispatch(cm, { changes: { from: last.from, to: last.to, insert: '' }, effects: V.setLast.of(null), userEvent: 'delete.dictate' });
+    return true;
+  }
+
+  /* A phrase said to Lagrange: a message in the chat, sent at once (into the box, if Lagrange is still answering). */
+  async speakToLagrange(text) {
+    const chat = await this.activateView(false);
+    if (!chat || !chat.inputEl) { this.voiceError('Lagrange’s chat could not be opened.'); return; }
+    const had = chat.inputEl.value.trim();
+    chat.inputEl.value = had ? `${had} ${text}` : text;
+    chat.fitInput();
+    if (chat.pending) { new Notice('Lagrange is still answering: what you said is in the box, to send when it has finished.'); return; }
+    void chat.send();
+  }
+
+  voiceError(message, l) {
+    if (!message) return;
+    this.voiceErrors.push(message);
+    if (this.voiceErrors.length > 10) this.voiceErrors.shift();
+    new Notice(message, 12000);
+    const chat = l && l.mode === 'talk' ? this.chatView() : null;
+    if (chat) chat.addAside(message, 'is-warn');
+  }
+
+  /* The microphone in the ribbon, the word in the status bar and the microphone in the chat, as they stand. */
+  refreshVoice() {
+    const on = this.settings.voice, l = this.voice, active = Boolean(l && l.state !== 'off');
+    if (this.voiceRibbon) {
+      this.voiceRibbon.toggle(Boolean(on));
+      const dictating = active && l.mode === 'dictate';
+      this.voiceRibbon.toggleClass('is-listening', dictating);
+      this.voiceRibbon.setAttr('aria-label', dictating ? 'Stop dictating (Lagrange)' : 'Dictate into the note (Lagrange)');
+    }
+    if (this.voiceBar) {
+      this.voiceBar.toggle(active);
+      if (active) {
+        const words = l.state === 'starting' ? 'Opening the microphone…'
+          : l.state === 'stopping' ? 'Transcribing…'
+            : `${l.mode === 'talk' ? 'Listening for Lagrange…' : l.mode === 'test' ? 'Testing the microphone…' : 'Listening…'}${l.busy ? ' Transcribing…' : ''}`;
+        if (this.voiceWords.textContent !== words) this.voiceWords.setText(words);
+        this.voiceBar.dataset.state = l.state;
+        this.voiceBar.dataset.mode = l.mode;
+        this.voiceBar.style.setProperty('--lagrange-level', (l.level || 0).toFixed(2));
+      }
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) if (leaf.view instanceof LagrangeChatView) leaf.view.refreshVoice();
+  }
+
+  /* "Test the microphone": listens for six seconds, then says how loud the microphone was and what the service made
+     of the first phrase. report(text) is given the outcome. */
+  async testVoice(report) {
+    const l = await this.startVoice('test');
+    if (!l) { report('The microphone could not be opened: see the notice.'); return; }
+    await new Promise(resolve => { const t = window.setInterval(() => { if (l.state === 'off') { window.clearInterval(t); resolve(); } }, 100); });
+    const db = l.peak > 0 ? `${Math.round(20 * Math.log10(l.peak))} dB` : 'silence';
+    if (l.result) report(`The microphone works (loudest ${db}). Heard: “${l.result}”`);
+    else if (l.peak < 0.002) report('The microphone gave only silence: is it muted, or is another input chosen in the system’s sound settings?');
+    else if (!l.heard) report(`The microphone works (loudest ${db}), but no speech was heard. Press Test and say a sentence.`);
+    else if (l.problem) report(`The microphone works (loudest ${db}) and heard speech. ${l.problem}`);
+    else report(`The microphone works (loudest ${db}) and heard speech, but the transcription gave back no words${this.voiceErrors.length ? `: ${this.voiceErrors[this.voiceErrors.length - 1]}` : '.'}`);
   }
 
   async saveSettings() {
@@ -8818,6 +10637,7 @@ class LagrangePlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       if (leaf.view instanceof LagrangeChatView) leaf.view.refreshFoot();
     }
+    if (this.voiceBar) this.refreshVoice();
   }
 
   openSettings() {
@@ -9053,6 +10873,8 @@ class LagrangePlugin extends Plugin {
       result = { applied: located, skipped: [] };
     } else {
       const concurrent = Boolean(this.settings.editWhileWriting);
+      // (autocorrect may be writing a correction in this note: it is set down at once, and the request's edits follow)
+      if (this.autocorrect && this.autocorrect.running) { this.pen.finish(); await this.autocorrect.running.catch(() => {}); }
       const writing = this.settings.showPen
         ? new Notice(concurrent ? 'Lagrange is writing… (Esc to stop)' : 'Lagrange is writing… (Esc to stop; click or type in the note to have it all at once)', 0)
         : null;
@@ -9127,20 +10949,7 @@ class LagrangePlugin extends Plugin {
       if (!o.sketch) { out.push(o); continue; }
       if (!have.sketch) { noSketch++; continue; }
       try {
-        const ea = window.ExcalidrawAutomate, folder = view.file.parent && view.file.parent.path !== '/' ? view.file.parent.path : '';
-        let name = o.sketch.name;
-        for (let n = 2; this.app.vault.getAbstractFileByPath(`${folder ? folder + '/' : ''}${name}.excalidraw.md`); n++) name = `${o.sketch.name} ${n}`;
-        ea.reset();
-        for (const e of o.sketch.elements) {
-          if (e.type === 'rect') ea.addRect(e.x, e.y, e.w, e.h);
-          else if (e.type === 'ellipse') ea.addEllipse(e.x, e.y, e.w, e.h);
-          else if (e.type === 'diamond') ea.addDiamond(e.x, e.y, e.w, e.h);
-          else if (e.type === 'line') ea.addLine(e.points);
-          else if (e.type === 'arrow') ea.addArrow(e.points);
-          else if (e.type === 'text') ea.addText(e.x, e.y, e.text);
-          if (e.text && e.type !== 'text') ea.addText(e.x + e.w / 2 - Math.min(e.w / 2 - 4, e.text.length * 5), e.y + e.h / 2 - 12, e.text);
-        }
-        await ea.create({ filename: name, foldername: folder, onNewPane: false, silent: true });
+        const { name } = await this.makeSketch(view, o.sketch);
         const embed = `![[${name}.excalidraw]]`;
         out.push(Object.assign({}, o, { text: o.op === 'append' ? embed : o.after ? `\n\n${embed}` : `${embed}\n\n`, sketch: undefined, reason: o.reason || `a drawing, “${name}”` }));
         reply.note(`Lagrange made the drawing “${name}” (an Excalidraw file next to the note). Undo takes it out of the note; the file stays in the vault.`, 'is-quiet');
@@ -9152,6 +10961,119 @@ class LagrangePlugin extends Plugin {
     if (noTikz) reply.note(`${noTikz === 1 ? 'A figure' : `${noTikz} figures`} in TikZ ${noTikz === 1 ? 'was' : 'were'} left out: the TikZJax plugin is not installed or not turned on in this vault, so ${noTikz === 1 ? 'it' : 'they'} would show as code. Turn it on in Settings → Community plugins (search for “TikZJax”), then ask again.`, 'is-warn');
     if (noSketch) reply.note(`${noSketch === 1 ? 'A drawing was' : `${noSketch} drawings were`} left out: the Excalidraw plugin is not installed or not turned on in this vault. Turn it on in Settings → Community plugins (search for “Excalidraw”), then ask again.`, 'is-warn');
     return out;
+  }
+
+  /* Makes an Excalidraw drawing for a note from a sketch (sketchSpec: its elements, or a Mermaid diagram, which is
+     drawn by hand: mermaidSketch), beside the note (Excalidraw's own folder for a note at the top of the vault), under
+     a name that no other file answers to. -> {name, path}. Throws a LagrangeError in plain words. */
+  async makeSketch(view, sketch) {
+    const ea = window.ExcalidrawAutomate;
+    if (!ea || typeof ea.create !== 'function') throw new LagrangeError('the Excalidraw plugin is not turned on in this vault.', { kind: 'setup' });
+    const elements = sketch.elements && sketch.elements.length ? sketch.elements : sketch.mermaid ? await this.mermaidSketch(sketch.mermaid, view.file.path) : [];
+    if (!elements.length) throw new LagrangeError('the drawing had nothing in it.');
+    const folder = view.file.parent && view.file.parent.path !== '/' ? view.file.parent.path : '';
+    const taken = n => Boolean(this.app.metadataCache.getFirstLinkpathDest(`${n}.excalidraw`, view.file.path) || this.app.vault.getAbstractFileByPath(`${folder ? folder + '/' : ''}${n}.excalidraw.md`));
+    let name = sketch.name || 'Drawing';
+    for (let n = 2; taken(name); n++) name = `${sketch.name || 'Drawing'} ${n}`;
+    ea.reset();
+    addSketchElements(ea, elements);
+    const path = await ea.create({ filename: name, foldername: folder, onNewPane: false, silent: true });
+    return { name, path };
+  }
+
+  /* A Mermaid diagram as the elements of a hand-drawn sketch: Obsidian draws it out of sight (in a box of its own,
+     never shown), and its parts are read off as Excalidraw shapes (sketchFromSvg). Excalidraw's own Mermaid import
+     is not used: in Obsidian 1.15 it waits for ever. -> [elements]. Throws a LagrangeError with Obsidian's words when
+     the diagram cannot be read. */
+  async mermaidSketch(source, sourcePath) {
+    const host = document.body.createDiv({ cls: 'lagrange-offstage' });
+    host.setAttribute('aria-hidden', 'true');
+    const comp = new Component();
+    comp.load();
+    try {
+      await renderMarkdown(this.app, '```mermaid\n' + String(source || '').trim() + '\n```', host, sourcePath || '', comp);
+      let svg = null;
+      for (let i = 0; i < 50 && !svg; i++) {
+        svg = host.querySelector('.mermaid > svg');
+        if (svg) break;
+        const box = host.querySelector('.mermaid'), said = box ? String(box.textContent || '').trim() : '';
+        if (said) throw new LagrangeError(`Obsidian could not read the Mermaid diagram (${said.split('\n')[0].slice(0, 160)}).`);
+        await sleep(80);
+      }
+      if (!svg) throw new LagrangeError('Obsidian did not draw the Mermaid diagram.');
+      const elements = sketchFromSvg(svg).slice(0, 400);
+      if (!elements.length) throw new LagrangeError('the Mermaid diagram had nothing in it that could be drawn.');
+      return elements;
+    } finally {
+      comp.unload();
+      host.remove();
+    }
+  }
+
+  /* The command "Turn this Mermaid diagram into an Excalidraw drawing": the Mermaid block the cursor is in (or the
+     nearest) becomes a hand-drawn Excalidraw drawing beside the note, which the writer can then move about and add
+     to; the pen puts the drawing's embed where the block was, and draws it. One Undo brings the block back (the
+     drawing stays in the vault). */
+  async mermaidToSketch(view) {
+    if (!this.diagramPlugins().sketch) { new Notice('Turn the Excalidraw plugin on first (Settings → Community plugins → Excalidraw), then run this again.', 8000); return; }
+    if (this.editing) { new Notice('Lagrange is already editing; try again when the pen has finished.'); return; }
+    await this.ensureEditing(view);
+    const cm = view.editor && view.editor.cm;
+    if (!cm || !view.file) return;
+    const text = cm.state.doc.toString(), cursor = cm.state.selection.main.head;
+    const blocks = mermaidBlocks(text);
+    if (!blocks.length) { new Notice('This note has no Mermaid diagram (a code block fenced with ```mermaid).'); return; }
+    const dist = b => (cursor < b.from ? b.from - cursor : cursor > b.to ? cursor - b.to : 0);
+    const block = blocks.slice().sort((a, b) => dist(a) - dist(b))[0];
+    this.editing = true;
+    try {
+      const made = await this.makeSketch(view, { name: `${view.file.basename} diagram`, elements: [], mermaid: block.source });
+      const now = cm.state.doc.toString();
+      if (now.slice(block.from, block.to) !== text.slice(block.from, block.to)) { new Notice(`The drawing “${made.name}” was made, but the diagram changed meanwhile, so the note was left as it is.`, 8000); return; }
+      await this.applyEdits(view, [{ from: block.from, to: block.to, matched: text.slice(block.from, block.to), replace: `![[${made.name}.excalidraw]]`, reason: 'the Mermaid diagram as a drawing' }], [], null, null);
+      new Notice(`The Mermaid diagram is now the Excalidraw drawing “${made.name}”. Undo brings the diagram back; the drawing stays in the vault.`, 8000);
+    } catch (e) {
+      console.error('Lagrange: the diagram could not be turned into a drawing', e);
+      new Notice(`The diagram could not be turned into a drawing: ${String((e && e.message) || e).slice(0, 200)}`, 10000);
+    } finally {
+      this.editing = false;
+    }
+  }
+
+  /* The command "Draw the diagram again": the pen draws a diagram the note shows in Live Preview (a Mermaid or TikZ
+     block, or an Excalidraw drawing), the one nearest the cursor among those in view, as it draws a new one. A click
+     or a key shows it whole at once. */
+  async redrawDiagram(view) {
+    const cm = view.editor && view.editor.cm;
+    if (!cm || view.getMode() !== 'source' || !cm.dom.closest('.is-live-preview')) {
+      new Notice('The pen draws diagrams in Live Preview: switch the note to Live Preview (not Reading view or Source mode), then run this again.', 8000);
+      return;
+    }
+    if (this.editing) { new Notice('Lagrange is already editing; try again when the pen has finished.'); return; }
+    const svgs = this.pen.figures(cm);
+    if (!svgs.length) { new Notice('There is no diagram in view for the pen to draw (a Mermaid or TikZ block, or an Excalidraw drawing).', 8000); return; }
+    const s = cm.scrollDOM.getBoundingClientRect(), head = cm.state.selection.main.head;
+    const inView = svg => { const r = svg.getBoundingClientRect(); return r.bottom > s.top + 8 && r.top < s.bottom - 8; };
+    const pos = svg => { try { return cm.posAtDOM(svg); } catch (e) { return 0; } };
+    // the nearest to the cursor on the screen (above or below its line), among those in view; else in the text
+    const caret = cm.coordsAtPos(head), y = caret ? (caret.top + caret.bottom) / 2 : null;
+    const away = svg => { const r = svg.getBoundingClientRect(); return y === null ? Math.abs(pos(svg) - head) : y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0; };
+    const pool = svgs.filter(inView).length ? svgs.filter(inView) : svgs;
+    const svg = pool.slice().sort((a, b) => (pool === svgs ? Math.abs(pos(a) - head) - Math.abs(pos(b) - head) : away(a) - away(b)))[0];
+    if (!inView(svg)) {
+      cm.dispatch({ effects: EditorView.scrollIntoView(pos(svg), { y: 'center' }) });
+      for (let i = 0; i < 12; i++) await nextFrame();
+    }
+    const doc = cm.dom.ownerDocument;
+    const stop = ev => { if (ev.type === 'keydown' ? ev.key === 'Escape' || cm.dom.contains(ev.target) : cm.dom.contains(ev.target)) this.pen.finish(); };
+    for (const t of ['keydown', 'pointerdown']) doc.addEventListener(t, stop, true);
+    try {
+      await this.pen.redraw(cm, [svg]);
+    } catch (e) {
+      console.error('Lagrange: the pen could not draw the diagram', e);
+    } finally {
+      for (const t of ['keydown', 'pointerdown']) doc.removeEventListener(t, stop, true);
+    }
   }
 
   async applyChatEdits(view, note, parsed, reply, signal) {
@@ -9179,8 +11101,11 @@ class LagrangePlugin extends Plugin {
       if (parsed.dropped) reply.note(`${parsed.dropped} item${parsed.dropped === 1 ? '' : 's'} in the reply ${parsed.dropped === 1 ? 'was' : 'were'} not an edit and ${parsed.dropped === 1 ? 'was' : 'were'} left out.`, 'is-quiet');
       const tikz = located.some(e => figureKinds(e.replace).tikz) && this.diagramPlugins().tikz;
       const failedBefore = tikz ? this.noteFigures(view).failed : 0;
+      const mermaid = located.some(e => figureKinds(e.replace).mermaid);
+      const unreadBefore = mermaid ? this.noteMermaid(view).failed : 0;
       const result = await this.applyEdits(view, located, skipped, task, signal);
       if (tikz) this.watchNoteFigures(view, reply, failedBefore);
+      if (mermaid) this.watchNoteMermaid(view, reply, unreadBefore);
       return result;
     } catch (err) {
       this.reportFailure(err, task);
@@ -9195,6 +11120,28 @@ class LagrangePlugin extends Plugin {
     const count = { waiting: 0, drawn: 0, failed: 0 };
     if (view && view.contentEl) for (const b of view.contentEl.querySelectorAll('.block-language-tikz')) count[tikzState(b)]++;
     return count;
+  }
+
+  /* How the Mermaid diagrams of an open note stand: {waiting, drawn, failed} (see mermaidState). */
+  noteMermaid(view) {
+    const count = { waiting: 0, drawn: 0, failed: 0 };
+    if (view && view.contentEl) for (const b of view.contentEl.querySelectorAll('.cm-lang-mermaid, .block-language-mermaid')) count[mermaidState(b)]++;
+    return count;
+  }
+
+  /* After an edit that wrote a Mermaid diagram into the note: if Obsidian cannot read it (it shows what is wrong in
+     its place), the chat says so too, within a few seconds. Not waited for. */
+  async watchNoteMermaid(view, reply, failedBefore) {
+    try {
+      for (let i = 0; i < 20; i++) {
+        await sleep(250);
+        if (!view.containerEl.isConnected) return;
+        if (this.noteMermaid(view).failed > failedBefore) {
+          reply.note('Obsidian could not read a Mermaid diagram Lagrange wrote in the note: it shows what is wrong in place of the diagram. Ask Lagrange to correct it, or undo the edit.', 'is-warn');
+          return;
+        }
+      }
+    } catch (e) { /* the view has gone */ }
   }
 
   /* After an edit that wrote a TikZ figure into the note: when TikZJax gives up on it, or has not drawn it after
@@ -9467,4 +11414,8 @@ Object.assign(LagrangePlugin.internals, { needsWholeRender, chatMarkdown, INTERN
   clipAttachmentText, frameTimes, providerInputs, attachmentMessage, hasBinaryParts, recentBinaries, vaultPathsFromDrop, pastedFiles, prepareAttachment, demoAttachmentLine,
   ATTACH_MAX, ATTACH_BYTES, ATTACH_TEXT_CHARS, ATTACH_IMAGE_EDGE, ATTACH_IMAGE_BYTES, ATTACH_FRAMES, ATTACH_KEPT, fileExt });
 Object.assign(LagrangePlugin.internals, { loaderPlate, loaderTurn, PLATE_NAMES: LagrangePlates.NAMES, codeLabel, openTail, openProse, tailInline, openDisplay, OPEN_MATH_HOLD, EDIT_FIGURE, mdBlocks, editPreview, editParts, hasMarkdown, EDIT_LINES, EDIT_SLACK, EDIT_ATOM, EDIT_INLINE_CHARS });
+Object.assign(LagrangePlugin.internals, { activeRuns, proseSkips, wordsToCheck, typoDistance, typoLimit, typoFix, DEMO_TYPOS, modelTypoFixes, meantWord, AUTOCORRECT_SYSTEM, AUTOCORRECT_MODES });
+Object.assign(LagrangePlugin.internals, { DEMO_MERMAID, diagramOrder, mermaidBlocks, mermaidState, SKETCH_MERMAID });
 Object.assign(LagrangePlugin.internals, { DEMO_FIGURE, tikzState, tikzTrouble, TIKZ_WAIT, splitStable, nextPlate, sketchSpec, diagramStyle, SKETCH_PLACE, figureKinds, withoutFigures, figureOrder, plainInline, workingText, foldEdit, chainSkipped, ALIGN_STYLE, ALIGN_MARK, PROOFREAD_SYSTEM, REVISE_SYSTEM, frameMarks });
+// Voice control (see "Voice" among the pure helpers and "Transcription" among the providers)
+Object.assign(LagrangePlugin.internals, { VOICE_ROUTES, VOICE_PAUSES, VOICE_RATE, VOICE_DEFAULT_MODEL, VOICE_FALLBACK_MODEL, VOICE_COMMANDS, voiceLanguage, voiceModel, voiceProblem, resample, encodeWav, rmsOf, createVad, multipartBody, transcriptionRequest, transcriptText, voiceParse, voiceMessage, dictationPoint, dictationJoin, transcribe, micProblem });

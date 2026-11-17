@@ -318,6 +318,27 @@ typing goes in as you type, the pen carries on, and an edit whose words you have
 and listed as such in the chat. **Esc** stops the pen either way (edits not yet written are not made). The chat keeps
 to its newest line while Lagrange thinks and writes, unless you scroll up.
 
+**Autocorrect.** With **Settings → Lagrange → Autocorrect as I write** on (it is off until you turn it on), the pen
+corrects slips of typing a moment after you make them, while you go on writing: when you pause (or every few
+seconds in a long spell of typing) the words you have finished since are looked at, and the pen strikes a misspelled
+one and writes the correction in, as it writes any edit. It never touches the word you are still typing, nor
+anything in code (blocks or inline), mathematics, front matter, links and embeds, tags, web addresses, comments or
+tables; it leaves a capitalised word inside a sentence (a name) and a word the note uses three times or more (a term
+of your own) alone. The pen does not take the keyboard: what you type while it writes goes in at the cursor as you
+type it, and neither the cursor nor the view moves. Each run of corrections is one undo step of its own (never
+joined to your typing), and a correction you undo is not made again in that session. Two ways to find the slips:
+- **With the spelling dictionary**: the dictionary Obsidian's spell-check uses (your system's, through Electron) says
+  which words are misspelled, and a word is corrected only when the dictionary's best suggestion is a slip of typing
+  away (one letter added, left out, changed, or two swapped, in a word of up to four letters; two in a longer one; a
+  word that would only change its capitals is left alone). Nothing leaves the computer. Not on a phone or tablet.
+- **With the model**: the paragraph you are typing, and the words you have just typed in it, go to the provider of
+  **Settings → Lagrange** a little after you pause (a request each time; it takes a second or more, and with a
+  subscription it counts against it); a correction is kept only when it is a slip of typing in one of those words,
+  so the model can tell "form" from "from" by the sense but cannot reword. In demo mode a small built-in list of
+  common slips stands in for it.
+With the pen off, the corrections are made at once. `plugins-tests/autocorrect.harness.js` checks all of this in a
+real Obsidian.
+
 **Undo and redo.** One **Undo** in the editor takes back all the edits of a request. The two arrows at the head of the
 chat do the same for Lagrange's edits only: **Undo** takes back its latest run of edits and **Redo** makes it again,
 run by run, and each run in the chat has its own **Undo Lagrange's edits** button. If you have typed in the note
@@ -361,15 +382,36 @@ folder of their own in your temporary folder, which only you can read, and delet
 Lagrange from ever rendering or capturing the page, turn off **Settings → Lagrange → Let Lagrange look at the
 rendered page**.
 
-**Diagrams.** Ask for a figure and Lagrange writes one into the note, and the pen draws it: a technical or
-mathematical figure (a graph, a construction, a circuit, a commutative diagram, a plot) as a `tikz` block, which the
-[TikZJax](https://github.com/artisticat1/obsidian-tikzjax) plugin sets, and a free-form sketch as an
+**Diagrams.** Ask for a figure and Lagrange writes one into the note, and the pen draws it: a diagram of flow or
+structure (a flowchart, a sequence of messages, states, classes or entities, a timeline, a Gantt chart, a mind map, a
+pie chart) as a `mermaid` block, which Obsidian draws itself with no plugin; a technical or mathematical figure (a
+graph, a construction, a circuit, a commutative diagram, a plot) as a `tikz` block, which the
+[TikZJax](https://github.com/artisticat1/obsidian-tikzjax) plugin sets; and a free-form sketch as an
 [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawing, a file next to the note that the note
-embeds. In Live Preview the figure is not typed out: it is kept unseen until the pen comes to it, then drawn line by
-line in its own order, its labels last; a key or a click shows it whole at once. In Source mode the pen writes the
-source. Both plugins are separate from Scriptorium and are installed with it (see
+embeds. In Live Preview the figure is not typed out: it is kept unseen until the pen comes to it, then drawn piece by
+piece as one would draw it by hand. A Mermaid flowchart grows from its first node: the node (its outline, then its
+words), then each arrow that leaves it with its label, then the node the arrow reaches, and so on; a sequence
+diagram draws its actors, their lifelines, then the messages in order; an Excalidraw drawing is drawn element by
+element in the order it was made, each shape and then its words; a TikZ figure line by line in its own order, its
+labels last. A key or a click shows it whole at once. In Source mode the pen writes the source. Every kind of Mermaid
+diagram Obsidian 1.15 draws was tried in it (flowcharts, sequence, class, state, entity-relationship, Gantt, pie,
+timeline, mind map, journey, git graph, quadrant and XY charts), and Lagrange is told which to use and how to keep a
+block readable; a block Obsidian cannot read shows its error in place of the diagram, so the pen does not wait for
+it and the chat says so. TikZJax and Excalidraw are separate from Scriptorium and are installed with it (see
 [The diagram plugins](#the-diagram-plugins)); where one is off, Lagrange is told so, does not write that kind of
-figure, and says why in the chat. In demo mode, with TikZJax on, *draw a diagram* shows the pen at it without a model.
+figure, offers a Mermaid diagram where one would serve, and says why in the chat.
+
+A sketch may also be asked of the model as a Mermaid flowchart: Obsidian draws the flowchart out of sight, and
+Lagrange turns what it drew (its boxes, diamonds and rounds, its arrows along their curves, and its words where they
+stand) into a hand-drawn Excalidraw drawing that you can then move about, restyle and add to in Excalidraw. The
+command **Lagrange: Turn this Mermaid diagram into an Excalidraw drawing** does the same for a Mermaid block of yours
+(the one the cursor is in, or the nearest): the pen puts the drawing's embed where the block was and draws it, and
+one Undo brings the block back (the drawing stays in the vault). (Excalidraw's own Mermaid import is not used: in
+Obsidian 1.15 it never finishes.) **Lagrange: Draw the diagram again** has the pen draw the diagram nearest the
+cursor in Live Preview (Mermaid, TikZ or Excalidraw, yours or Lagrange's), as it draws a new one; Escape, a click or
+a key shows it whole. In demo mode *draw a flowchart* writes a Mermaid diagram, *draw a diagram* a TikZ figure (with
+TikZJax on; a Mermaid diagram without), and *draw a sketch* (with Excalidraw on) makes a hand-drawn drawing from
+Mermaid. `plugins-tests/diagrams.harness.js` checks all of this in a real Obsidian.
 
 What TikZJax takes was tried construct by construct in Obsidian 1.15 with TikZJax 0.5.2, and Lagrange is told the
 same: a block is a whole document body (`\usepackage` lines, one `\usetikzlibrary{…}` line, `\begin{document}`, the
@@ -397,7 +439,8 @@ it comes. Notes are not affected either way: figures in Reading view and Live Pr
 in its own store as before. `plugins-tests/tikzjax-repair.harness.js` checks all of this in a real Obsidian.
 
 **What the chat shows.** Replies, and your own messages, are set as Obsidian sets a note: code with its colours and a
-copy button, inline and displayed mathematics, Mermaid diagrams, a `tikz` figure where TikZJax is on and an Excalidraw
+copy button, inline and displayed mathematics, Mermaid diagrams (drawn in the reply's ink, piece by piece in the
+pen's order, as they come; a `tikz` figure too, when TikZJax has set it; nothing moves with reduced motion), a `tikz` figure where TikZJax is on and an Excalidraw
 embed where Excalidraw is on (without the plugin, the source in a code block and a line that says why), pictures and
 video of the vault. A `tikz` figure that TikZJax cannot draw (an error in its TikZ), or has not drawn after 30
 seconds, gives way to its source under a line that says which, with what TeX said where Scriptorium's repair of
@@ -417,6 +460,29 @@ once for each request. Choosing a plate there shows that plate every time. A pla
 waits. With the system's "reduce motion" on, the plate is drawn still. (The recording at the top of this page is
 made with the plates in turn, its first one told so that the recording is the same each time: the Lagrange points,
 then clockwork, then alchemy.)
+
+**Voice.** Off until you turn it on (**Settings → Lagrange → Voice**). Then a microphone stands in the ribbon and at
+the foot of the chat. The one in the ribbon (or **Lagrange: Dictate into the note**) dictates: each phrase you say is
+written in at the cursor when you pause, joined to what is there (a space before it, a capital at the start of a
+sentence, never into the middle of a word), with a moment of rubric ink; each phrase is one undo step. Said as a phrase
+of its own, “new line” and “new paragraph” break the line, “scratch that” takes the last phrase out again, “stop
+listening” stops, and “Lagrange, …” sends the rest of the phrase to the chat as a message (so the pen may then edit).
+The microphone in the chat (or **Lagrange: Speak to Lagrange**) listens for one message, sends it, and closes; click it
+again to send at once. While Lagrange listens the status bar says so, with a meter (click it to stop), and **Esc**
+stops (when speaking to Lagrange, Esc drops what you were saying). The microphone is opened only while Lagrange
+listens; a refused or missing microphone is said in plain words, with where to allow it on macOS, Windows and Linux.
+What you say has to be turned into words by a transcription service, and you choose which: **OpenAI**, with an OpenAI
+API key (the one the OpenAI API provider uses; `gpt-4o-mini-transcribe`, or `whisper-1` for an account without it), or
+**a transcription server** that speaks OpenAI's `/audio/transcriptions`: a Whisper on your own computer keeps what you
+say on it (whisper.cpp's `whisper-server --inference-path /v1/audio/transcriptions`, Speaches, LocalAI), or a hosted
+one such as Groq. Claude cannot do it: the Claude API takes no sound, and neither the Claude nor the ChatGPT
+subscription offers transcription to plugins. Nor can Obsidian itself on a computer: the browser inside it has the
+standard speech recognition, but not the service behind it (in Obsidian 1.15 it fails with "network", and its
+on-device recognition is not installed), so that choice is offered only on a phone or tablet whose system has it.
+Each phrase is sent once, as a 16 kHz WAV made in memory, to the service you chose and to no one else; nothing is
+recorded to disk. **Test the microphone** in the settings listens for six seconds and says how loud it was and what it
+heard. `plugins-tests/voice.harness.js` checks all of this in a real Obsidian with a pretend microphone playing
+recorded speech.
 
 **The list of edits.** Under a reply that edits the note, and under *Proofread* and *Revise*, each edit is listed:
 what was taken out, struck, → what was put in. Since Lagrange 0.6.2 the words of an edit are set as the chat sets a
@@ -742,11 +808,40 @@ computer (and withdraws it at Google where rclone can).
   to sleep, Obsidian was closed) is picked up by the next one (`--resilient --recover`).
 - **No token in the vault.** See **Where things are kept**.
 
-When does it sync? When Obsidian starts, every five minutes (a setting), about 45 seconds after the last change to a
-note, when you ask, and, if something is waiting, it tries once more as Obsidian quits (for a quarter of a minute at
-most; whatever is left is synced when Obsidian next starts). A
+When does it sync? When Obsidian starts, every five minutes (a setting), about 15 seconds after the last change to a
+note, within about a minute of a change in Drive, when you ask, and, if something is waiting, it tries once more as
+Obsidian quits (for a quarter of a minute at most; whatever is left is synced when Obsidian next starts). A
 problem that needs you (signing in again, a safety stop) pauses the timer until you have looked; anything else, such
 as being offline, is tried again by itself, more slowly each time.
+
+**How long it takes** (since 1.5.0). Each run reads both sides; reading Drive is most of the time of a run that has
+little to do, because Drive has to be asked folder by folder. rclone now asks for many folders at once
+(`--fast-list`). The sync's own downloads, which Obsidian reports as changes to the vault, no longer set off a second
+run: before a run that follows changes, the changed files are compared with rclone's record of the last run, and a
+file that is exactly as the sync left it needs nothing. And Drive is asked once a minute, in a single query for the
+vault's folders, whether anything changed there since the last run; if so, a run follows at once, so another
+computer's work arrives within about a minute instead of at the next five-minute run. That look only ever brings a run
+forward: the five-minute runs go on as before (they also catch what a look cannot see, such as a file put in Drive's
+trash), and a look that fails changes nothing. It is not made for a folder shared with you, nor when automatic syncing
+is off.
+
+Measured against a stand-in for Drive's API that rclone 1.76 talks to as it talks to Google (with Drive-like delays:
+about 35 ms on the network and 120 to 500 ms on Google's side for each request), with a vault of 300 files in 56
+folders (60 MB):
+
+| | 1.4 | 1.5 |
+|---|---|---|
+| a run with nothing to do | 3.3 s, 60 requests | 2.6 s, 31 requests |
+| a run that sends one edit up | 4.7 s | 4.1 s |
+| from your last keystroke until it is in Drive | 46 s on average | 19 s |
+| from a change in Drive until it is here | 2.6 min on average, up to 5 min | 34 s on average, up to about 1 min |
+| a second run after downloading | always | never |
+| requests to Drive in an idle hour | 720 | 490 |
+
+These are not measurements of the real Google Drive, whose delays vary with your connection and with Google. To see
+where the time goes with yours, sync, then run **Copy the Google Drive diagnostic report**: each sync is listed with
+what set it off (a change, the timer, a change in Drive, you) and its steps in seconds (rclone starting and finding the
+folder, reading both sides, copying, writing down the result).
 
 ### What is synced
 
@@ -799,8 +894,8 @@ sign-in is kept).
 
 Every failure is shown as a sentence, its likely cause and what to do, with the buttons that do it; rclone's own words
 are folded away under **Details**. **Copy diagnostic report** (in every such window, in the settings, and as a command)
-puts on the clipboard what was tried and how rclone answered: versions, whether you are signed in, the last runs and
-their errors. Tokens, secrets and your email are cut out, paths in your home folder start at `~`, and the names of
+puts on the clipboard what was tried and how rclone answered: versions, whether you are signed in, the last runs (what
+set each off, and how long its steps took) and their errors. Tokens, secrets and your email are cut out, paths in your home folder start at `~`, and the names of
 files are left out where Scriptorium recognises them; read it over before you post it.
 
 The ones you are most likely to meet:

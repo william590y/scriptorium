@@ -3193,6 +3193,14 @@ function setupDialog() {
        one is renamed "name.conflict1.md"); whatever a run deletes or replaces on this computer is moved to a folder
        of Scriptorium's own for thirty days instead; Drive's own trash keeps what is deleted there; a run that is
        cut off is picked up by the next one (--resilient --recover).
+     - Speed (1.5.0, measured against a stand-in for Drive's API with Drive-like delays): each listing of Drive asks
+       for many folders at once (--fast-list, SYNC_TRANSFER); a run follows a change after 15 s instead of 45 s; the
+       sync's own downloads, which Obsidian reports as changes, set off no second run (syncSettled compares the files
+       with rclone's record of the last run); and Drive is asked every minute, in one query, whether anything changed
+       there since the last run (syncPollQueries, syncPollChanged), so that another computer's work comes down within
+       about a minute instead of at the next five-minute run. The look only ever brings a run forward: the regular
+       runs go on as before, and a look that fails is not a problem. Each run's steps are timed (syncPhases) and the
+       diagnostic report shows them, with what set the run off.
    Not synced: Obsidian's workspace, caches and .trash, hidden folders, Lagrange's settings (they hold API keys),
    Google's own documents (Docs, Sheets), and what the older Drive backup left behind. The functions below take fs,
    path, spawn and the like as arguments and are tested under Node (plugins-tests/rclone-sync.test.js with a pretend
@@ -3224,7 +3232,10 @@ const RCLONE = {
 const SYNC_SENTINEL = '.scriptorium-sync';
 const SYNC_SENTINEL_TEXT = 'Scriptorium keeps this file on both sides of the sync with Google Drive, to be sure that both sides are really there before it changes anything. Leave it where it is.\n';
 const SYNC_DEFAULTS = { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30 };
-const SYNC_TIMES = { onStart: 8000, onChange: 45000, again: 5000, quit: 15000, signIn: 10 * 60 * 1000, call: 2 * 60 * 1000, lockStale: 6 * 60 * 60 * 1000 };
+/* onChange: how long after the last change a run follows (the writer has paused); poll: how often Drive is asked
+   whether something changed there (one query; see SyncEngine.armPoll); pollMargin: how far before the last run that
+   query looks, for clocks that differ a little. */
+const SYNC_TIMES = { onStart: 8000, onChange: 15000, poll: 60000, pollMargin: 2 * 60 * 1000, again: 5000, quit: 15000, signIn: 10 * 60 * 1000, call: 2 * 60 * 1000, lockStale: 6 * 60 * 60 * 1000 };
 const SYNC_CONFLICT = /\.conflict\d+(?:\.[^./\\]+)?$/;
 const SYNC_MOBILE = 'Syncing with Google Drive works only in Obsidian on a computer: it runs a program (rclone) beside Obsidian, which a phone or tablet does not allow. ' +
   'Open this vault on a computer to sync it or to retrieve one. On a phone, the Google Drive app can still show the files.';
@@ -3547,26 +3558,69 @@ function syncLogLine(line) {
   return { level: 'text', msg: t, object: '', stats: null };
 }
 
+/* Where the time of a run of the sync goes. rclone's bisync says when it moves from one step to the next; the lines
+   that mark a step are kept with the moment they arrived (rcloneExec: marks), and syncPhases turns them into
+   durations, [{name, ms}] in order, from the moment rclone was started (`began`) to the moment it ended (`ended`).
+   "start" is rclone getting going (the program, its config, the sign-in, finding the Drive folder); "listing" is
+   reading both sides; "comparing", working out what changed since the last run; "copying", the changes themselves;
+   "recording", writing down the new state of both sides; "finishing", the rest. The diagnostic report shows them. */
+const SYNC_PHASES = [
+  [/^Building Path1 and Path2 listings/, 'listing'],
+  [/^Copying Path2 files to Path1/, 'listing'],          // a first sync (--resync) reads both sides first
+  [/^Path1 checking for diffs/, 'comparing'],
+  [/^Applying changes/, 'copying'],
+  [/Resync is copying files to/, 'copying'],
+  [/^(?:Resync )?[Uu]pdating listings/, 'recording'],
+  [/^Bisync successful/, 'finishing'],
+];
+function syncPhaseOf(msg) {
+  for (const [re, name] of SYNC_PHASES) if (re.test(String(msg || ''))) return name;
+  return '';
+}
+function syncPhases(marks, began, ended) {
+  const out = [];
+  let name = 'start', at = began;
+  for (const m of marks || []) {
+    if (!m || m.name === name || !(m.at >= at)) continue;
+    out.push({ name, ms: m.at - at });
+    name = m.name; at = m.at;
+  }
+  if (ended >= at) out.push({ name, ms: ended - at });
+  // a step that comes twice (the two directions of a first sync) is counted once, with both times
+  const merged = [];
+  for (const p of out) {
+    const same = merged.find(q => q.name === p.name);
+    if (same) same.ms += p.ms; else merged.push(Object.assign({}, p));
+  }
+  return merged;
+}
+function syncPhasesText(phases) {
+  return (phases || []).filter(p => p.ms >= 50 || p.name === 'listing').map(p => `${p.name} ${(p.ms / 1000).toFixed(1)} s`).join(' · ');
+}
+
 /* Runs rclone without a shell. o: {spawn, exe, args, env, onLine(parsed), signal, timeout}. Resolves, never
-   rejects: {code, out (what it printed), lines (the last of its log, parsed), failed (it could not be started:
-   the system's error), stopped, timedOut}. A stop or a timeout ends rclone at once. That is on purpose: in tests
+   rejects: {code, out (what it printed), lines (the last of its log, parsed), marks (the steps of a bisync, with
+   the moment each began: see syncPhases), failed (it could not be started: the system's error), stopped,
+   timedOut}. A stop or a timeout ends rclone at once. That is on purpose: in tests
    with the real rclone a sync cut off like this was picked up by the next run every time (--recover), while an
    interrupt, which makes bisync wind down by itself, left it needing a new first sync about one time in four. */
 function rcloneExec(o) {
   return new Promise(resolve => {
     let child, done = false, out = '', rest = '', timer = null, stopped = false, timedOut = false;
-    const lines = [];
+    const lines = [], marks = [];
     const finish = r => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       if (o.signal) o.signal.removeEventListener('abort', stop);
       if (rest.trim()) take(rest);
-      resolve(Object.assign({ code: null, out, lines, failed: null, stopped, timedOut }, r));
+      resolve(Object.assign({ code: null, out, lines, marks, failed: null, stopped, timedOut }, r));
     };
     const take = line => {
       if (!line.trim()) return;
       const l = syncLogLine(line);
+      const phase = l.stats ? '' : syncPhaseOf(l.msg);
+      if (phase && marks.length < 40) marks.push({ name: phase, at: Date.now() });
       lines.push(l);
       if (lines.length > 400) lines.splice(0, lines.length - 300);
       if (o.onLine) { try { o.onLine(l); } catch (e) { /* a listener's trouble is not rclone's */ } }
@@ -3748,6 +3802,20 @@ function syncConflictName(rel, taken) {
   }
 }
 
+/* What every listing of Drive is given: --fast-list asks Drive for the files of many folders in one question where
+   it can (one question per folder otherwise), which halves the questions of a sync of a vault with nested folders
+   (measured: 59 to about 30 for a vault of 56 folders) and takes a quarter off the time of a run that has nothing
+   to do. It costs a little memory for the listing, which a vault does not notice. */
+const SYNC_TRANSFER = ['--fast-list'];
+/* How many times rclone tries one request again before it gives up (rclone's default is 10). Google answers "User
+   rate limit exceeded" when new files come faster than it allows (rclone's documentation: "about 2 files per
+   second"); rclone waits and tries again, but with several uploads at once one of them can be refused ten times in a
+   row, and a first sync that fails like that has to be set up again. With a strict stand-in for that limit the first
+   sync of a 300-file vault failed so with 10 tries and went through with 20; a request that keeps failing for another
+   reason (no network) takes a little longer to be reported. Only the sync itself is given it. */
+const SYNC_RETRIES = ['--low-level-retries', '20'];
+const SYNC_POLL_MAX = 2000;   // the most files one look at Drive reads; beyond that the regular runs see to it
+
 /* The arguments of the sync itself. o: {local, link, paths (syncPaths), id, settings, resync, mode ('newer',
    'path1', 'path2'), force, stamp (a date for the folder of replaced files), dryRun}. */
 function syncBisyncArgs(o) {
@@ -3761,8 +3829,7 @@ function syncBisyncArgs(o) {
     '--max-delete', String(o.settings.maxDelete),
     '--backup-dir1', path.join(o.paths.kept, o.id, o.stamp),
     '--create-empty-src-dirs', '--drive-skip-gdocs', '--skip-links',
-    '--stats', '2s', '-v',
-  ]);
+  ], SYNC_TRANSFER, SYNC_RETRIES, ['--stats', '2s', '-v']);
   if (o.resync) a.push('--resync', '--resync-mode', o.mode || 'newer');
   if (o.force) a.push('--force');
   if (o.dryRun) a.push('--dry-run');
@@ -3871,7 +3938,9 @@ function rcloneApi(o) {
   const call = async (what, args, more) => {
     const began = Date.now();
     const r = await rcloneExec(Object.assign({ spawn: o.spawn, exe: o.exe, args: base.concat(args), env: o.env, timeout: SYNC_TIMES.call }, more));
-    if (o.log) o.log({ what, ms: Date.now() - began, code: r.code, failed: r.failed ? (r.failed.code || 'error') : '', stopped: r.stopped, timedOut: r.timedOut, lines: r.lines });
+    const ended = Date.now();
+    if (o.log) o.log({ what, ms: ended - began, code: r.code, failed: r.failed ? (r.failed.code || 'error') : '', stopped: r.stopped, timedOut: r.timedOut, lines: r.lines,
+      phases: r.marks && r.marks.length ? syncPhases(r.marks, began, ended) : null });
     return r;
   };
   const must = async (what, args, more) => {
@@ -3934,13 +4003,13 @@ function rcloneApi(o) {
     /* {count, bytes} of what would be synced on one side. where is a local folder or a link. */
     async size(where, filters, signal) {
       const t = typeof where === 'string' ? { fs: where, flags: [] } : syncTarget(where);
-      const r = await must('check', ['size', t.fs, '--json', '--filter-from', filters, '--drive-skip-gdocs', '--skip-links'].concat(t.flags), { signal, timeout: 30 * 60 * 1000 });
+      const r = await must('check', ['size', t.fs, '--json', '--filter-from', filters, '--drive-skip-gdocs', '--skip-links'].concat(SYNC_TRANSFER, t.flags), { signal, timeout: 30 * 60 * 1000 });
       try { const j = JSON.parse(r.out); return { count: Number(j.count) || 0, bytes: Number(j.bytes) || 0 }; } catch (e) { throw syncExplain(Object.assign(r, { code: 1 }), 'check'); }
     },
     /* How the two sides compare, file by file (syncParseCheck). rclone ends with 1 when they differ: not a failure. */
     async compare(local, link, filters, signal) {
       const t = syncTarget(link);
-      const r = await call('check', ['check', local, t.fs, '--combined', '-', '--filter-from', filters, '--drive-skip-gdocs', '--skip-links'].concat(t.flags), { signal, timeout: 60 * 60 * 1000 });
+      const r = await call('check', ['check', local, t.fs, '--combined', '-', '--filter-from', filters, '--drive-skip-gdocs', '--skip-links'].concat(SYNC_TRANSFER, t.flags), { signal, timeout: 60 * 60 * 1000 });
       if (r.failed || r.stopped || r.timedOut || (r.code !== 0 && r.code !== 1) || (r.code === 1 && !r.out.trim())) throw syncExplain(r, 'check');
       return syncParseCheck(r.out);
     },
@@ -3952,9 +4021,33 @@ function rcloneApi(o) {
     /* Copies a Drive folder into a local folder (retrieving a vault). onStats({bytes, totalBytes, transfers, totalTransfers}). */
     async copy(link, local, filters, onStats, signal) {
       const t = syncTarget(link);
-      await must('copy', ['copy', t.fs, local, '--filter-from', filters, '--drive-skip-gdocs', '--create-empty-src-dirs', '--stats', '1s', '-v'].concat(t.flags), {
+      await must('copy', ['copy', t.fs, local, '--filter-from', filters, '--drive-skip-gdocs', '--create-empty-src-dirs', '--stats', '1s', '-v'].concat(SYNC_TRANSFER, t.flags), {
         signal, timeout: 0, onLine: l => { if (l.stats && onStats) onStats(l.stats); },
       });
+    },
+    /* The ids of the Drive folder and of the folders in it, for a look at what changed (syncPollQueries):
+       {root, map: Map id -> path}. filters: the vault's filter rules, so that the folders are the sync's. */
+    async folders(link, filters, signal) {
+      const t = syncTarget(link);
+      // the folder's own id is in the listing of the folder above it (rclone gives no id for the folder it stands in)
+      const parts = String(link.path || '').split('/').filter(Boolean), name = parts.pop();
+      const up = syncTarget(Object.assign({}, link, { path: parts.join('/') }));
+      const top = await must('look', ['lsjson', up.fs, '--dirs-only', '--no-mimetype', '--no-modtime'].concat(up.flags), { signal, timeout: 60000 });
+      let root = '';
+      try { const hit = JSON.parse(top.out).find(d => d && d.IsDir && d.Name === name); root = hit ? String(hit.ID || '') : ''; } catch (e) { root = ''; }
+      if (!root) throw syncExplain(Object.assign(top, { code: 1 }), 'list');
+      const r = await must('look', ['lsjson', t.fs, '-R', '--dirs-only', '--fast-list', '--no-mimetype', '--no-modtime', '--filter-from', filters].concat(t.flags), { signal, timeout: 5 * 60000 });
+      const map = new Map();
+      let list = [];
+      try { list = JSON.parse(r.out); } catch (e) { throw syncExplain(Object.assign(r, { code: 1 }), 'list'); }
+      for (const d of list) if (d && d.IsDir && d.ID && typeof d.Path === 'string') map.set(String(d.ID), d.Path);
+      return { root, map };
+    },
+    /* Drive's files that answer a query (Drive's own query language), as Drive describes them. */
+    async query(link, q, signal) {
+      const t = syncTarget(link);
+      const r = await must('look', ['backend', 'query', `${RCLONE.remote}:`, q].concat(t.flags), { signal, timeout: 60000 });
+      try { const j = JSON.parse(r.out || '[]'); return Array.isArray(j) ? j : []; } catch (e) { throw syncExplain(Object.assign(r, { code: 1 }), 'list'); }
     },
     /* One run of the sync; resolves rcloneExec's result with .summary, or throws a problem. */
     async bisync(args, onLine, signal) {
@@ -3965,6 +4058,122 @@ function rcloneApi(o) {
     },
   };
   return api;
+}
+
+/* ---------- What the last sync left, and what changed since ---------- */
+
+/* rclone writes a name in its records as Go quotes a string ("a \"b\"\tc", "\u00e9", "\xff" for a byte that is not
+   UTF-8): the bytes are put back together and read as UTF-8. */
+function goUnquote(q) {
+  const s = String(q || '');
+  if (!/^".*"$/.test(s)) return s;
+  const bytes = [];
+  const put = text => { for (const b of Buffer.from(text, 'utf8')) bytes.push(b); };
+  const simple = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', f: '\f', v: '\v' };
+  for (let i = 1; i < s.length - 1; i++) {
+    const c = s[i];
+    if (c !== '\\') { const cp = s.codePointAt(i); put(String.fromCodePoint(cp)); if (cp > 0xffff) i++; continue; }
+    const n = s[++i];
+    const hex = len => { const h = s.substr(i + 1, len); i += len; return parseInt(h, 16); };
+    if (simple[n]) put(simple[n]);
+    else if (n === 'x') bytes.push(hex(2));
+    else if (n === 'u') put(String.fromCodePoint(hex(4)));
+    else if (n === 'U') put(String.fromCodePoint(hex(8)));
+    else put(n);    // \\ \" \'
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+/* A time as rclone writes it in its records ("2026-11-17T01:30:29.993105424+0000"), in milliseconds (with the
+   fraction), or NaN. */
+function syncListTime(t) {
+  const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)$/.exec(String(t || ''));
+  if (!m) return NaN;
+  const zone = m[3] === 'Z' ? 'Z' : `${m[3].slice(0, 3)}:${m[3].slice(-2)}`;
+  const whole = Date.parse(`${m[1]}${zone}`);
+  return whole + (m[2] ? Number(`0.${m[2]}`) * 1000 : 0);
+}
+
+/* rclone's record of one side after the last sync (bisync's "listing", the file ending .path1.lst for this computer,
+   .path2.lst for Drive): Map path -> {dir, size, mtime (ms)}. Lines it cannot read are left out. */
+function syncParseListing(text) {
+  const out = new Map();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^([-d])\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(".*")\s*$/.exec(line);
+    if (!m) continue;
+    out.set(goUnquote(m[6]), { dir: m[1] === 'd', size: Number(m[2]), mtime: syncListTime(m[5]) });
+  }
+  return out;
+}
+
+/* The text of that record, or null. dir: the record's folder for this vault (paths.work/<id>); side: 'path1' or
+   'path2'. There is one of each per vault (the folder is the vault's own); rclone's working copies (.lst-new,
+   .lst-old, .lst-err) are not it. */
+function syncReadListing(fs, path, dir, side) {
+  let names = [];
+  try { names = fs.readdirSync(dir).filter(n => n.endsWith(`.${side}.lst`)); } catch (e) { return null; }
+  if (!names.length) return null;
+  const newest = names.map(n => { try { return [fs.statSync(path.join(dir, n)).mtimeMs, n]; } catch (e) { return [0, n]; } }).sort((a, b) => b[0] - a[0])[0][1];
+  try { return fs.readFileSync(path.join(dir, newest), 'utf8'); } catch (e) { return null; }
+}
+
+/* Whether each of `paths` (in the vault, with /) is exactly as the last sync recorded it: there with the same size
+   and time (to the millisecond, as bisync itself compares them), a folder where it recorded a folder, or absent
+   where it recorded nothing. stat(path) -> {dir, size, mtime} or null. Then a run would find nothing to do for them
+   on this computer's side, and none is needed for them. Anything else (one path that differs, a record that cannot
+   be read) is false. */
+function syncSettled(listing, paths, stat) {
+  if (!listing || !paths || !paths.length) return false;
+  for (const p of paths) {
+    const rec = listing.get(p), now = stat(p);
+    if (!rec && !now) continue;
+    if (!rec || !now || rec.dir !== now.dir) return false;
+    if (!rec.dir && (rec.size !== now.size || !(Math.abs(rec.mtime - now.mtime) < 1))) return false;
+  }
+  return true;
+}
+
+/* Asking Drive what changed: one query (a query is one request, and one more for rclone to find the top of the Drive).
+   Drive cannot be asked for "everything under this folder", only for files in given folders, and a query has a limit
+   of length: a vault of up to `per` folders (default 40) is asked about its own folders; a larger one is asked about
+   everything in the Drive changed since then, and what is not in its folders is left aside (syncPollChanged). Files
+   put in the trash are in the answer too. since: an RFC 3339 time. -> [query] (one) */
+function syncPollQueries(since, ids, per) {
+  const list = Array.from(new Set(ids || [])).filter(id => /^[\w-]+$/.test(id));
+  if (!list.length || list.length > (per || 40)) return [`modifiedTime > '${since}'`];
+  return [`modifiedTime > '${since}' and (${list.map(id => `'${id}' in parents`).join(' or ')})`];
+}
+
+/* What Drive's answers hold that the last sync has not seen: the paths (in the vault) of files and folders that
+   are new, changed or deleted since its record of Drive. results: Drive's files ({id, name, mimeType, size,
+   modifiedTime, parents, trashed}); folders: {root: the vault's folder's id, map: Map id -> path of a folder in it};
+   listing: the record of Drive (syncParseListing of .path2.lst). Google's own documents are left out, as the sync
+   leaves them out. A file whose name rclone writes differently (Drive allows a / in a name) counts as changed:
+   one run more, never one less. */
+function syncPollChanged(results, folders, listing) {
+  const out = [];
+  for (const r of results || []) {
+    if (!r || typeof r.name !== 'string' || !Array.isArray(r.parents)) continue;
+    const parent = r.parents.find(id => id === folders.root || folders.map.has(id));
+    if (!parent) continue;
+    const isDir = r.mimeType === 'application/vnd.google-apps.folder';
+    if (!isDir && /^application\/vnd\.google-apps\./.test(String(r.mimeType || ''))) continue;
+    const rel = parent === folders.root ? r.name : `${folders.map.get(parent)}/${r.name}`;
+    const rec = listing.get(rel);
+    if (r.trashed) { if (rec) out.push(rel); continue; }
+    if (isDir) { if (!rec || !rec.dir) out.push(rel); continue; }
+    if (!rec || rec.dir || rec.size !== Number(r.size || 0) || !(Math.abs(rec.mtime - Date.parse(r.modifiedTime)) < 1)) out.push(rel);
+  }
+  return out;
+}
+
+/* A short fingerprint of the folders in a record, to know when the map of the Drive folder's ids is out of date. */
+function syncFoldersKey(listing) {
+  const dirs = [];
+  for (const [p, rec] of listing || []) if (rec.dir) dirs.push(p);
+  let h = 0x811c9dc5;
+  for (const ch of dirs.sort().join('\n')) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return `${dirs.length}:${h.toString(16)}`;
 }
 
 /* ---------- One run at a time ---------- */
@@ -4144,10 +4353,17 @@ async function syncFirst(o) {
 /* ---------- When to sync ---------- */
 
 /* Decides when the sync runs: after Obsidian starts, every so many minutes, a little after the last change to a
-   note, and when asked. Never two runs at once: a request made during a run is kept and run after it. A failure
-   that needs the writer (a sign-in, a safety stop) pauses the timer until they act; any other is tried again,
-   more slowly each time. o: {run(reason, opts) -> Promise<{summary, skipped}>, settings() -> syncSettings,
-   linked() -> bool, onState(state), timers: {set, clear}, now}. */
+   note, when Google Drive has changed (a look every minute: poll), and when asked. Never two runs at once: a request
+   made during a run is kept and run after it. A failure that needs the writer (a sign-in, a safety stop) pauses the
+   timer until they act; any other is tried again, more slowly each time.
+   o: {run(reason, opts) -> Promise<{summary, skipped}>, settings() -> syncSettings, linked() -> bool,
+   onState(state), timers: {set, clear}, now,
+   settled(paths) -> Promise<bool> (optional): whether every one of these files and folders is still exactly as the
+     last sync left it, so that a change to them needs no run (the sync's own downloads, which Obsidian reports as
+     changes, are like that);
+   poll(since) -> Promise<bool> (optional): whether something in the Drive folder changed after `since` (an ISO
+     time) that the last sync has not seen. A poll only ever makes a run come sooner: the regular runs go on as
+     they would without it}. */
 class SyncEngine {
   constructor(o) {
     this.o = o;
@@ -4156,7 +4372,10 @@ class SyncEngine {
     this.state = { status: 'off', last: 0, summary: null, problem: null, reason: '', since: 0 };
     this.tick = null;      // the timer of the next regular run
     this.soon = null;      // the timer of a run that follows a change, or a request made during a run
+    this.poller = null;    // the timer of the next look at Drive
     this.running = null; this.again = null; this.touched = false; this.fails = 0; this.stopped = true;
+    this.waiting = new Set(); this.waitingAll = false;   // what changed in the vault since the last run began
+    this.lastOk = 0;       // when the last run that went through began
   }
   set(patch) {
     Object.assign(this.state, patch);
@@ -4177,23 +4396,74 @@ class SyncEngine {
     if (!s.auto || this.paused() || this.running) return;
     const ms = first ? SYNC_TIMES.onStart : s.minutes * 60000 * Math.min(12, Math.pow(2, this.fails));
     this.tick = this.timers.set(() => { this.tick = null; void this.run(first ? 'start' : 'timer'); }, ms);
+    this.armPoll();
   }
-  stop() { this.stopped = true; this.cancel(); }
+  stop() {
+    this.stopped = true; this.cancel();
+    if (this.poller !== null) { this.timers.clear(this.poller); this.poller = null; }
+  }
   cancel() {
     if (this.tick !== null) { this.timers.clear(this.tick); this.tick = null; }
     if (this.soon !== null) { this.timers.clear(this.soon); this.soon = null; }
   }
-  /* A note changed: a run follows the last change by a little. The regular timer is left as it is, so that a long
-     spell of writing is still synced on time. A change made while a run is going is synced by one more run after
-     it (the run's own downloads look like changes too: the extra run then finds nothing to do). */
-  touch() {
+  /* A note changed (path: the file or folder in the vault, and old: where it was, for a rename): a run follows the
+     last change by a little. The regular timer is left as it is, so that a long spell of writing is still synced on
+     time. A change made while a run is going is synced by one more run after it. Before a run that follows changes,
+     the files that changed are compared with the record of the last sync (o.settled): when they are all as the sync
+     left them (the run's own downloads look like changes, and arrive during the run or just after it), no run is
+     needed and none is made. A change whose path is not known is always synced. */
+  touch(path, old) {
     if (this.stopped || !this.o.linked() || !this.o.settings().auto || this.paused()) return;
+    const note = p => { if (this.waiting.size >= 500) this.waitingAll = true; else this.waiting.add(p); };
+    if (typeof path === 'string' && path) note(path); else this.waitingAll = true;
+    if (typeof old === 'string' && old) note(old);
+    this.schedule();
+  }
+  schedule() {
     if (this.running) { this.touched = true; return; }
     if (this.soon !== null) this.timers.clear(this.soon);
-    this.soon = this.timers.set(() => { this.soon = null; void this.run('change'); }, SYNC_TIMES.onChange);
+    this.soon = this.timers.set(() => { this.soon = null; void this.changed(); }, SYNC_TIMES.onChange);
+  }
+  /* The time after the last change is up: a run, unless every change is one the last sync made itself. */
+  async changed() {
+    if (this.running || this.stopped) return;
+    const paths = Array.from(this.waiting);
+    if (!this.waitingAll && paths.length && this.o.settled && this.state.status === 'idle' && this.state.last > 0) {
+      let settled = false;
+      try { settled = Boolean(await this.o.settled(paths)); } catch (e) { settled = false; }
+      if (this.soon !== null || this.running || this.stopped) return;   // more came meanwhile: its own time will tell
+      if (settled && !this.waitingAll) {
+        for (const p of paths) this.waiting.delete(p);
+        if (!this.waiting.size) return;
+      }
+    }
+    void this.run('change');
   }
   /* Whether a change is waiting to be synced, or a run is going. */
   pending() { return this.soon !== null || this.touched || Boolean(this.running); }
+  /* A look at Drive every so often (SYNC_TIMES.poll), while nothing else is going on: when something changed there
+     that the last sync has not seen, a run follows at once. Only after a run has gone through in this session (its
+     record is what the look compares with), and only while syncing by itself is on. A look that fails is not a
+     problem for the writer: the regular runs go on as before. */
+  armPoll() {
+    if (this.poller !== null || !this.o.poll || this.stopped) return;
+    // after looks that failed (offline, say), the next comes later, up to every ten minutes
+    const ms = SYNC_TIMES.poll * Math.min(10, Math.pow(2, this.pollFails || 0));
+    this.poller = this.timers.set(() => { this.poller = null; void this.pollOnce(); }, ms);
+  }
+  async pollOnce() {
+    try {
+      if (this.stopped || !this.o.linked()) return;
+      const s = this.o.settings();
+      if (!s.auto || this.paused() || this.running || this.soon !== null || !this.lastOk || this.state.status !== 'idle') return;
+      const since = new Date(this.lastOk - SYNC_TIMES.pollMargin).toISOString().replace(/\.\d+Z$/, 'Z');
+      let changed = false;
+      try { changed = Boolean(await this.o.poll(since)); this.pollFails = 0; } catch (e) { changed = false; this.pollFails = (this.pollFails || 0) + 1; }
+      if (changed && !this.running && !this.stopped && !this.paused()) void this.run('remote');
+    } finally {
+      if (!this.stopped) this.armPoll();
+    }
+  }
   /* Runs now. While a run is going, the request waits for it, and one more run follows if it was asked for by the
      writer or by a change. */
   run(reason, opts) {
@@ -4203,13 +4473,16 @@ class SyncEngine {
     }
     if (!this.o.linked()) return Promise.resolve({ skipped: 'off' });
     this.cancel();
-    this.set({ status: 'syncing', reason: reason || 'manual', since: this.now() });
+    const began = this.now();
+    this.set({ status: 'syncing', reason: reason || 'manual', since: began });
+    // what changed before now is this run's to sync; what changes from now on is noted afresh
+    this.waiting = new Set(); this.waitingAll = false;
     const p = (async () => {
       let result = null;
       try {
         result = await this.o.run(reason, opts || {});
         if (result && result.skipped) this.set({ status: this.state.problem ? 'problem' : 'idle' });
-        else { this.fails = 0; this.set({ status: 'idle', last: this.now(), summary: result && result.summary, problem: null }); }
+        else { this.fails = 0; this.lastOk = began; this.set({ status: 'idle', last: this.now(), summary: result && result.summary, problem: null }); }
       } catch (e) {
         const problem = e && e.kind ? e : syncProblem('unknown', 'The sync stopped before it finished.', 'Scriptorium itself tripped over something.', 'Choose “Sync now” to try again. If it happens again, copy the diagnostic report and ask for help.', [String((e && e.message) || e)]);
         if (problem.kind === 'stopped') this.set({ status: this.state.problem ? 'problem' : 'idle' });
@@ -4222,7 +4495,7 @@ class SyncEngine {
       if (!this.stopped) {
         this.start(false);
         if (again && !this.paused()) this.soon = this.timers.set(() => { this.soon = null; void this.run(again.reason, again.opts); }, SYNC_TIMES.again);
-        else if (touched) this.touch();
+        else if (touched && this.o.linked() && !this.paused() && this.o.settings().auto) this.schedule();
       }
       return result;
     })();
@@ -4279,13 +4552,18 @@ function syncReport(info, runs, home, hide) {
   out.push(`rclone: ${rc.version ? `v${rc.version}` : 'not found'}${rc.kind ? ` (${{ custom: 'the path in the settings', downloaded: 'downloaded by Scriptorium', path: 'found on PATH', usual: 'found in a usual place' }[rc.kind] || rc.kind})` : ''} · written for v${RCLONE.version}`);
   out.push(`Signed in: ${info.connected ? 'yes' : 'no'} · Google app: ${info.own ? 'a client ID of the writer’s own' : 'rclone’s shared one'}${info.type && info.type !== 'drive' ? ` · NOT GOOGLE DRIVE (the remote is of type ${info.type}: a test)` : ''}`);
   out.push(`This vault: ${info.linked ? `linked (${info.where || '?'})` : 'not linked'}${info.first ? '' : info.linked ? ', first sync not done' : ''}`);
-  if (info.settings) out.push(`Settings: automatic ${info.settings.auto ? `every ${info.settings.minutes} min` : 'off'} · Obsidian’s settings synced: ${info.settings.obsidian ? 'yes' : 'no'} · delete limit ${info.settings.maxDelete}%`);
+  if (info.settings) out.push(`Settings: automatic ${info.settings.auto ? `every ${info.settings.minutes} min, ${SYNC_TIMES.onChange / 1000} s after a change, and when Drive has changed (a look every ${SYNC_TIMES.poll / 60000} min)` : 'off'} · Obsidian’s settings synced: ${info.settings.obsidian ? 'yes' : 'no'} · delete limit ${info.settings.maxDelete}%`);
   if (info.state) out.push(`Now: ${info.state.status}${info.state.problem ? ` (${info.state.problem.kind}: ${info.state.problem.message})` : ''}`);
+  if (info.looks && info.looks.n) out.push(`Looks at Drive for changes since Obsidian started: ${info.looks.n}, the last at ${info.looks.at} UTC (${((info.looks.ms || 0) / 1000).toFixed(1)} s)`);
   out.push('');
-  out.push('The last things rclone was asked to do (newest last, times in UTC):');
+  out.push('The last things rclone was asked to do (newest last, times in UTC; a sync says what set it off and where its time went):');
   if (!runs || !runs.length) out.push('  nothing yet since Obsidian started');
+  const WHY = { start: 'as Obsidian started', timer: 'on the timer', change: 'after a change', remote: 'Drive had changed', manual: 'asked for', quit: 'as Obsidian quit' };
   for (const r of (runs || []).slice(-12)) {
-    out.push(`  ${r.at || ''} ${r.what}: ${r.failed ? `could not start (${r.failed})` : r.stopped ? 'stopped' : r.timedOut ? 'timed out' : `ended with ${r.code}`} after ${((r.ms || 0) / 1000).toFixed(1)} s`);
+    const notes = (r.lines || []).length && r.lines.every(l => l.level === 'note');
+    if (notes && !r.ms) { out.push(`  ${r.at || ''} ${r.what}: ${r.lines.map(l => syncNameless(l.msg, hide)).join(' ')}`); continue; }
+    const steps = r.phases ? syncPhasesText(r.phases) : '';
+    out.push(`  ${r.at || ''} ${r.what}${r.why ? ` (${WHY[r.why] || r.why})` : ''}: ${r.failed ? `could not start (${r.failed})` : r.stopped ? 'stopped' : r.timedOut ? 'timed out' : `ended with ${r.code}`} after ${((r.ms || 0) / 1000).toFixed(1)} s${steps ? ` (${steps})` : ''}`);
     const bad = (r.lines || []).filter(l => l.level !== 'info' && l.level !== 'debug' && !l.stats);
     if (r.code !== 0 || r.failed) for (const l of bad.slice(-8)) out.push(`      ${l.level}: ${syncNameless(l.msg, hide)}`);
   }
@@ -4744,7 +5022,7 @@ class SyncModal extends Modal {
       el.createEl('p', { cls: 'scriptorium-setup-problem', text: 'These two folders have nothing in common. If that Drive folder is not meant for this vault, choose another: everything in it would be copied into this vault.' });
     }
     if (pv.onlyDrive > 5000 || pv.drive.bytes > 5e9) el.createEl('p', { cls: 'scriptorium-setup-problem', text: `That Drive folder is large (${driveBytes(pv.drive.bytes)}). All of it will be downloaded into this vault.` });
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: `After this, the vault is synced by itself every ${settings.minutes === 1 ? 'minute' : `${settings.minutes} minutes`} and shortly after you change a note${settings.auto ? '' : ' (automatic syncing is off in the settings: until you turn it on, only when you ask)'}. ` +
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: `After this, the vault is synced by itself every ${settings.minutes === 1 ? 'minute' : `${settings.minutes} minutes`}, shortly after you change a note, and within about a minute of a change in Drive${settings.auto ? '' : ' (automatic syncing is off in the settings: until you turn it on, only when you ask)'}. ` +
       `Not synced: Obsidian’s window layout and caches, .trash, hidden folders, Lagrange’s settings (API keys)${settings.obsidian ? '' : ', Obsidian’s settings'}, and Google Docs.` });
     const row = this.buttons();
     row.createEl('button', { cls: 'mod-cta', text: 'Start syncing' }).addEventListener('click', () => this.go(() => this.first(pv, keep)));
@@ -4815,7 +5093,7 @@ class SyncModal extends Modal {
       if (st.problem.cause2) { const p = el.createEl('p'); p.createEl('strong', { text: 'Likely cause: ' }); p.appendText(st.problem.cause2); }
       if (st.problem.next) { const p = el.createEl('p'); p.createEl('strong', { text: 'What to do: ' }); p.appendText(st.problem.next); }
     }
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: settings.auto ? `Synced by itself every ${settings.minutes === 1 ? 'minute' : `${settings.minutes} minutes`}, shortly after a note changes, and when Obsidian starts.` : 'Automatic syncing is off (Settings → Scriptorium): the vault is synced only when you ask.' });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: settings.auto ? `Synced by itself every ${settings.minutes === 1 ? 'minute' : `${settings.minutes} minutes`}, shortly after a note changes, within about a minute of a change in Drive, and when Obsidian starts.` : 'Automatic syncing is off (Settings → Scriptorium): the vault is synced only when you ask.' });
     const conflicts = plugin.syncConflicts();
     if (conflicts.length) {
       el.createEl('p', { text: `${driveCount(conflicts.length, 'file was', 'files were')} changed on both sides; the older version of each was kept under a “conflict” name. Compare them, keep what you want, and delete the conflict copy:` });
@@ -5062,6 +5340,8 @@ class Scriptorium extends Plugin {
     this.engine = new SyncEngine({
       run: (reason, opts) => this.syncRun(reason, opts),
       settings: () => syncSettings(this.settings),
+      settled: paths => this.syncSettled(paths),
+      poll: since => this.syncPoll(since),
       linked: () => { const l = this.syncLink(); return Boolean(l && l.first); },
       onState: () => this.refreshSync(),
     });
@@ -5079,7 +5359,7 @@ class Scriptorium extends Plugin {
     this.addCommand({ id: 'drive-sync-now', name: 'Sync now with Google Drive', callback: () => this.syncNowCommand() });
     this.addCommand({ id: 'drive-report', name: 'Copy the Google Drive diagnostic report', callback: () => this.copyDriveReport() });
     if (this.onDesktop()) {
-      for (const what of ['modify', 'create', 'delete', 'rename']) this.registerEvent(this.app.vault.on(what, () => this.engine.touch()));
+      for (const what of ['modify', 'create', 'delete', 'rename']) this.registerEvent(this.app.vault.on(what, (file, old) => this.engine.touch(file && file.path, what === 'rename' ? old : undefined)));
       // Before Obsidian quits, what is waiting is synced, for a quarter of a minute at most.
       this.registerEvent(this.app.workspace.on('quit', tasks => {
         if (!this.engine.pending() || !tasks || typeof tasks.add !== 'function') return;
@@ -5230,9 +5510,15 @@ class Scriptorium extends Plugin {
     this.refreshSync();
   }
 
-  /* What rclone was asked and how it ended, for the diagnostic report: the last forty calls. */
+  /* What rclone was asked and how it ended, for the diagnostic report: the last forty calls, each sync with what set
+     it off. The looks at Drive that go well (one a minute) are only counted, so that they do not push the syncs out. */
   syncLogRun(r) {
-    this.syncRuns.push(Object.assign({ at: new Date().toISOString().slice(11, 19) }, r, { lines: (r.lines || []).filter(l => !l.stats).slice(-30) }));
+    if (r.what === 'look' && r.code === 0 && !r.failed && !r.stopped && !r.timedOut) {
+      this.syncLooks = { n: ((this.syncLooks && this.syncLooks.n) || 0) + 1, at: new Date().toISOString().slice(11, 19), ms: r.ms };
+      return;
+    }
+    const why = r.what === 'sync' || r.what === 'first' ? this.syncWhy : undefined;
+    this.syncRuns.push(Object.assign({ at: new Date().toISOString().slice(11, 19), why }, r, { lines: (r.lines || []).filter(l => !l.stats).slice(-30) }));
     if (this.syncRuns.length > 40) this.syncRuns.splice(0, this.syncRuns.length - 40);
   }
   syncNote(what, lines) {
@@ -5243,12 +5529,52 @@ class Scriptorium extends Plugin {
   async syncRun(reason, opts) {
     const k = this.syncKit(), api = await this.syncApi();
     this.syncStop = new AbortController();
+    this.syncWhy = reason || 'manual';
     try {
       return await syncOnce({ api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link: this.syncLink(), settings: syncSettings(this.settings),
         force: Boolean(opts && opts.force), now: () => Date.now(), pid: process.pid, alive: k.alive, signal: this.syncStop.signal });
     } finally {
       this.syncStop = null;
     }
+  }
+
+  /* For the engine: whether these files and folders of the vault are all as the last sync recorded them (see
+     syncSettled), so that their change needs no run. */
+  async syncSettled(paths) {
+    const k = this.syncKit();
+    const text = syncReadListing(k.fs, k.path, k.path.join(k.paths.work, k.id), 'path1');
+    if (!text) return false;
+    return syncSettled(syncParseListing(text), paths, rel => {
+      try {
+        const st = k.fs.statSync(k.path.join(k.dir, ...rel.split('/')));
+        return { dir: st.isDirectory(), size: st.size, mtime: st.mtimeMs };
+      } catch (e) { return null; }
+    });
+  }
+
+  /* For the engine: whether something changed in the Drive folder after `since` that the last sync has not seen. One
+     query of Drive for the folders of the vault (forty to a query), compared with rclone's record of Drive after the
+     last sync. The map of the folders' ids is made again only when the folders in that record change. Not for a
+     folder shared with the writer (Drive's queries there are not the same): the regular runs see to it. */
+  async syncPoll(since) {
+    const link = this.syncLink();
+    if (!link || !link.first || link.root === 'shared' || !String(link.path || '').replace(/\//g, '')) return false;
+    const k = this.syncKit();
+    if (k.test) return false;   // a stand-in for Drive (a test) cannot be asked Drive's questions
+    const text = syncReadListing(k.fs, k.path, k.path.join(k.paths.work, k.id), 'path2');
+    if (!text) return false;
+    const listing = syncParseListing(text), key = `${link.root}:${link.driveId || ''}:${link.path}:${syncFoldersKey(listing)}`;
+    const api = await this.syncApi();
+    if (!this.syncFolders || this.syncFolders.key !== key) {
+      const f = await api.folders(link, k.path.join(k.paths.filters, `${k.id}.txt`));
+      this.syncFolders = { key, root: f.root, map: f.map };
+    }
+    const folders = this.syncFolders, results = [];
+    for (const q of syncPollQueries(since, [folders.root].concat(Array.from(folders.map.keys())))) results.push(...await api.query(link, q));
+    if (results.length > SYNC_POLL_MAX) return false;   // a Drive that busy is left to the regular runs
+    const changed = syncPollChanged(results, folders, listing);
+    if (changed.length) this.syncNote('drive changed', [`${driveCount(changed.length, 'change')} in Drive that the last sync has not seen: a sync follows.`]);
+    return changed.length > 0;
   }
 
   /* "Sync now": runs at once where the vault is set up, and says how it went; opens the set-up otherwise. */
@@ -5320,7 +5646,7 @@ class Scriptorium extends Plugin {
         version: this.manifest && this.manifest.version, obsidian: typeof apiVersion === 'string' ? apiVersion : '', platform: k.platform, arch: k.arch, release: k.os.release(),
         rclone: f ? { kind: f.kind, version: f.version } : {}, connected: conn.connected, own: conn.own, type: conn.type,
         linked: Boolean(link), first: Boolean(link && link.first), where: link ? `${link.root === 'my' ? 'My Drive' : link.root === 'shared' ? 'Shared with me' : 'a shared drive'}, ${link.path.split('/').length} folders deep` : '',
-        settings: syncSettings(this.settings), state: this.engine.state,
+        settings: syncSettings(this.settings), state: this.engine.state, looks: this.syncLooks,
       }, this.syncRuns, k.home, [k.dir, k.dir.split('\\').join('/'), link ? link.path : '', this.app.vault.getName()]);
     }
     this.lastDriveReport = text;
@@ -5890,5 +6216,6 @@ Object.assign(module.exports, {
   syncLink, syncSaveLink, rcloneAsset, rcloneCandidates, findRclone, rcloneVersion, rcloneOldEnough, zipEntry, syncFetch, rcloneInstall, syncProblem, rcloneEnv,
   syncLogLine, rcloneExec, syncConfRead, syncConnection, syncConfPrepare, syncParseClient, syncFilters, syncTarget, syncWhere, syncFolderName, syncParseDirs,
   syncParseCheck, syncConflictName, syncBisyncArgs, syncSummary, syncSummaryText, syncExplain, rcloneApi, syncLock, syncUnlock, syncClearStale, syncPrune, syncOnce, syncStamp,
+  SYNC_PHASES, syncPhaseOf, syncPhases, syncPhasesText, goUnquote, syncListTime, syncParseListing, syncReadListing, syncSettled, syncPollQueries, syncPollChanged, syncFoldersKey, SYNC_TRANSFER, SYNC_RETRIES,
   inkSlant, uprightMissing, syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
 });
