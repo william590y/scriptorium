@@ -3814,6 +3814,7 @@ const SYNC_TRANSFER = ['--fast-list'];
    sync of a 300-file vault failed so with 10 tries and went through with 20; a request that keeps failing for another
    reason (no network) takes a little longer to be reported. Only the sync itself is given it. */
 const SYNC_RETRIES = ['--low-level-retries', '20'];
+const SYNC_POLL_MAX = 2000;   // the most files one look at Drive reads; beyond that the regular runs see to it
 
 /* The arguments of the sync itself. o: {local, link, paths (syncPaths), id, settings, resync, mode ('newer',
    'path1', 'path2'), force, stamp (a date for the folder of replaced files), dryRun}. */
@@ -4132,16 +4133,15 @@ function syncSettled(listing, paths, stat) {
   return true;
 }
 
-/* Asking Drive what changed. Drive cannot be asked for "everything under this folder", only for files in given
-   folders: the questions name the vault's folders in Drive, at most `per` to a question (a question has a limit of
-   length), with what changed after `since` (an RFC 3339 time). Deleted files are asked for too (they are in Drive's
-   trash). -> [query] */
+/* Asking Drive what changed: one query (a query is one request, and one more for rclone to find the top of the Drive).
+   Drive cannot be asked for "everything under this folder", only for files in given folders, and a query has a limit
+   of length: a vault of up to `per` folders (default 40) is asked about its own folders; a larger one is asked about
+   everything in the Drive changed since then, and what is not in its folders is left aside (syncPollChanged). Files
+   put in the trash are in the answer too. since: an RFC 3339 time. -> [query] (one) */
 function syncPollQueries(since, ids, per) {
-  const out = [], n = per || 40, list = Array.from(new Set(ids || [])).filter(id => /^[\w-]+$/.test(id));
-  for (let i = 0; i < list.length; i += n) {
-    out.push(`modifiedTime > '${since}' and (${list.slice(i, i + n).map(id => `'${id}' in parents`).join(' or ')})`);
-  }
-  return out;
+  const list = Array.from(new Set(ids || [])).filter(id => /^[\w-]+$/.test(id));
+  if (!list.length || list.length > (per || 40)) return [`modifiedTime > '${since}'`];
+  return [`modifiedTime > '${since}' and (${list.map(id => `'${id}' in parents`).join(' or ')})`];
 }
 
 /* What Drive's answers hold that the last sync has not seen: the paths (in the vault) of files and folders that
@@ -5571,6 +5571,7 @@ class Scriptorium extends Plugin {
     }
     const folders = this.syncFolders, results = [];
     for (const q of syncPollQueries(since, [folders.root].concat(Array.from(folders.map.keys())))) results.push(...await api.query(link, q));
+    if (results.length > SYNC_POLL_MAX) return false;   // a Drive that busy is left to the regular runs
     const changed = syncPollChanged(results, folders, listing);
     if (changed.length) this.syncNote('drive changed', [`${driveCount(changed.length, 'change')} in Drive that the last sync has not seen: a sync follows.`]);
     return changed.length > 0;

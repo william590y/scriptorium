@@ -1036,12 +1036,13 @@ test('a change needs no run when the file is exactly as the last sync left it (i
   assert.equal(S.syncReadListing(fs, path, path.join(dir, 'none'), 'path1'), null);
 });
 
-test('the look at Drive: one question for forty folders, and only what the last sync has not seen counts', () => {
-  const ids = Array.from({ length: 85 }, (_, i) => `id${i}`);
+test('the look at Drive: one query, about the vault’s own folders when they fit in one; only what the last sync has not seen counts', () => {
+  const ids = Array.from({ length: 40 }, (_, i) => `id${i}`);
   const qs = S.syncPollQueries('2026-11-16T20:00:00Z', ids);
-  assert.equal(qs.length, 3);
+  assert.equal(qs.length, 1);
   assert.ok(qs[0].startsWith("modifiedTime > '2026-11-16T20:00:00Z' and ('id0' in parents or 'id1' in parents"));
-  assert.equal((qs[2].match(/in parents/g) || []).length, 5);
+  assert.equal((qs[0].match(/in parents/g) || []).length, 40);
+  assert.deepEqual(S.syncPollQueries('2026-11-16T20:00:00Z', ids.concat(['id40'])), ["modifiedTime > '2026-11-16T20:00:00Z'"], 'more folders than fit: everything changed since, sorted out here');
   assert.deepEqual(S.syncPollQueries('2026-11-16T20:00:00Z', ["bad' or name contains 'x", 'ok_1-2']), ["modifiedTime > '2026-11-16T20:00:00Z' and ('ok_1-2' in parents)"], 'an id that is not an id is never put in a question');
   const listing = S.syncParseListing([
     '-       10 - - 2026-11-16T20:00:00.123000000+0000 "a.md"',
