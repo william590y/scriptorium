@@ -1349,9 +1349,16 @@ function dropcapExtension(plugin) {
   };
   const gap = Decoration.mark({ class: 'scriptorium-opening-gap' });   // the space after an initial that is a word by itself
   const below = Decoration.line({ class: 'scriptorium-opening-end' });   // the paragraph's last line, where what follows begins below the initial
-  const beside = Decoration.line({ class: 'scriptorium-beside-initial' });   // a line of the list that follows the paragraph
+  // A line of the list that follows the paragraph. It is a formatting context of its own (the snippet's rule, and the
+  // plugin's copy of it), and says so itself as well: Obsidian measures how far a list line hangs its marker from the
+  // page, and a line measured while the initial's float pushed its words keeps that measure. Obsidian loads the
+  // plugin's styles.css only after the plugin has started, and the vault's snippet can be older than the plugin, so
+  // the mark is not left to wait for a stylesheet. (In Live Preview only: Source mode stays plain, and there the mark
+  // is the class alone, which nothing draws.)
+  const beside = Decoration.line({ class: 'scriptorium-beside-initial', attributes: { style: 'display: flow-root' } });
+  const besideSource = Decoration.line({ class: 'scriptorium-beside-initial' });
   const decorate = (state, value) => {
-    const ranges = [], froms = [], lists = [];
+    const ranges = [], froms = [], lists = [], lp = live(state);
     if (value.openings.length) {
       const choice = plugin.dropcapChoice(value.shown ? value.shown.which : value.said), path = pathOf(state);
       for (const o of value.openings) {
@@ -1373,7 +1380,7 @@ function dropcapExtension(plugin) {
         else if (o.after === 'list') {
           for (let n = o.list[0]; n <= Math.min(o.list[1], o.list[0] + BESIDE_LINES - 1, state.doc.lines - 1); n++) {
             const item = state.doc.line(n + 1);
-            if (/\S/.test(item.text)) ranges.push(beside.range(item.from));
+            if (/\S/.test(item.text)) ranges.push((lp ? beside : besideSource).range(item.from));
           }
           const at = n => (n < state.doc.lines ? state.doc.line(n + 1).from : -1);
           lists.push({ open: line.from, items: o.items.map(i => ({ at: at(i.line), under: i.under.map(at).filter(p => p >= 0) })).filter(i => i.at >= 0 && i.under.length) });
@@ -1398,6 +1405,7 @@ function dropcapExtension(plugin) {
         else if (e.is(ink)) { next = Object.assign({}, next, { inked: Boolean(e.value) }); again = true; }
       }
       if (!again && tr.selection && value.openings.some(o => o.led)) again = true;
+      if (!again && value.lists.length && live(tr.startState) !== live(tr.state)) again = true;   // Live Preview or Source mode now (the mark of a list line)
       return again ? decorate(tr.state, next) : value;
     },
     provide: f => EditorView.decorations.from(f, value => value.deco),
@@ -6208,6 +6216,13 @@ class Scriptorium extends Plugin {
       if (on) this.liveExtensions.push(this.dropcapLive.extension);
       this.app.workspace.updateOptions();
     } catch (e) { this.dropcapLive = null; this.liveExtensions.length = 0; console.error('Scriptorium: no drop caps in Live Preview', e); }
+    // Obsidian measures how far each line of a list in the editor hangs its marker once, and keeps the measure until
+    // the line's text or the CSS changes (not when the line's class does). A line measured while the initial's float
+    // pushed its words (as it did with a snippet older than the rules for what follows a short opening paragraph)
+    // went on hanging its further lines far to the right once the rules were there. As a change of CSS would, this
+    // has Obsidian measure them again (Obsidian loads the plugin's styles.css after this, and says nothing of it; the
+    // lines beside the initial are formatting contexts by their own mark, so the new measure is right without it).
+    try { this.app.workspace.trigger('css-change'); } catch (e) { /* the measures are as they were */ }
   }
 
   /* Has every editor set its opening lines again, and look again at where their first lines break. */

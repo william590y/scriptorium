@@ -74,7 +74,12 @@ These are set in **Settings → Scriptorium**, and remembered for the vault:
   drawn on the initial in Reading view, a quotation's bar ran under it, and in the editor the words of a list or a
   quotation were drawn through it.) A list after an opening paragraph now stands one line below it in Reading view, as
   the blank line sets it in the editor, so that the same items are beside the initial in both.
-  `plugins-tests/dropcap-followers.harness.js` checks all of this in a real Obsidian, in both views.
+  `plugins-tests/dropcap-followers.harness.js` checks all of this in a real Obsidian, in both views. The rules are
+  the manuscript snippet's, and the Scriptorium plugin carries the same rules in its own `styles.css`, which Obsidian
+  loads with the plugin's code: a vault whose snippet is older than its plugin (one from before 1.4.5 drew the list
+  through the initial again, in both views) keeps what follows clear all the same, and the plugin never writes to the
+  snippet, so changes of your own in it stay. Each rule that an older Obsidian installer's Chromium lacks
+  (`display: flow-root list-item`, the `lh` unit, `float: inline-start`) has a fallback.
 - **Marginalia** (on by default): in Reading view, footnotes (`[^1]`, and inline `^[...]` notes) are set in the right
   margin beside their references, as on gwern.net: each note hangs from a small box with its number, between dotted
   rules, with a boxed ↙ back to the reference, and notes whose references are close are stacked so that none covers
