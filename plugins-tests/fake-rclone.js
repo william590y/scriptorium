@@ -12,6 +12,13 @@
 // FAKE_RCLONE_FAIL=file.json  {"code": 1, "lines": [{"level": "error", "msg": "…"}]}: fail any other command so
 // FAKE_RCLONE_RECORD=file     append each call's arguments, one JSON array per line
 // FAKE_RCLONE_QUERY=file.json what `backend query` prints (default: null, as rclone prints no match)
+// FAKE_RCLONE_FILES=dir       a folder standing for the files of the pretend Drive ("scriptorium-drive:A/B" is dir/A/B):
+//                             `lsjson … --files-from-raw list` lists those of the names that are files there, as rclone
+//                             does (a name that is missing or a folder is left out), `copy … --files-from-raw list`
+//                             copies them out with their times, and `copyto` puts a file in
+// FAKE_RCLONE_CHECK=file      what `check --combined -` prints (it ends with 1 when a line is not "= …", as rclone does)
+// FAKE_RCLONE_BISYNC=file.json [[{level, msg, object}, …], …]: the log of each `bisync`, in turn, taken off the file as it
+//                             is used; without it (or once it is used up) a bisync says "Bisync successful" and nothing else
 //
 // Copyright (C) 2026 William Liaw. Licensed under the GNU General Public License, version 3 or later (see LICENSE).
 'use strict';
@@ -88,6 +95,48 @@ if (rest[0] === 'config' && rest[1] === 'update') {
   const tree = env.FAKE_RCLONE_TREE ? JSON.parse(fs.readFileSync(env.FAKE_RCLONE_TREE, 'utf8')) : { '': [] };
   const where = a => String(a || '').replace(/^scriptorium-drive:/, '');
   const root = rest.includes('--drive-shared-with-me') ? 'shared:' : rest.includes('--drive-team-drive') ? `drive:${rest[rest.indexOf('--drive-team-drive') + 1]}:` : '';
+  const files = env.FAKE_RCLONE_FILES, path = require('path');
+  const named = () => fs.readFileSync(flag('--files-from-raw'), 'utf8').split('\n').filter(Boolean);
+  const inDrive = a => path.join(files, ...where(a).split('/').filter(Boolean));
+  if (rest[0] === 'lsjson' && rest.includes('--files-from-raw')) {
+    const out = [];
+    for (const rel of named()) {
+      let st = null;
+      try { st = fs.statSync(path.join(inDrive(rest[1]), ...rel.split('/'))); } catch (e) { /* not there: left out */ }
+      if (st && st.isFile()) out.push({ Path: rel, Name: rel.split('/').pop(), Size: st.size, ModTime: new Date(st.mtimeMs).toISOString(), IsDir: false });
+    }
+    process.stdout.write('[\n' + out.map(x => JSON.stringify(x)).join(',\n') + '\n]\n');
+    process.exit(0);
+  }
+  if (rest[0] === 'copy' && rest.includes('--files-from-raw')) {
+    for (const rel of named()) {
+      const from = path.join(inDrive(rest[1]), ...rel.split('/')), to = path.join(rest[2], ...rel.split('/'));
+      if (!fs.existsSync(from) || !fs.statSync(from).isFile()) continue;
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+      const st = fs.statSync(from);
+      fs.utimesSync(to, st.atime, st.mtime);
+      log('info', 'Copied (new)', { object: rel });
+    }
+    process.exit(0);
+  }
+  if (rest[0] === 'copyto') {
+    if (files) { const to = inDrive(rest[2]); fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(rest[1], to); }
+    process.exit(0);
+  }
+  if (rest[0] === 'check') {
+    const text = env.FAKE_RCLONE_CHECK ? fs.readFileSync(env.FAKE_RCLONE_CHECK, 'utf8') : '';
+    process.stdout.write(text);
+    process.exit(text.split('\n').some(l => l && !l.startsWith('= ')) ? 1 : 0);
+  }
+  if (rest[0] === 'bisync') {
+    let runs = [];
+    if (env.FAKE_RCLONE_BISYNC) runs = JSON.parse(fs.readFileSync(env.FAKE_RCLONE_BISYNC, 'utf8'));
+    const lines = runs.length ? runs.shift() : [{ level: 'info', msg: 'Bisync successful' }];
+    if (env.FAKE_RCLONE_BISYNC) fs.writeFileSync(env.FAKE_RCLONE_BISYNC, JSON.stringify(runs));
+    for (const l of lines) log(l.level || 'info', l.msg, l.object ? { object: l.object } : {});
+    process.exit(0);
+  }
   if (rest[0] === 'lsjson') {
     const dirs = tree[root + where(rest[1])];
     if (!dirs) { log('error', 'error listing: directory not found'); log('notice', 'Failed to lsjson with 2 errors: last error was: error in ListJSON: directory not found'); process.exit(3); }

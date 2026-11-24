@@ -87,9 +87,9 @@ test('which Drive folder goes with which vault is kept in Scriptorium’s folder
 });
 
 test('settings: defaults, and nonsense is refused', () => {
-  assert.deepEqual(S.syncSettings({}), { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30 });
-  assert.deepEqual(S.syncSettings({ sync: { auto: false, minutes: 30, obsidian: false, maxDelete: 10, keepDays: 7 } }), { auto: false, minutes: 30, obsidian: false, maxDelete: 10, keepDays: 7 });
-  assert.deepEqual(S.syncSettings({ sync: { minutes: 0, maxDelete: 500, keepDays: 'x' } }), { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30 });
+  assert.deepEqual(S.syncSettings({}), { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30, conflicts: 'both' });
+  assert.deepEqual(S.syncSettings({ sync: { auto: false, minutes: 30, obsidian: false, maxDelete: 10, keepDays: 7, conflicts: 'merge' } }), { auto: false, minutes: 30, obsidian: false, maxDelete: 10, keepDays: 7, conflicts: 'merge' });
+  assert.deepEqual(S.syncSettings({ sync: { minutes: 0, maxDelete: 500, keepDays: 'x', conflicts: 'union' } }), { auto: true, minutes: 5, obsidian: true, maxDelete: 50, keepDays: 30, conflicts: 'both' });
 });
 
 /* ---------- Finding rclone ---------- */
@@ -848,7 +848,8 @@ test('an update keeps the sync: the plugin’s settings as 1.2.3 saved them are 
     sync: { auto: false, minutes: 17, obsidian: false, maxDelete: 35, keepDays: 90 }, drive: { folder: 'an older backup' } };
   const now = S.normalizeSettings(JSON.parse(JSON.stringify(saved)));
   assert.deepEqual(now.sync, saved.sync);
-  assert.deepEqual(S.syncSettings(now), saved.sync);
+  // every value 1.2.3 saved reads back as it was; what came after 1.5.0 (conflicts) is at its default
+  assert.deepEqual(S.syncSettings(now), Object.assign({}, saved.sync, { conflicts: 'both' }));
   for (const key of Object.keys(saved)) assert.deepEqual(now[key], saved[key], key);
 });
 
@@ -1190,4 +1191,338 @@ test('the look asks rclone for the folders’ ids once, then one query; a shared
   assert.deepEqual(await api.query(link, q[0]), []);
   // the folder is not there (moved or deleted in Drive): a problem, which the engine takes as a failed look
   await assert.rejects(api.folders({ root: 'my', path: 'Vaults/Gone' }, '/filters.txt'));
+});
+
+/* ---------- Merging both sides ---------- */
+
+const union = (a, b, o) => S.syncUnionText(a, b, o);
+
+test('merging two versions of a note: what both have once, in order; where they differ, this computer’s lines, then Drive’s', () => {
+  // the same text is left exactly as it is, whatever its line ends
+  for (const same of ['', 'one line', 'a\nb\n', 'a\r\nb\r\n', 'mixed\r\nends\nhere', '\n\n\n']) assert.equal(union(same, same), same);
+  // edits at different places: each side's edit is there, and so is the line the other side still has
+  assert.equal(union('t\nL2\nc\nd\ne\n', 't\nb\nc\nd\nD5\n'), 't\nL2\nb\nc\nd\ne\nD5\n');
+  // both sides wrote on at the end
+  assert.equal(union('# Day\n\nMorning.\nLocal evening.\n', '# Day\n\nMorning.\nDrive evening.\n'), '# Day\n\nMorning.\nLocal evening.\nDrive evening.\n');
+  // both sides wrote at the start
+  assert.equal(union('L0\na\nb\n', 'D0\na\nb\n'), 'L0\nD0\na\nb\n');
+  // changes that alternate down the note
+  assert.equal(union('a\nb1\nc\nd1\ne\n', 'a\nb2\nc\nd2\ne\n'), 'a\nb1\nb2\nc\nd1\nd2\ne\n');
+  // a line deleted on one side is still in the union, on either side
+  assert.equal(union('a\nc\n', 'a\nb\nc\n'), 'a\nb\nc\n');
+  assert.equal(union('a\nb\nc\n', 'a\nc\n'), 'a\nb\nc\n');
+  assert.equal(union('a\nc\n', 'a\nb\nc\nd\n'), 'a\nb\nc\nd\n');
+  // a line moved: it is in both places, as each side has it
+  assert.equal(union('m\na\nb\n', 'a\nb\nm\n'), 'm\na\nb\nm\n');
+  // one side empty: the other's text, with its own ends
+  assert.equal(union('', 'x\r\ny\r\n'), 'x\r\ny\r\n');
+  assert.equal(union('x\ny\n', ''), 'x\ny\n');
+  // a line each side has twice is written twice, not four times; a repeat of one side's own is kept
+  assert.equal(union('- [ ] milk\n- [ ] milk\nL\n', '- [ ] milk\n- [ ] milk\nD\n'), '- [ ] milk\n- [ ] milk\nL\nD\n');
+  assert.equal(union('a\nx\nx\nb\n', 'a\nb\n'), 'a\nx\nx\nb\n');
+  // any script, emoji and the like are lines like any other
+  assert.equal(union('Été\n漢字\n', 'Été\n🙂 ok\n'), 'Été\n漢字\n🙂 ok\n');
+  // no conflict markers, ever
+  assert.ok(!/<<<<<<<|>>>>>>>|=======/.test(union('a\nb\n', 'a\nc\n')));
+});
+
+test('merging keeps this computer’s line ends, final line end and byte-order mark', () => {
+  assert.equal(union('a\r\nb\r\n', 'a\nc\n'), 'a\r\nb\r\nc\r\n', 'CRLF here, LF in Drive: CRLF');
+  assert.equal(union('a\nb\n', 'a\r\nc\r\n'), 'a\nb\nc\n', 'LF here, CRLF in Drive: LF');
+  assert.equal(union('a\nb', 'a\nc\n'), 'a\nb\nc', 'no end on the last line here: none');
+  assert.equal(union('a\nb\n', 'a\nc'), 'a\nb\nc\n', 'an end here: kept');
+  assert.equal(union('one', 'one\r\ntwo\r\n'), 'one\r\ntwo', 'one line without an end: Drive’s kind of end between lines');
+  assert.equal(union('\ufeffa\nb\n', 'a\nc\n'), '\ufeffa\nb\nc\n', 'a byte-order mark here is kept');
+  assert.equal(union('a\nb\n', '\ufeffa\nc\n'), 'a\nb\nc\n', 'one only in Drive is not a line of text');
+  assert.equal(union('a\r\nb\r\nc\n', 'a\nb\nd\n'), 'a\r\nb\r\nc\r\nd\r\n', 'mostly CRLF: CRLF');
+});
+
+test('merging the properties at the top: never line by line; the version changed last wins when they differ', () => {
+  const here = '---\ntags: [a]\nstatus: draft\n---\nBody\nhere\n', there = '---\ntags: [b]\nstatus: done\n---\nBody\nthere\n';
+  assert.equal(union(here, there, { localTime: 1000, driveTime: 2000 }), '---\ntags: [b]\nstatus: done\n---\nBody\nhere\nthere\n', 'Drive’s is newer');
+  assert.equal(union(here, there, { localTime: 3000, driveTime: 2000 }), '---\ntags: [a]\nstatus: draft\n---\nBody\nhere\nthere\n', 'this computer’s is newer');
+  assert.equal(union(here, there), '---\ntags: [a]\nstatus: draft\n---\nBody\nhere\nthere\n', 'times not known: this computer’s');
+  for (const t of [union(here, there, { localTime: 1, driveTime: 2 }), union(here, there, { localTime: 2, driveTime: 1 })]) {
+    assert.equal((t.match(/^tags:/gm) || []).length, 1, 'no key twice');
+    assert.equal((t.match(/^---$/gm) || []).length, 2, 'one block');
+  }
+  // the same properties: the bodies are merged under them
+  assert.equal(union('---\na: 1\n---\nx\n', '---\na: 1\n---\ny\n'), '---\na: 1\n---\nx\ny\n');
+  // properties on one side only are kept
+  assert.equal(union('---\na: 1\n---\nx\n', 'x\nz\n'), '---\na: 1\n---\nx\nz\n');
+  assert.equal(union('x\n', '---\na: 1\n---\nx\ny\n', { localTime: 9, driveTime: 1 }), '---\na: 1\n---\nx\ny\n');
+  // a --- that opens nothing (a rule) is a line like any other
+  assert.equal(union('---\nx\n', '---\ny\n'), '---\nx\ny\n');
+  // CRLF properties
+  assert.equal(union('---\r\na: 1\r\n---\r\nx\r\n', '---\na: 2\n---\nx\ny\n', { localTime: 1, driveTime: 2 }), '---\r\na: 2\r\n---\r\nx\r\ny\r\n');
+});
+
+test('two very different versions: this computer’s middle, then Drive’s lines that it does not have; paragraphs kept apart', () => {
+  // with a limit of 1 edit, the middle is one stretch (what happens past SYNC_UNION_EDITS)
+  assert.equal(union('top\n1\n2\n3\n4\nend\n', 'top\n9\n2\n3\n8\nend\n', { limit: 1 }), 'top\n1\n2\n3\n4\n9\n8\nend\n');
+  // Drive's blank lines between its own paragraphs are kept; none is doubled where a repeated paragraph was left out
+  assert.equal(union('A\n\nB\n', 'B\n\nC\n\nD\n', { limit: 1 }), 'A\n\nB\n\nC\n\nD\n');
+  assert.equal(union('A\n\nB\n\n', 'Z\n\nB\n\nC\n', { limit: 1 }), 'A\n\nB\n\nZ\n\nC\n');
+  // every line of either side is in the result
+  const a = 'one\ntwo\nthree\nfour\n', b = 'five\nthree\nsix\none\n', out = union(a, b, { limit: 2 }).split('\n');
+  for (const l of (a + b).split('\n')) assert.ok(out.includes(l), l);
+});
+
+test('the lines two versions share are lined up as fully as they can be (a longest common subsequence)', () => {
+  const lcs = (a, b) => {
+    const d = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = a[i - 1] === b[j - 1] ? d[i - 1][j - 1] + 1 : Math.max(d[i - 1][j], d[i][j - 1]);
+    return d[a.length][b.length];
+  };
+  let seed = 7;
+  const rand = n => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  for (let t = 0; t < 400; t++) {
+    const a = Array.from({ length: rand(14) }, () => rand(4)), b = Array.from({ length: rand(14) }, () => rand(4));
+    const m = S.syncLineMatches(Int32Array.from(a), Int32Array.from(b), 1000);
+    assert.equal(m.length, lcs(a, b), JSON.stringify([a, b]));
+    m.forEach(([x, y], i) => {
+      assert.equal(a[x], b[y]);
+      if (i) assert.ok(x > m[i - 1][0] && y > m[i - 1][1], 'in order');
+    });
+  }
+  // past the limit: null (the caller takes the middle as one stretch); unrelated texts are known at once
+  assert.equal(S.syncLineMatches(Int32Array.from([1, 2, 3, 4]), Int32Array.from([4, 3, 2, 1]), 2), null);
+  assert.equal(S.syncLineMatches(Int32Array.from([1, 2, 3]), Int32Array.from([4, 5, 6]), 5), null);
+  assert.deepEqual(S.syncLineMatches(Int32Array.from([]), Int32Array.from([1]), 0), []);
+});
+
+test('a long note changed here and there on both sides is merged in its places, quickly', () => {
+  const base = Array.from({ length: 10000 }, (_, i) => `line ${i} of a long chapter`);
+  const a = base.slice(), b = base.slice();
+  for (let i = 0; i < 100; i++) { a[i * 97] = `here ${i}`; b[i * 97 + 5] = `there ${i}`; }
+  const began = Date.now();
+  const out = union(a.join('\n') + '\n', b.join('\n') + '\n').split('\n');
+  assert.ok(Date.now() - began < 10000, `${Date.now() - began} ms`);
+  assert.equal(out.length - 1, 10200);
+  for (let i = 0; i < 100; i++) {
+    assert.equal(out.indexOf(`here ${i}`) + 1, out.indexOf(`line ${i * 97} of a long chapter`), 'this computer’s line just before the one Drive still has');
+    assert.equal(out.indexOf(`there ${i}`), out.indexOf(`line ${i * 97 + 5} of a long chapter`) + 1, 'Drive’s just after this computer’s');
+  }
+});
+
+test('only plain text is merged: notes and text files by extension, not Obsidian’s own, UTF-8 without a NUL, at most 2 MB', () => {
+  for (const n of ['a.md', 'Notes/b.MD', 'c.markdown', 'd.txt', 'e.org', 'f.tex', 'g.rst', 'deep/x y/é.md']) assert.ok(S.syncUnionable(n), n);
+  for (const n of ['a.canvas', 'b.json', 'c.base', 'd.png', 'e.pdf', 'f.excalidraw', 'README', '.obsidian/snippets/x.md', 'x/.obsidian/y.txt', 'a.md.png']) assert.ok(!S.syncUnionable(n), n);
+  assert.equal(S.syncTextOf(Buffer.from('héllo\r\n')), 'héllo\r\n');
+  assert.equal(S.syncTextOf(Buffer.from([0x68, 0x00, 0x69])), null, 'a NUL: not text');
+  assert.equal(S.syncTextOf(Buffer.from([0x63, 0x61, 0x66, 0xe9])), null, 'Latin-1, not UTF-8');
+  assert.equal(S.syncTextOf(Buffer.alloc(S.SYNC_UNION_MAX, 0x61)).length, S.SYNC_UNION_MAX);
+  assert.equal(S.syncTextOf(Buffer.alloc(S.SYNC_UNION_MAX + 1, 0x61)), null, 'over 2 MB');
+  assert.equal(S.SYNC_UNION_MAX, 2 * 1024 * 1024);
+  assert.deepEqual(S.syncMergePlan({ differ: ['a.md', 'p.png', 'c.canvas'], unread: ['b.txt', 'a.md'] }), { notes: ['a.md', 'b.txt'], twice: ['p.png', 'c.canvas'] });
+});
+
+test('keeping a file aside: a copy or the file itself, at its place, a number for a name that is taken, its time kept', t => {
+  const dir = tmp(t, 'vault'), kept = path.join(tmp(t, 'kept'), '2026-11-24');
+  fs.mkdirSync(path.join(dir, 'Book'));
+  fs.writeFileSync(path.join(dir, 'Book', 'ch 1.md'), 'one');
+  const old = new Date('2026-01-02T03:04:05Z');
+  fs.utimesSync(path.join(dir, 'Book', 'ch 1.md'), old, old);
+  const a = S.syncKeepAside(fs, path, kept, dir, 'Book/ch 1.md', false);
+  assert.equal(a, path.join(kept, 'Book', 'ch 1.md'));
+  assert.equal(fs.readFileSync(a, 'utf8'), 'one');
+  assert.equal(fs.statSync(a).mtimeMs, old.getTime());
+  assert.ok(fs.existsSync(path.join(dir, 'Book', 'ch 1.md')), 'a copy leaves the file where it was');
+  const b = S.syncKeepAside(fs, path, kept, dir, 'Book/ch 1.md', true);
+  assert.equal(b, path.join(kept, 'Book', 'ch 1.2.md'));
+  assert.ok(!fs.existsSync(path.join(dir, 'Book', 'ch 1.md')), 'a move takes it out of the vault');
+  assert.equal(fs.readFileSync(b, 'utf8'), 'one');
+});
+
+/* A vault, a pretend Drive (FAKE_RCLONE_FILES) whose folder for the vault is Vaults/Mine, and the pretend rclone. */
+function fakeMerge(t, env) {
+  const drive = tmp(t, 'drive'), dir = tmp(t, 'vault'), record = path.join(tmp(t, 'rec'), 'calls.jsonl');
+  const folder = path.join(drive, 'Vaults', 'Mine');
+  fs.mkdirSync(folder, { recursive: true });
+  const f = fakeApi(t, Object.assign({ FAKE_RCLONE_FILES: drive, FAKE_RCLONE_RECORD: record }, env));
+  signedIn(f.paths);
+  const link = { root: 'my', path: 'Vaults/Mine' };
+  const put = (root, rel, data, when) => {
+    const file = path.join(root, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, data);
+    if (when) fs.utimesSync(file, when, when);
+  };
+  const calls = () => (fs.existsSync(record) ? fs.readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []);
+  const base = more => Object.assign({ api: f.api, fs, path, paths: f.paths, id: 'v1', dir, link, settings: S.syncSettings({}), now: () => Date.now(), pid: process.pid, alive: () => false }, more);
+  return Object.assign(f, { drive, folder, dir, link, put, calls, base, here: rel => fs.readFileSync(path.join(dir, ...rel.split('/')), 'utf8'), has: rel => fs.existsSync(path.join(dir, ...rel.split('/'))) });
+}
+const ago2 = s => new Date(Date.now() - s * 1000);
+
+test('the first sync, merging both sides (pretend rclone): notes merged, other files kept twice, Drive read once before anything changes', async t => {
+  const m = fakeMerge(t);
+  m.put(m.dir, 'Notes/day.md', 'Morning.\nWritten here.\n', ago2(600));
+  m.put(m.folder, 'Notes/day.md', 'Morning.\nWritten in Drive.\n', ago2(300));
+  m.put(m.dir, 'odd.txt', 'one\nhere\n', ago2(50));                   // could not be compared: merged all the same
+  m.put(m.folder, 'odd.txt', 'one\nthere\n', ago2(50));
+  m.put(m.dir, 'pic.png', Buffer.from([1, 2, 3]));
+  m.put(m.folder, 'pic.png', Buffer.from([4, 5, 6]));
+  m.put(m.dir, 'board.canvas', '{"nodes":[1]}');
+  m.put(m.folder, 'board.canvas', '{"nodes":[2]}');
+  m.put(m.dir, 'latin.md', Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));   // not UTF-8 here
+  m.put(m.folder, 'latin.md', 'café\n');
+  m.put(m.dir, 'huge.md', 'x'.repeat(S.SYNC_UNION_MAX + 1));          // too large here: not even read in Drive
+  m.put(m.folder, 'huge.md', 'y\n');
+  m.put(m.dir, 'big there.md', 'small\n');                            // too large in Drive: listed, not copied
+  m.put(m.folder, 'big there.md', 'z'.repeat(S.SYNC_UNION_MAX + 10));
+  m.put(m.dir, 'gone.md', 'still here\n');                            // deleted in Drive since the look: left as it is
+  fs.mkdirSync(path.join(m.folder, 'Sub.md'));
+  m.put(m.dir, 'Sub.md', 'a note here, a folder in Drive\n');         // a folder in Drive: never read as a note
+  const differ = ['Notes/day.md', 'pic.png', 'board.canvas', 'latin.md', 'huge.md', 'big there.md', 'gone.md', 'Sub.md', 'not here any more.md'];
+  const r = await S.syncFirst(m.base({ keep: 'union', differ, unread: ['odd.txt'], taken: [] }));
+  assert.deepEqual(r.merged.sort(), ['Notes/day.md', 'odd.txt']);
+  assert.equal(m.here('Notes/day.md'), 'Morning.\nWritten here.\nWritten in Drive.\n');
+  assert.equal(m.here('odd.txt'), 'one\nhere\nthere\n');
+  assert.deepEqual(r.renamed.map(x => x[0]).sort(), ['big there.md', 'board.canvas', 'huge.md', 'latin.md', 'pic.png'].sort());
+  assert.deepEqual(r.renamed.find(x => x[0] === 'pic.png'), ['pic.png', 'pic.conflict1.png']);
+  assert.ok(!m.has('pic.png') && m.has('pic.conflict1.png') && m.has('board.conflict1.canvas'));
+  assert.equal(m.here('gone.md'), 'still here\n', 'a note no longer in Drive is not renamed: it goes up as it is');
+  assert.ok(m.has('Sub.md') && !m.has('Sub.conflict1.md'), 'nor is one that is a folder in Drive');
+  // the merged note is newer than Drive's version, so that the resync keeps it
+  assert.ok(fs.statSync(path.join(m.dir, 'Notes', 'day.md')).mtimeMs > fs.statSync(path.join(m.folder, 'Notes', 'day.md')).mtimeMs + 1000);
+  // this computer's version from before the merge is kept in the folder of replaced files
+  const kept = path.join(m.paths.kept, 'v1', S.syncStamp(new Date()));
+  assert.equal(fs.readFileSync(path.join(kept, 'Notes', 'day.md'), 'utf8'), 'Morning.\nWritten here.\n');
+  // Drive was listed once and read once (only the notes), then the check file, then one resync that keeps the newer
+  const calls = m.calls();
+  assert.deepEqual(calls.map(c => c[0]), ['lsjson', 'copy', 'copyto', 'bisync']);
+  assert.ok(calls[0].includes('--files-from-raw') && calls[0].includes('-R') && calls[0].includes('--files-only'));
+  assert.ok(calls[1].includes('--files-from-raw') && !calls[1].includes('--max-size'));
+  assert.deepEqual(calls[3].slice(-3), ['--resync', '--resync-mode', 'newer']);
+  assert.ok(!fs.existsSync(path.join(m.paths.work, 'v1.merge')) && !fs.existsSync(path.join(m.paths.work, 'v1.merge.txt')), 'the copies of Drive’s versions are removed');
+});
+
+test('the first sync, merging, when Drive cannot be read: nothing in the vault is changed', async t => {
+  const fail = path.join(tmp(t, 'fail'), 'fail.json');
+  fs.writeFileSync(fail, JSON.stringify({ code: 1, lines: [{ level: 'error', msg: 'Failed to lsjson: dial tcp: lookup www.googleapis.com: no such host' }] }));
+  const m = fakeMerge(t, { FAKE_RCLONE_FAIL: fail });
+  m.put(m.dir, 'a.md', 'here\n'); m.put(m.dir, 'p.png', 'x');
+  await assert.rejects(S.syncFirst(m.base({ keep: 'union', differ: ['a.md', 'p.png'] })), e => e.kind === 'network');
+  assert.equal(m.here('a.md'), 'here\n');
+  assert.ok(m.has('p.png') && !m.has('p.conflict1.png'), 'nothing was renamed either');
+  assert.ok(!fs.existsSync(path.join(m.paths.locks, 'v1.lock')), 'the lock is let go');
+});
+
+test('“Merge with Google Drive” (pretend rclone): it looks, says what it will do, and merges on the writer’s word', async t => {
+  const check = path.join(tmp(t, 'check'), 'check.txt');
+  fs.writeFileSync(check, '= same.md\n+ only here.md\n- only there.md\n* Chapter.md\n* cover.jpg\n! notes.txt\n= .scriptorium-sync\n- old.conflict1.jpg\n');
+  const m = fakeMerge(t, { FAKE_RCLONE_CHECK: check });
+  m.put(m.dir, 'Chapter.md', '# One\n\nIt began here.\n', ago2(100));
+  m.put(m.folder, 'Chapter.md', '# One\n\nIt began in Drive.\n', ago2(200));
+  m.put(m.dir, 'cover.jpg', 'jpeg here'); m.put(m.folder, 'cover.jpg', 'jpeg there');
+  m.put(m.dir, 'notes.txt', 'a\n'); m.put(m.folder, 'notes.txt', 'b\n');
+  const pv = await S.syncPreview(m.base({}));
+  assert.deepEqual({ onlyLocal: pv.onlyLocal, onlyDrive: pv.onlyDrive, same: pv.same, differ: pv.differ, unread: pv.unread, taken: pv.taken },
+    { onlyLocal: 1, onlyDrive: 2, same: 1, differ: ['Chapter.md', 'cover.jpg'], unread: ['notes.txt'], taken: ['old.conflict1.jpg'] });
+  assert.deepEqual(S.syncMergePlan(pv), { notes: ['Chapter.md', 'notes.txt'], twice: ['cover.jpg'] });
+  assert.deepEqual(m.calls().map(c => c[0]), ['size', 'size', 'check'], 'looking changes nothing');
+  const r = await S.syncFirst(m.base({ keep: 'union', differ: pv.differ, unread: pv.unread, taken: pv.taken }));
+  assert.equal(m.here('Chapter.md'), '# One\n\nIt began here.\nIt began in Drive.\n');
+  assert.equal(m.here('notes.txt'), 'a\nb\n');
+  assert.deepEqual(r.renamed, [['cover.jpg', 'cover.conflict1.jpg']]);
+  assert.deepEqual(r.merged, ['Chapter.md', 'notes.txt']);
+  assert.equal(S.syncSummaryText(r.summary), 'nothing had changed', 'the pretend resync copies nothing');
+  const sync = m.calls().filter(c => c[0] === 'bisync');
+  assert.equal(sync.length, 1);
+  assert.ok(sync[0].includes('--resync') && sync[0].includes('newer'));
+});
+
+test('notes changed on both sides between syncs: merged when the setting says so, kept twice otherwise (pretend rclone)', async t => {
+  for (const conflicts of ['merge', 'both']) {
+    const runs = path.join(tmp(t, 'runs'), 'runs.json');
+    const m = fakeMerge(t, { FAKE_RCLONE_BISYNC: runs });
+    const settings = S.syncSettings({ sync: { conflicts } });
+    // what the run left (as rclone 1.76.0 leaves it): Drive's version won, this computer's was renamed beside it
+    m.put(m.dir, S.SYNC_SENTINEL, 'x');
+    m.put(m.dir, 'Book/Chapter.md', 'Title\nshared\nfrom the other computer\n', ago2(10));
+    m.put(m.dir, 'Book/Chapter.conflict1.md', 'Title\nshared\nwritten here\n', ago2(60));
+    m.put(m.dir, 'pic.png', 'new'); m.put(m.dir, 'pic.conflict1.png', 'old');
+    fs.writeFileSync(runs, JSON.stringify([[
+      { level: 'notice', msg: '- WARNING           New or changed in both paths                - Book/Chapter.md' },
+      { level: 'info', msg: 'The winner is: Path2', object: 'Book/Chapter.md' },
+      { level: 'notice', msg: `- Path1             Renaming Path1 copy                         - ${m.dir}/Book/Chapter.conflict1.md` },
+      { level: 'notice', msg: '- Path2             Not renaming Path2 copy, as it was determined the winner - /drive/Vaults/Mine/Book/Chapter.md' },
+      { level: 'notice', msg: '- WARNING           New or changed in both paths                - pic.png' },
+      { level: 'info', msg: 'The winner is: Path2', object: 'pic.png' },
+      { level: 'notice', msg: `- Path1             Renaming Path1 copy                         - ${m.dir}/pic.conflict1.png` },
+      { level: 'info', msg: 'Bisync successful' },
+    ], [{ level: 'info', msg: 'Copied (replaced existing)', object: 'Book/Chapter.md' }, { level: 'info', msg: 'Deleted', object: 'Book/Chapter.conflict1.md' }, { level: 'info', msg: 'Bisync successful' }]]));
+    fs.mkdirSync(m.paths.filters, { recursive: true });
+    fs.writeFileSync(path.join(m.paths.filters, 'v1.txt'), S.syncFilters(settings));   // a plain run, not a first one
+    const r = await S.syncOnce(m.base({ settings, link: Object.assign({}, m.link, { first: 'yes' }) }));
+    const kept = path.join(m.paths.kept, 'v1', S.syncStamp(new Date()));
+    if (conflicts === 'merge') {
+      assert.equal(m.here('Book/Chapter.md'), 'Title\nshared\nwritten here\nfrom the other computer\n', 'this computer’s lines first');
+      assert.ok(!m.has('Book/Chapter.conflict1.md'), 'the other copy leaves the vault…');
+      assert.equal(fs.readFileSync(path.join(kept, 'Book', 'Chapter.conflict1.md'), 'utf8'), 'Title\nshared\nwritten here\n', '…for the folder of replaced files');
+      assert.ok(m.has('pic.conflict1.png'), 'a picture keeps both copies');
+      assert.deepEqual(r.summary.merged, ['Book/Chapter.md']);
+      assert.equal(m.calls().filter(c => c[0] === 'bisync').length, 2, 'one more run carries the merge to Drive at once');
+      assert.equal(S.syncSummaryText(r.summary), '1 note changed on both sides (merged), 1 file changed on both sides (both versions kept)');
+    } else {
+      assert.ok(m.has('Book/Chapter.conflict1.md') && m.has('pic.conflict1.png'), 'both copies kept, as before');
+      assert.equal(m.here('Book/Chapter.md'), 'Title\nshared\nfrom the other computer\n');
+      assert.equal(r.summary.merged, undefined);
+      assert.equal(m.calls().filter(c => c[0] === 'bisync').length, 1);
+      assert.equal(S.syncSummaryText(r.summary), '2 files changed on both sides (both versions kept)');
+    }
+  }
+});
+
+test('which copy is which, from the run’s log: the winner’s side, the renamed copy, names in folders told apart', () => {
+  const N = msg => L(msg, 'notice'), W = (side, object) => ({ level: 'info', msg: `The winner is: Path${side}`, object, stats: null });
+  const lines = [
+    N('- WARNING           New or changed in both paths                - a.md'), W(1, 'a.md'),
+    N('- Path1             Not renaming Path1 copy, as it was determined the winner - /v/a.md'),
+    N('- Path2             Renaming Path2 copy                         - scriptorium-drive:Vaults/Mine/a.conflict1.md'),
+    W(2, 'x/a.md'), N('- Path1             Renaming Path1 copy                         - C:\\Users\\Ada\\Vault/x/a.conflict3.md'),
+    W(2, 'sub/c d.md'), N('- Path1             Renaming Path1 copy                         - /v/sub/c d.conflict1.md'),
+    W(1, 'no rename.md'),
+    N('- Path1             Renaming Path1 copy                         - /v/both.conflict1.md'), N('- Path2             Renaming Path2 copy                         - /d/both.conflict2.md'),
+  ];
+  assert.deepEqual(S.syncConflictPairs(lines).sort((p, q) => p.name.localeCompare(q.name)), [
+    { name: 'a.md', loser: 'a.conflict1.md', mine: 'name' },
+    { name: 'sub/c d.md', loser: 'sub/c d.conflict1.md', mine: 'loser' },
+    { name: 'x/a.md', loser: 'x/a.conflict3.md', mine: 'loser' },
+  ]);
+  assert.deepEqual(S.syncConflictPairs([]), []);
+});
+
+test('two copies are merged only when both are plain text as the run left them; the name taken in the folder of replaced files gets a number', t => {
+  const dir = tmp(t, 'vault'), kept = path.join(tmp(t, 'kept'), 'day');
+  const put = (rel, data) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), data); };
+  put('a.md', 'x\nmine won\n'); put('a.conflict1.md', 'x\ntheirs lost\n');
+  put('b.md', 'b\n'); put('b.conflict1.md', Buffer.from([0x62, 0xff, 0x0a]));
+  put('c.md', 'c\n');                                                   // its copy is gone already
+  put('d.json', '{}'); put('d.conflict1.json', '[]');
+  fs.mkdirSync(kept, { recursive: true }); fs.writeFileSync(path.join(kept, 'a.conflict1.md'), 'an older one');
+  const done = S.syncMergeConflicts(fs, path, dir, kept, [
+    { name: 'a.md', loser: 'a.conflict1.md', mine: 'name' }, { name: 'b.md', loser: 'b.conflict1.md', mine: 'name' },
+    { name: 'c.md', loser: 'c.conflict1.md', mine: 'loser' }, { name: 'd.json', loser: 'd.conflict1.json', mine: 'name' },
+  ]);
+  assert.deepEqual(done, ['a.md']);
+  assert.equal(fs.readFileSync(path.join(dir, 'a.md'), 'utf8'), 'x\nmine won\ntheirs lost\n');
+  assert.equal(fs.readFileSync(path.join(kept, 'a.conflict1.2.md'), 'utf8'), 'x\ntheirs lost\n');
+  assert.equal(fs.readFileSync(path.join(kept, 'a.conflict1.md'), 'utf8'), 'an older one');
+  for (const rel of ['b.conflict1.md', 'c.md', 'd.conflict1.json']) assert.ok(fs.existsSync(path.join(dir, rel)), rel);
+});
+
+test('Drive’s versions are read in two calls: a listing, then a copy of the small ones; the list of names is removed', async t => {
+  const m = fakeMerge(t);
+  m.put(m.folder, 'a.md', 'A'); m.put(m.folder, '#hash and  spaces .md', 'H'); m.put(m.folder, 'big.md', 'x'.repeat(50));
+  fs.mkdirSync(path.join(m.folder, 'dir.md'));
+  const into = path.join(tmp(t, 'into'), 'copies'), list = path.join(path.dirname(into), 'list.txt');
+  fs.mkdirSync(into);
+  const got = await m.api.fetch(m.link, ['a.md', '#hash and  spaces .md', 'big.md', 'dir.md', 'missing.md'], into, list, 10);
+  assert.deepEqual(Array.from(got.keys()).sort(), ['#hash and  spaces .md', 'a.md', 'big.md']);
+  assert.deepEqual(['a.md', '#hash and  spaces .md', 'big.md'].map(n => got.get(n).copied), [true, true, false]);
+  assert.equal(fs.readFileSync(path.join(into, '#hash and  spaces .md'), 'utf8'), 'H');
+  assert.ok(Math.abs(got.get('a.md').mtime - fs.statSync(path.join(m.folder, 'a.md')).mtimeMs) < 2);
+  assert.ok(!fs.existsSync(list));
+  assert.deepEqual(m.calls().map(c => c[0]), ['lsjson', 'copy']);
 });

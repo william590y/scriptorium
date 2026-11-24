@@ -1751,6 +1751,12 @@ class ScriptoriumSettings extends PluginSettingTab {
       .setDesc('A sync stops and asks if more than this share of the files (in percent) disappeared on one side since the last sync. rclone’s own default is 50.')
       .addText(t => t.setPlaceholder(String(SYNC_DEFAULTS.maxDelete)).setValue(String(sync.maxDelete)).onChange(v => { if (/^\d+$/.test(v.trim())) void setSync({ maxDelete: Number(v) }); }));
     new Setting(el)
+      .setName('Notes changed on both computers between syncs')
+      .setDesc('Keep both copies: the one changed last keeps the name and the other is kept beside it as “name.conflict1.md”, for you to compare. ' +
+        'Merge them: the two are merged line by line into the note (lines both have appear once; where they differ, this computer’s lines come first), and the other copy goes to Scriptorium’s folder of replaced files for thirty days. ' +
+        'Only plain-text notes (.md, .txt and the like) up to 2 MB are merged; other files always keep both copies. To merge everything once, now, run “Merge with Google Drive”.')
+      .addDropdown(d => d.addOption('both', 'Keep both copies').addOption('merge', 'Merge them').setValue(sync.conflicts).onChange(v => setSync({ conflicts: v })));
+    new Setting(el)
       .setName('rclone')
       .setDesc(`The program that does the syncing (rclone.org, MIT licence; Scriptorium was written for version ${RCLONE.version}). Empty: Scriptorium looks for it, and offers to download it. Or the path to an rclone of your own. This is kept for this computer only.`)
       .addText(t => t.setPlaceholder('found by itself').setValue(kit.device().rclone || '').onChange(v => { kit.setDevice({ rclone: v.trim() }); plugin.rcloneFound = null; }))
@@ -3186,6 +3192,13 @@ function setupDialog() {
        in that folder too (sync-vaults.json), not in the vault: another computer makes its own choice.
      - The first sync is a `bisync --resync` after a page that says what is on each side. A file that differs on the
        two sides is kept twice by default. After that every run is a plain `bisync` with the guards below.
+     - Merging both sides (a union; see "Merging both sides" below): the first sync's fourth choice, and the command
+       "Merge with Google Drive" for a vault that already syncs, keep everything from both sides and delete nothing.
+       A note that differs is merged line by line into one that holds the lines of both (syncUnionText); any other
+       file that differs is kept twice. Drive's versions are read through rclone before anything is changed, and
+       the merged notes are then carried to Drive by the same `--resync` as a first sync. The setting "Notes changed
+       on both computers between syncs: Merge them" does the same, after a regular run, to the two copies that run
+       kept of a note changed on both sides. Off by default: both copies are kept, as before.
      - Guards: one run at a time (a lock file); a check file (.scriptorium-sync) that must be on both sides, so that
        a Drive folder that was emptied, moved or cannot be reached, or a vault whose disk is not there, stops the run
        instead of deleting the other side (rclone also refuses an empty side by itself); a limit on how much one run
@@ -3266,6 +3279,9 @@ function syncSettings(saved) {
     obsidian: d.obsidian !== false,
     maxDelete: num(d.maxDelete, 1, 100, SYNC_DEFAULTS.maxDelete),
     keepDays: num(d.keepDays, 1, 365, SYNC_DEFAULTS.keepDays),
+    // A note changed on both sides between two runs: 'both' copies are kept (as in every version before), or they
+    // are 'merge'd (syncMergeConflicts). Not in SYNC_DEFAULTS, which is what 1.2.3 saved and is kept as it was.
+    conflicts: d.conflicts === 'merge' ? 'merge' : 'both',
   };
 }
 
@@ -3857,8 +3873,303 @@ function syncSummaryText(s) {
   if (s.copied) parts.push(`${driveCount(s.copied, 'new file')} copied`);
   if (s.replaced) parts.push(`${driveCount(s.replaced, 'file')} updated`);
   if (s.deleted) parts.push(`${driveCount(s.deleted, 'file')} removed`);
-  if (s.conflicts.length) parts.push(`${driveCount(s.conflicts.length, 'file')} changed on both sides (both versions kept)`);
+  const merged = s.merged || [], kept = s.conflicts.filter(n => !merged.includes(n));
+  if (merged.length) parts.push(`${driveCount(merged.length, 'note')} changed on both sides (merged)`);
+  if (kept.length) parts.push(`${driveCount(kept.length, 'file')} changed on both sides (both versions kept)`);
   return parts.length ? parts.join(', ') : 'nothing had changed';
+}
+
+/* ---------- Merging both sides ---------- */
+
+/* "Merge both sides" keeps everything from both sides and deletes nothing. What is on one side only is copied to the
+   other, as every first sync does. A note that differs is merged line by line into one note that holds the union of
+   the two (syncUnionText): the lines both versions share appear once, in order; where they differ, this computer's
+   lines come first, then Drive's; no conflict markers are written. Any other file that differs is kept twice, as
+   "Keep both" keeps it. Only plain text is merged: the extensions of SYNC_UNION_TEXT (not canvases, bases or JSON,
+   whose lines cannot be mixed, and nothing in .obsidian), valid UTF-8 without a NUL, at most SYNC_UNION_MAX bytes
+   on each side. The same merge is used for the two copies a regular run keeps of a note changed on both sides, when
+   the setting asks for it (syncMergeConflicts). */
+const SYNC_UNION_TEXT = /\.(?:md|markdown|mdown|mkd|mkdn|txt|text|org|rst|adoc|tex)$/i;
+const SYNC_UNION_MAX = 2 * 1024 * 1024;
+/* Past this many lines removed and added (after what the two have in common at the start and at the end) the two
+   versions are not lined up line by line: the middle of each is then one stretch that differs. Measured on a note of
+   30,000 lines with 400 lines changed here and there on each side (1,600 edits): lined up in about 0.15 s. The
+   search keeps about 4 * limit² bytes at most (64 MB), and only for two versions that share many lines in another
+   order; two unrelated versions are known at once to be too different (see syncLineMatches). */
+const SYNC_UNION_EDITS = 4000;
+
+/* Whether a file (its path in the vault, with /) is one whose versions are merged rather than kept twice. */
+function syncUnionable(rel) {
+  const r = String(rel || '');
+  return SYNC_UNION_TEXT.test(r) && !/(?:^|\/)\.obsidian\//.test(r);
+}
+
+/* The text of a file's bytes, or null when they are not plain text that can be merged: larger than SYNC_UNION_MAX,
+   with a NUL in them, or not UTF-8 (a merge would change the bytes it could not read). */
+function syncTextOf(bytes) {
+  if (!bytes || bytes.length > SYNC_UNION_MAX || bytes.indexOf(0) >= 0) return null;
+  const text = bytes.toString('utf8');
+  return Buffer.from(text, 'utf8').equals(bytes) ? text : null;
+}
+
+/* A text as lines: {lines (without their ends), eol ('\r\n' when most lines end so, '\n', or '' for one line with no
+   end), end (the last line has an end)}. */
+function syncSplitLines(text) {
+  if (!text) return { lines: [], eol: '', end: false };
+  const all = (text.match(/\n/g) || []).length, crlf = (text.match(/\r\n/g) || []).length;
+  const lines = text.split(/\r?\n/), end = lines[lines.length - 1] === '';
+  if (end) lines.pop();
+  return { lines, eol: !all ? '' : crlf * 2 > all ? '\r\n' : '\n', end };
+}
+
+/* How many lines at the top are the note's properties (YAML front matter between two lines of ---), or 0. */
+function syncFrontmatter(lines) {
+  if (!lines.length || lines[0].trimEnd() !== '---') return 0;
+  for (let i = 1; i < lines.length; i++) if (lines[i].trimEnd() === '---') return i + 1;
+  return 0;
+}
+
+/* The lines that two versions share, lined up: [[i, j]] (a[i] is b[j]) in order, as many as there can be (a longest
+   common subsequence, by Myers' O(ND) algorithm: "An O(ND) difference algorithm and its variations", 1986). a and b
+   are arrays of numbers (each line given a number, the same for the same text). null when more than `limit` lines
+   would have to be removed and added: the two are too different to be lined up quickly. Every point it keeps stays
+   inside the two texts (x <= a.length, y <= b.length), so the end it finds is the true end. */
+function syncLineMatches(a, b, limit) {
+  const n = a.length, m = b.length;
+  if (!n || !m) return [];
+  // At least n + m - 2 * (the lines they have in common, counted with repeats) edits are needed: when that is past the
+  // limit already, the search is not started.
+  const count = new Map();
+  for (const x of a) count.set(x, (count.get(x) || 0) + 1);
+  let common = 0;
+  for (const y of b) { const c = count.get(y) || 0; if (c) { common++; count.set(y, c - 1); } }
+  if (n + m - 2 * common > limit) return null;
+  const max = Math.min(n + m, limit), off = max + 1;
+  const v = new Int32Array(2 * max + 3).fill(-1), trace = [];
+  // how the furthest path on diagonal k (x - y = k) with d edits is reached from the paths with d - 1 edits, whose
+  // ends are got(k): down from diagonal k + 1 (a line of b), or right from k - 1 (a line of a). [x, from] or null.
+  const reach = (got, k) => {
+    let x = -1, from = 0;
+    const down = got(k + 1), right = got(k - 1);
+    if (down >= 0 && down - k <= m) { x = down; from = k + 1; }
+    if (right >= 0 && right + 1 <= n && right + 1 > x) { x = right + 1; from = k - 1; }
+    return x < 0 ? null : [x, from];
+  };
+  for (let d = 0; d <= max; d++) {
+    for (let k = -d; k <= d; k += 2) {
+      let x = 0;
+      if (d > 0) {
+        const r = reach(kk => v[off + kk], k);
+        if (!r) { v[off + k] = -1; continue; }
+        x = r[0];
+      }
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[off + k] = x;
+      if (x === n && y === m) {
+        // back from the end: each edit is found again as it was chosen, and the lines between edits are shared
+        const pairs = [];
+        for (let e = d; e > 0; e--) {
+          const row = trace[e - 1], kk = x - y;
+          const [px, from] = reach(q => (q < -(e - 1) || q > e - 1 ? -1 : row[q + e - 1]), kk);
+          while (x > px) { x--; y--; pairs.push([x, y]); }
+          x = from === kk + 1 ? px : px - 1;
+          y = x - from;
+        }
+        while (x > 0) { x--; y--; pairs.push([x, y]); }
+        return pairs.reverse();
+      }
+    }
+    trace.push(v.slice(off - d, off + d + 1));
+  }
+  return null;
+}
+
+/* Adds one stretch where the two differ to `out`: this computer's lines, then Drive's. A line of Drive's that this
+   computer's stretch has as well is not written again (as often as it is there: a line each has twice is written
+   twice), and a blank line is not doubled where such a line was left out. Blank lines are never taken as the same
+   line, so that Drive's paragraphs stay apart. Lined up by syncLineMatches, two stretches never share a line; they
+   do when the middle of two very different versions is taken as one stretch. */
+function syncUnionStretch(out, mine, theirs) {
+  for (const l of mine) out.push(l);
+  if (!theirs.length) return;
+  const have = new Map();
+  for (const l of mine) if (l.trim()) have.set(l, (have.get(l) || 0) + 1);
+  let dropped = false;
+  for (const l of theirs) {
+    const n = l.trim() ? have.get(l) || 0 : 0;
+    if (n) { have.set(l, n - 1); dropped = true; continue; }
+    if (!l.trim() && dropped && out.length && !out[out.length - 1].trim()) continue;
+    out.push(l);
+    dropped = false;
+  }
+}
+
+/* The union of two lists of lines, this computer's (a) and Drive's (b): what they share once, in order, and each
+   stretch where they differ as syncUnionStretch writes it. */
+function syncUnionLines(a, b, limit) {
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const A = a.slice(p, a.length - s), B = b.slice(p, b.length - s);
+  const ids = new Map(), id = t => { let i = ids.get(t); if (i === undefined) { i = ids.size; ids.set(t, i); } return i; };
+  const pairs = syncLineMatches(Int32Array.from(A, id), Int32Array.from(B, id), limit) || [];
+  const out = a.slice(0, p);
+  let i = 0, j = 0;
+  for (const [x, y] of pairs) {
+    syncUnionStretch(out, A.slice(i, x), B.slice(j, y));
+    out.push(A[x]);
+    i = x + 1; j = y + 1;
+  }
+  syncUnionStretch(out, A.slice(i), B.slice(j));
+  return out.concat(a.slice(a.length - s));
+}
+
+/* One note made of two versions of it: this computer's (`local`) and Drive's (`drive`), as text. The lines both
+   share appear once, in order; where they differ, this computer's lines come first, then Drive's (syncUnionLines).
+   The note's properties (YAML front matter) are not mixed line by line, since a key written twice breaks them: when
+   the two differ, the block of the version changed last is kept whole (opts.localTime and opts.driveTime, in ms;
+   this computer's when they are not known or equal), and when only one version has properties, they are kept. The
+   ends of the lines (LF or CRLF), whether the last line has one, and a byte-order mark are this computer's (Drive's
+   when this computer's version is empty or one line without an end). opts.limit: see SYNC_UNION_EDITS. */
+function syncUnionText(local, drive, opts) {
+  const o = opts || {};
+  const mine = String(local), theirs = String(drive);
+  if (mine === theirs) return mine;
+  const bom = mine.charCodeAt(0) === 0xfeff ? '﻿' : '';
+  const A = syncSplitLines(mine.slice(bom.length)), B = syncSplitLines(theirs.replace(/^﻿/, ''));
+  const fa = syncFrontmatter(A.lines), fb = syncFrontmatter(B.lines);
+  const front = fa && fb ? (Number(o.driveTime) > Number(o.localTime) ? B.lines.slice(0, fb) : A.lines.slice(0, fa))
+    : fa ? A.lines.slice(0, fa) : B.lines.slice(0, fb);
+  const lines = front.concat(syncUnionLines(A.lines.slice(fa), B.lines.slice(fb), o.limit || SYNC_UNION_EDITS));
+  const eol = A.eol || B.eol || '\n', end = A.lines.length ? A.end : B.end;
+  return bom + lines.join(eol) + (end && lines.length ? eol : '');
+}
+
+/* Keeps a file of the vault in the folder of replaced files (`kept`: Scriptorium's folder for this vault and day,
+   the one --backup-dir1 fills), at its place in the vault; a name already taken there gets a number ("note.2.md").
+   move: the file leaves the vault; otherwise a copy is kept. Its time is kept. Returns where it is kept. */
+function syncKeepAside(fs, path, kept, dir, rel, move) {
+  const parts = rel.split('/'), name = parts.pop(), dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+  const from = path.join(dir, ...rel.split('/'));
+  let to = path.join(kept, ...parts, name);
+  for (let n = 2; fs.existsSync(to); n++) to = path.join(kept, ...parts, `${stem}.${n}${ext}`);
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  const st = fs.statSync(from);
+  if (move) {
+    try { fs.renameSync(from, to); return to; } catch (e) { if (e.code !== 'EXDEV') throw e; }   // another disk: copied below
+  }
+  fs.copyFileSync(from, to);
+  try { fs.utimesSync(to, st.atime, st.mtime); } catch (e) { /* the time is a nicety */ }
+  if (move) fs.unlinkSync(from);
+  return to;
+}
+
+/* What merging both sides will do with the files that differ (syncPreview's differ and unread, a file that could not
+   be compared being taken as one that differs): {notes: merged line by line, twice: kept twice}. Whether a note can be
+   merged is known for sure only once both versions are read: one that is larger than SYNC_UNION_MAX, or not UTF-8,
+   is kept twice instead. */
+function syncMergePlan(pv) {
+  const all = Array.from(new Set((pv.differ || []).concat(pv.unread || [])));
+  return { notes: all.filter(syncUnionable), twice: all.filter(n => !syncUnionable(n)) };
+}
+
+/* Reads both versions of each file in `rels` (names in the vault, which are the names in the Drive folder) and works
+   out the merge, changing nothing: {merges: [{rel, text, theirs (the time of Drive's version, ms)}], twice: [names
+   kept twice], gone: [names no longer in Drive]}. Drive's versions of the notes are read through rclone (api.fetch:
+   one listing, then one copy into a folder of Scriptorium's own, which is removed afterwards). A file that is no
+   longer on this computer is left out (Drive's comes down); one that is no longer in Drive is left as it is (it goes
+   up). o: {api, fs, path, paths, id, dir, link, rels, signal}. */
+async function syncUnionPlan(o) {
+  const { fs, path } = o;
+  const merges = [], twice = [], gone = [];
+  const mine = rel => path.join(o.dir, ...rel.split('/'));
+  const size = file => { try { const st = fs.statSync(file); return st.isFile() ? st.size : -1; } catch (e) { return -1; } };
+  const notes = o.rels.filter(rel => syncUnionable(rel) && !/[\r\n]/.test(rel) && size(mine(rel)) >= 0 && size(mine(rel)) <= SYNC_UNION_MAX);
+  const asked = new Set(notes);
+  const into = path.join(o.paths.work, `${o.id}.merge`), list = path.join(o.paths.work, `${o.id}.merge.txt`);
+  try {
+    let drive = new Map();
+    if (notes.length) {
+      fs.rmSync(into, { recursive: true, force: true });
+      fs.mkdirSync(into, { recursive: true });
+      drive = await o.api.fetch(o.link, notes, into, list, SYNC_UNION_MAX, o.signal);
+    }
+    for (const rel of o.rels) {
+      if (size(mine(rel)) < 0) continue;
+      const theirs = drive.get(rel);
+      if (asked.has(rel) && !theirs) { gone.push(rel); continue; }
+      let text = null;
+      if (theirs && theirs.copied) {
+        try {
+          const copy = path.join(into, ...rel.split('/'));
+          const a = syncTextOf(fs.readFileSync(mine(rel))), b = syncTextOf(fs.readFileSync(copy));
+          if (a !== null && b !== null) text = syncUnionText(a, b, { localTime: fs.statSync(mine(rel)).mtimeMs, driveTime: theirs.mtime });
+        } catch (e) { text = null; }
+      }
+      if (text === null) twice.push(rel); else merges.push({ rel, text, theirs: theirs.mtime });
+    }
+  } finally {
+    try { fs.rmSync(into, { recursive: true, force: true }); } catch (e) { /* removed the next time */ }
+    try { fs.unlinkSync(list); } catch (e) { /* never written */ }
+  }
+  return { merges, twice, gone };
+}
+
+/* The two copies that a regular run kept of each note changed on both sides, from its log. With --conflict-resolve
+   newer and --conflict-loser num, bisync says "New or changed in both paths - a.md", then "The winner is: Path2"
+   (the note's name is the line's object), then "Renaming Path1 copy - <Path1's folder>/a.conflict1.md" for the
+   other copy (rclone 1.76.0, seen in rclone-real.test.js). Returns [{name (the copy that kept the name), loser (the
+   copy renamed beside it), mine ('name' when this computer's version (Path1) kept the name, else 'loser')}]. A note
+   for which the log does not say all of this (no winner, both copies renamed) is left out: both are kept. Longer
+   names are matched first, so that "x/a.md" and "a.md" changed in the same run are told apart. */
+function syncConflictPairs(lines) {
+  const winners = new Map(), renames = [];
+  for (const l of lines || []) {
+    const w = /^The winner is: Path([12])\s*$/.exec(l.msg);
+    if (w && l.object) winners.set(l.object, w[1]);
+    const r = /Renaming Path([12]) copy\s+-\s+(.+?)\s*$/.exec(l.msg);
+    if (r) renames.push({ side: r[1], at: r[2].replace(/\\/g, '/'), used: false });
+  }
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const out = [];
+  for (const [name, side] of Array.from(winners).sort((x, y) => y[0].length - x[0].length)) {
+    const slash = name.lastIndexOf('/'), base = name.slice(slash + 1), dot = base.lastIndexOf('.');
+    const stem = name.slice(0, slash + 1) + (dot > 0 ? base.slice(0, dot) : base), ext = dot > 0 ? base.slice(dot) : '';
+    const re = new RegExp(`(?:^|/)(${esc(stem)}\\.conflict\\d+${esc(ext)})$`);
+    const hits = renames.filter(x => !x.used && x.side !== side && re.test(x.at));
+    if (hits.length !== 1) continue;
+    hits[0].used = true;
+    out.push({ name, loser: re.exec(hits[0].at)[1], mine: side === '1' ? 'name' : 'loser' });
+  }
+  return out;
+}
+
+/* Merges each pair of copies (syncConflictPairs) that are plain-text notes: the note under the name gets the lines of
+   both (this computer's version first, as in every merge), and the renamed copy moves to the folder of replaced files
+   (kept). The run that follows (syncOnce makes it at once) carries the merged note to Drive and removes the copy there.
+   A pair that is not plain text, is too large, or is no longer as the run left it, stays as two copies. Returns the
+   names of the notes merged. */
+function syncMergeConflicts(fs, path, dir, kept, pairs) {
+  const done = [];
+  for (const p of pairs || []) {
+    if (!syncUnionable(p.name)) continue;
+    const named = path.join(dir, ...p.name.split('/')), other = path.join(dir, ...p.loser.split('/'));
+    try {
+      const a = fs.statSync(named), b = fs.statSync(other);
+      if (!a.isFile() || !b.isFile()) continue;
+      const x = syncTextOf(fs.readFileSync(named)), y = syncTextOf(fs.readFileSync(other));
+      if (x === null || y === null) continue;
+      const ours = p.mine === 'name';
+      const text = syncUnionText(ours ? x : y, ours ? y : x, { localTime: (ours ? a : b).mtimeMs, driveTime: (ours ? b : a).mtimeMs });
+      if (text !== x) fs.writeFileSync(named, text);
+      syncKeepAside(fs, path, kept, dir, p.loser, true);
+      done.push(p.name);
+    } catch (e) { /* left as two copies */ }
+  }
+  return done;
 }
 
 /* ---------- Failures, in plain words ---------- */
@@ -3924,7 +4235,8 @@ function syncExplain(r, what) {
   if (has(/unknown flag|unknown command|unknown shorthand flag|invalid argument/i)) return P('rclone', 'This rclone does not understand what Scriptorium asked of it.', `It is older or newer than the version Scriptorium was written for (${RCLONE.version}).`, 'In Settings → Scriptorium, clear the path to rclone and let Scriptorium download its own.');
   if (what === 'sign-in') return P('connect', 'The sign-in did not finish.', 'Google’s page was closed, or Google refused (see what the page in the browser said).', 'Try again. If Google’s page said “Access blocked” or “deleted_client”, use a client ID of your own.');
   if (what === 'version') return P('rclone', 'That file does not behave like rclone.', 'It did not answer the question “which version are you?”.', 'Give the path to rclone itself (rclone.exe on Windows) in Settings → Scriptorium, or clear it and let Scriptorium download rclone.');
-  return P('unknown', what === 'list' ? 'The folders in Google Drive could not be listed.' : what === 'copy' ? 'The vault could not be copied from Google Drive.' : 'The sync stopped before it finished.',
+  return P('unknown', what === 'list' ? 'The folders in Google Drive could not be listed.' : what === 'copy' ? 'The vault could not be copied from Google Drive.'
+    : what === 'read' ? 'Drive’s versions of the notes to be merged could not be read, so nothing was changed.' : 'The sync stopped before it finished.',
     'rclone reported a problem that Scriptorium does not recognise.', 'Choose “Sync now” to try again: an interrupted sync is picked up where it stopped. If it happens again, copy the diagnostic report (it has rclone’s own words, without your sign-in) and ask for help.');
 }
 
@@ -4024,6 +4336,38 @@ function rcloneApi(o) {
       await must('copy', ['copy', t.fs, local, '--filter-from', filters, '--drive-skip-gdocs', '--create-empty-src-dirs', '--stats', '1s', '-v'].concat(SYNC_TRANSFER, t.flags), {
         signal, timeout: 0, onLine: l => { if (l.stats && onStats) onStats(l.stats); },
       });
+    },
+    /* Drive's versions of some files of the Drive folder (paths in it, with /), for a merge: Map path -> {size,
+       mtime (ms), copied}. They are listed first, in one call: a file that is not there (or is a folder) is not in
+       the map, and one larger than `max` bytes is listed but not read. The others are copied, in one more call, into
+       the local folder `into`, as they are and with Drive's times. Two calls however many files there are; `rclone
+       cat`, one call per file, would print a folder's every file for a name that has become a folder. list: a file
+       for the names, which rclone reads one per line exactly as they are (--files-from-raw: a name may start with #
+       or a space); names with a line break in them cannot be given so and are left out by the caller. */
+    async fetch(link, rels, into, list, max, signal) {
+      const t = syncTarget(link), out = new Map();
+      try {
+        fs.writeFileSync(list, rels.join('\n') + '\n');
+        const r = await must('read', ['lsjson', t.fs, '-R', '--files-only', '--no-mimetype', '--files-from-raw', list].concat(t.flags), { signal, timeout: 5 * 60000 });
+        let j;
+        try { j = JSON.parse(r.out); } catch (e) { throw syncExplain(Object.assign(r, { code: 1 }), 'read'); }
+        for (const f of Array.isArray(j) ? j : []) {
+          if (f && !f.IsDir && typeof f.Path === 'string') out.set(f.Path, { size: Number(f.Size), mtime: syncListTime(f.ModTime), copied: false });
+        }
+        const small = rels.filter(rel => out.has(rel) && out.get(rel).size >= 0 && out.get(rel).size <= max);
+        if (small.length) {
+          fs.writeFileSync(list, small.join('\n') + '\n');
+          await must('read', ['copy', t.fs, into, '--files-from-raw', list, '--no-traverse'].concat(t.flags, SYNC_RETRIES), { signal, timeout: 30 * 60000 });
+          for (const rel of small) {
+            let st = null;
+            try { st = fs.statSync(path.join(into, ...rel.split('/'))); } catch (e) { /* not copied */ }
+            if (st && st.isFile()) Object.assign(out.get(rel), { copied: true, mtime: Number.isFinite(out.get(rel).mtime) ? out.get(rel).mtime : st.mtimeMs });
+          }
+        }
+      } finally {
+        try { fs.unlinkSync(list); } catch (e) { /* never written */ }
+      }
+      return out;
     },
     /* The ids of the Drive folder and of the folders in it, for a look at what changed (syncPollQueries):
        {root, map: Map id -> path}. filters: the vault's filter rules, so that the folders are the sync's. */
@@ -4243,7 +4587,10 @@ function syncTooLong(dir, link) {
 /* One sync of a linked vault. o: {api, fs, path, crypto, paths, id, dir (the vault), link, settings, force, now,
    pid, alive, onLine, signal}. Resolves {summary, skipped} ('busy': another run has the lock); throws a problem.
    Before rclone is run: the vault's folder and its check file must be there (a vault whose disk is missing, or a
-   folder that was swapped, never reaches rclone). */
+   folder that was swapped, never reaches rclone). With settings.conflicts 'merge', the two copies that the run kept
+   of a note changed on both sides are merged into one (syncMergeConflicts; summary.merged names them), and one more
+   run follows at once, in the same lock, to carry the merged notes to Drive and take the other copies away there;
+   that run keeps both copies of anything changed on both sides meanwhile, as usual. */
 async function syncOnce(o) {
   const { fs, path, paths, id } = o;
   const link = o.link;
@@ -4265,21 +4612,36 @@ async function syncOnce(o) {
     const stamp = syncStamp(new Date(o.now()));
     const args = more => syncBisyncArgs(Object.assign({ path, local: o.dir, link, paths, id, settings: o.settings, stamp }, more));
     syncClearStale(fs, path, path.join(paths.work, id), o.alive);
+    // what the log says of notes changed on both sides, when they are to be merged (all of it: r.lines keeps only the end)
+    const merging = o.settings.conflicts === 'merge', said = [];
+    const onLine = !merging ? o.onLine : l => {
+      if (said.length < 10000 && /^The winner is: Path|Renaming Path[12] copy/.test(l.msg)) said.push(l);
+      if (o.onLine) o.onLine(l);
+    };
     let old = null;
     try { old = fs.readFileSync(filters, 'utf8'); } catch (e) { /* written below */ }
     let r;
     if (old !== text) {
       // What is synced has changed (a setting, or a newer Scriptorium). What is waiting is synced under the old rules
       // first, so that a deletion is not undone; then both sides are matched up again under the new ones.
-      if (old !== null) await o.api.bisync(args({ force: o.force }), o.onLine, o.signal);
+      if (old !== null) await o.api.bisync(args({ force: o.force }), onLine, o.signal);
       fs.mkdirSync(paths.filters, { recursive: true });
       fs.writeFileSync(filters, text);
-      r = await o.api.bisync(args({ resync: true, mode: 'newer' }), o.onLine, o.signal);
+      r = await o.api.bisync(args({ resync: true, mode: 'newer' }), onLine, o.signal);
     } else {
-      r = await o.api.bisync(args({ force: o.force }), o.onLine, o.signal);
+      r = await o.api.bisync(args({ force: o.force }), onLine, o.signal);
+    }
+    const summary = r.summary;
+    if (merging) {
+      const merged = syncMergeConflicts(fs, path, o.dir, path.join(paths.kept, id, stamp), syncConflictPairs(said));
+      if (merged.length) {
+        summary.merged = merged;
+        const after = await o.api.bisync(args({}), o.onLine, o.signal);
+        for (const n of after.summary.conflicts) if (!summary.conflicts.includes(n)) summary.conflicts.push(n);
+      }
     }
     syncPrune(fs, path, path.join(paths.kept, id), o.settings.keepDays, o.now());
-    return { summary: r.summary };
+    return { summary };
   } finally {
     syncUnlock(fs, lock, o.pid);
   }
@@ -4310,11 +4672,14 @@ async function syncPreview(o) {
 }
 
 /* The first sync of a vault with its Drive folder (and a fresh start after trouble). o: as syncOnce, plus differ
-   (names that differ, from syncPreview) and keep: 'both' (the default: this computer's version is renamed
-   "name.conflict1.md" and both end up on both sides), 'local' or 'drive' (that side's version replaces the other;
-   what is replaced here goes to the folder of replaced files, what is replaced in Drive stays in Drive's version
-   history). Files that are on one side only are always copied to the other: a first sync deletes nothing.
-   Resolves {summary, renamed: [[from, to]]}. */
+   and unread (names that differ, and that could not be compared, from syncPreview) and keep: 'both' (the default:
+   this computer's version is renamed "name.conflict1.md" and both end up on both sides), 'local' or 'drive' (that
+   side's version replaces the other; what is replaced here goes to the folder of replaced files, what is replaced in
+   Drive stays in Drive's version history), or 'union' (merging both sides: a note that differs, or could not be
+   compared, is merged line by line (syncUnionPlan) and any other such file is kept twice, as with 'both'; this
+   computer's version of a merged note is kept in the folder of replaced files first). Files that are on one side only
+   are always copied to the other: a first sync deletes nothing. Resolves {summary, renamed: [[from, to]], merged:
+   [names]}. */
 async function syncFirst(o) {
   const { fs, path, paths, id } = o;
   const long = syncTooLong(o.dir, o.link);
@@ -4322,17 +4687,33 @@ async function syncFirst(o) {
   const lock = path.join(paths.locks, `${id}.lock`);
   if (!syncLock(fs, path, lock, o.pid, o.now(), o.alive)) throw syncProblem('busy', 'Another sync of this vault is running.', 'A second window, or a run that has not finished.', 'Wait for it to finish and try again.');
   try {
-    const renamed = [];
-    if ((o.keep || 'both') === 'both' && o.differ && o.differ.length) {
-      const taken = new Set(o.taken || []);
-      for (const rel of o.differ) {
-        const from = path.join(o.dir, ...rel.split('/'));
-        if (!fs.existsSync(from)) continue;
-        let to;
-        do { to = syncConflictName(rel, taken); } while (fs.existsSync(path.join(o.dir, ...to.split('/'))));
-        fs.renameSync(from, path.join(o.dir, ...to.split('/')));
-        renamed.push([rel, to]);
+    const renamed = [], merged = [], keep = o.keep || 'both', stamp = syncStamp(new Date(o.now()));
+    const taken = new Set(o.taken || []);
+    // this computer's version goes beside Drive's, as "name.conflict1.md"; both end up on both sides
+    const aside = rel => {
+      const from = path.join(o.dir, ...rel.split('/'));
+      if (!fs.existsSync(from)) return;
+      let to;
+      do { to = syncConflictName(rel, taken); } while (fs.existsSync(path.join(o.dir, ...to.split('/'))));
+      fs.renameSync(from, path.join(o.dir, ...to.split('/')));
+      renamed.push([rel, to]);
+    };
+    if (keep === 'both') for (const rel of o.differ || []) aside(rel);
+    if (keep === 'union') {
+      const rels = Array.from(new Set((o.differ || []).concat(o.unread || [])));
+      // Drive's versions are all read before anything here is changed: a failure there changes nothing
+      const plan = rels.length ? await syncUnionPlan({ api: o.api, fs, path, paths, id, dir: o.dir, link: o.link, rels, signal: o.signal }) : { merges: [], twice: [] };
+      for (const m of plan.merges) {
+        const file = path.join(o.dir, ...m.rel.split('/'));
+        syncKeepAside(fs, path, path.join(paths.kept, id, stamp), o.dir, m.rel, false);
+        fs.writeFileSync(file, m.text);
+        // The merged note must win the resync below, which keeps the newer of two versions that differ: its time is
+        // made later than that of Drive's version, even if the clock of the computer that wrote that one ran ahead.
+        const at = new Date(Math.max(o.now(), (Number.isFinite(m.theirs) ? m.theirs : 0) + 2000));
+        fs.utimesSync(file, at, at);
+        merged.push(m.rel);
       }
+      for (const rel of plan.twice) aside(rel);
     }
     const mark = path.join(o.dir, SYNC_SENTINEL);
     if (!fs.existsSync(mark)) fs.writeFileSync(mark, SYNC_SENTINEL_TEXT);
@@ -4341,10 +4722,15 @@ async function syncFirst(o) {
     fs.writeFileSync(path.join(paths.filters, `${id}.txt`), syncFilters(o.settings));
     // A record of an earlier link of this vault would mislead rclone: the first sync starts from nothing.
     try { fs.rmSync(path.join(paths.work, id), { recursive: true, force: true }); } catch (e) { /* rclone says so if it is in the way */ }
-    const mode = o.keep === 'local' ? 'path1' : o.keep === 'drive' ? 'path2' : 'newer';
-    const args = syncBisyncArgs({ path, local: o.dir, link: o.link, paths, id, settings: o.settings, stamp: syncStamp(new Date(o.now())), resync: true, mode });
+    // 'union' resyncs with 'newer', as 'both' does, not with 'path1': every merged note is newer than Drive's version
+    // (above), and every other file that differed has been renamed here, so the merged versions win and the rest is
+    // decided as in any first sync. A file changed on either side after the look (the page the writer confirmed) is
+    // not in the plan; with 'path1' this computer's copy would replace a newer one in Drive, with 'newer' the newer
+    // one wins and the other is kept (here in the folder of replaced files, in Drive in its version history).
+    const mode = keep === 'local' ? 'path1' : keep === 'drive' ? 'path2' : 'newer';
+    const args = syncBisyncArgs({ path, local: o.dir, link: o.link, paths, id, settings: o.settings, stamp, resync: true, mode });
     const r = await o.api.bisync(args, o.onLine, o.signal);
-    return { summary: r.summary, renamed };
+    return { summary: r.summary, renamed, merged };
   } finally {
     syncUnlock(fs, lock, o.pid);
   }
@@ -4552,7 +4938,7 @@ function syncReport(info, runs, home, hide) {
   out.push(`rclone: ${rc.version ? `v${rc.version}` : 'not found'}${rc.kind ? ` (${{ custom: 'the path in the settings', downloaded: 'downloaded by Scriptorium', path: 'found on PATH', usual: 'found in a usual place' }[rc.kind] || rc.kind})` : ''} · written for v${RCLONE.version}`);
   out.push(`Signed in: ${info.connected ? 'yes' : 'no'} · Google app: ${info.own ? 'a client ID of the writer’s own' : 'rclone’s shared one'}${info.type && info.type !== 'drive' ? ` · NOT GOOGLE DRIVE (the remote is of type ${info.type}: a test)` : ''}`);
   out.push(`This vault: ${info.linked ? `linked (${info.where || '?'})` : 'not linked'}${info.first ? '' : info.linked ? ', first sync not done' : ''}`);
-  if (info.settings) out.push(`Settings: automatic ${info.settings.auto ? `every ${info.settings.minutes} min, ${SYNC_TIMES.onChange / 1000} s after a change, and when Drive has changed (a look every ${SYNC_TIMES.poll / 60000} min)` : 'off'} · Obsidian’s settings synced: ${info.settings.obsidian ? 'yes' : 'no'} · delete limit ${info.settings.maxDelete}%`);
+  if (info.settings) out.push(`Settings: automatic ${info.settings.auto ? `every ${info.settings.minutes} min, ${SYNC_TIMES.onChange / 1000} s after a change, and when Drive has changed (a look every ${SYNC_TIMES.poll / 60000} min)` : 'off'} · Obsidian’s settings synced: ${info.settings.obsidian ? 'yes' : 'no'} · delete limit ${info.settings.maxDelete}% · notes changed on both sides: ${info.settings.conflicts === 'merge' ? 'merged' : 'both copies kept'}`);
   if (info.state) out.push(`Now: ${info.state.status}${info.state.problem ? ` (${info.state.problem.kind}: ${info.state.problem.message})` : ''}`);
   if (info.looks && info.looks.n) out.push(`Looks at Drive for changes since Obsidian started: ${info.looks.n}, the last at ${info.looks.at} UTC (${((info.looks.ms || 0) / 1000).toFixed(1)} s)`);
   out.push('');
@@ -4658,7 +5044,20 @@ class SyncBrowser {
 
 /* ---------- The windows ---------- */
 
-const SYNC_TITLES = { setup: 'Sync this vault with Google Drive', retrieve: 'Retrieve a vault from Google Drive', status: 'Google Drive sync', connect: 'Connect to Google Drive' };
+const SYNC_TITLES = { setup: 'Sync this vault with Google Drive', retrieve: 'Retrieve a vault from Google Drive', status: 'Google Drive sync', connect: 'Connect to Google Drive', merge: 'Merge with Google Drive' };
+/* The choices for files that differ on the two sides, on the page before a first sync: [value, title, text]. */
+const SYNC_KEEP = [
+  ['both', 'Keep both (safest)', 'Drive’s version keeps the name; this computer’s is kept beside it as “name.conflict1.md”. Look them over and delete the one you do not want.'],
+  ['union', 'Merge both sides', 'Files that differ are combined: notes are merged line by line, other files keep both copies. Nothing is deleted.'],
+  ['local', 'Keep this computer’s version', 'It replaces the one in Drive (Drive keeps its earlier versions for a while).'],
+  ['drive', 'Keep Drive’s version', 'It replaces the one here; the replaced files are kept for thirty days in Scriptorium’s own folder.'],
+];
+/* How a merge treats a note, in a line. */
+const SYNC_UNION_HOW = 'Lines both versions have appear once, in order; where they differ, this computer’s lines come first, then Drive’s. No conflict markers are added. When the properties at the top differ, those of the version changed last are kept.';
+/* Names one per line, at most `max` of them, and how many more there are. */
+function syncListText(names, max) {
+  return names.slice(0, max).join('\n') + (names.length > max ? `\n… and ${names.length - max} more` : '');
+}
 const SYNC_UNVERIFIED = 'New: the sign-in follows rclone’s documentation, but has not yet been checked against the real Google on our side. If it fails, “Copy diagnostic report” tells us why.';
 const SYNC_MOVED = 'Scriptorium now syncs with Google Drive through rclone, with a Google sign-in of your own and a folder you pick yourself; the older backup (through Claude Code, or the direct preview) is gone. ' +
   'A backup made through Claude Code can be carried on: pick its folder (Scriptorium › the vault’s name) as the Drive folder. Its list of files (scriptorium-manifest.json) and its _trash folder are left alone and not synced. ' +
@@ -4763,6 +5162,12 @@ class SyncModal extends Modal {
       return;
     }
     const link = this.plugin.syncLink();
+    if (this.mode === 'merge') {
+      if (link && link.first) { this.link = link; this.go(() => this.mergePreview()); return; }
+      // Not synced yet: the set-up compares the two sides and offers the same merge ("Merge both sides").
+      this.mode = 'setup';
+      this.titleEl.setText(SYNC_TITLES.setup);
+    }
     if (this.mode === 'retrieve') { this.browse(); return; }
     if (link && link.first && !this.again) { this.showStatus(); return; }
     if (link && !this.again) { this.link = link; this.go(() => this.preview()); return; }
@@ -4995,28 +5400,25 @@ class SyncModal extends Modal {
     if (pv.onlyLocal) ul.createEl('li', { text: `${driveCount(pv.onlyLocal, 'file is', 'files are')} only on this computer: copied up to Drive.` });
     if (pv.onlyDrive) ul.createEl('li', { text: `${driveCount(pv.onlyDrive, 'file is', 'files are')} only in the Drive folder: copied down to this vault.` });
     if (pv.same) ul.createEl('li', { text: `${driveCount(pv.same, 'file is', 'files are')} the same on both sides: left alone.` });
-    let keep = 'both';
+    let keep = 'both', unread = null;
+    const unreadText = () => `${driveCount(pv.unread.length, 'file')} could not be compared (they are treated as different, and ${keep === 'union' ? 'merged or kept twice like the files that differ' : 'the newer one is kept'}).`;
     if (pv.differ.length) {
       const li = ul.createEl('li', { text: `${driveCount(pv.differ.length, 'file has', 'files have')} the same name on both sides but different contents:` });
       const pick = li.createDiv({ cls: 'scriptorium-drive-vaults' });
-      for (const [value, title, text] of [
-        ['both', 'Keep both (safest)', 'Drive’s version keeps the name; this computer’s is kept beside it as “name.conflict1.md”. Look them over and delete the one you do not want.'],
-        ['local', 'Keep this computer’s version', 'It replaces the one in Drive (Drive keeps its earlier versions for a while).'],
-        ['drive', 'Keep Drive’s version', 'It replaces the one here; the replaced files are kept for thirty days in Scriptorium’s own folder.'],
-      ]) {
+      for (const [value, title, text] of SYNC_KEEP) {
         const label = pick.createEl('label', { cls: 'scriptorium-drive-vault' });
         const radio = label.createEl('input', { type: 'radio', attr: { name: 'scriptorium-sync-keep', value } });
         radio.checked = value === 'both';
-        radio.addEventListener('change', () => { if (radio.checked) keep = value; });
+        radio.addEventListener('change', () => { if (radio.checked) { keep = value; if (unread) unread.setText(unreadText()); } });
         const t = label.createDiv();
         t.createDiv({ cls: 'scriptorium-drive-vault-name', text: title });
         t.createDiv({ cls: 'scriptorium-setup-note', text });
       }
       const d = li.createEl('details', { cls: 'scriptorium-drive-skipped' });
       d.createEl('summary', { text: 'Which files' });
-      d.createEl('pre', { cls: 'scriptorium-setup-plan', text: pv.differ.slice(0, 300).join('\n') + (pv.differ.length > 300 ? `\n… and ${pv.differ.length - 300} more` : '') });
+      d.createEl('pre', { cls: 'scriptorium-setup-plan', text: syncListText(pv.differ, 300) });
     }
-    if (pv.unread.length) ul.createEl('li', { text: `${driveCount(pv.unread.length, 'file')} could not be compared (they are treated as different, and the newer one is kept).` });
+    if (pv.unread.length) unread = ul.createEl('li', { text: unreadText() });
     el.createEl('p', { text: 'The first sync deletes nothing: afterwards each side holds everything from both.' });
     if (pv.local.count && pv.onlyDrive && !pv.same && !pv.differ.length) {
       el.createEl('p', { cls: 'scriptorium-setup-problem', text: 'These two folders have nothing in common. If that Drive folder is not meant for this vault, choose another: everything in it would be copied into this vault.' });
@@ -5048,20 +5450,88 @@ class SyncModal extends Modal {
     const k = this.kit, link = this.link, settings = syncSettings(this.plugin.settings);
     const p = this.progress('Syncing for the first time…');
     await this.plugin.engine.running;   // a timer's run of an earlier link ends first
-    const r = await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, differ: pv.differ, taken: pv.taken, keep,
+    const r = await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, differ: pv.differ, unread: pv.unread, taken: pv.taken, keep,
       now: () => Date.now(), pid: process.pid, alive: k.alive, onLine: p.onLine, signal: this.stop.signal });
     this.plugin.saveSyncLink(Object.assign({}, link, { linked: link.linked || new Date().toISOString(), first: new Date().toISOString() }));
     this.plugin.engine.set({ status: 'idle', last: Date.now(), summary: r.summary, problem: null });
     this.plugin.engine.start(false);
     if (!this.contentEl.isConnected) return;
+    this.finished(r, 'First sync');
+    this.contentEl.createEl('p', { cls: 'scriptorium-setup-note', text: 'From now on the status bar at the bottom says “Drive: synced” and the time. Click it to sync at once, or to see conflicts and problems.' });
+    const row = this.buttons();
+    row.createEl('button', { cls: 'mod-cta', text: 'Done' }).addEventListener('click', () => this.close());
+  }
+
+  /* What a first sync or a merge did (syncFirst's result): the counts, the notes merged and the files kept twice. */
+  finished(r, what) {
     const el = this.page('This vault and its Drive folder now hold the same files.');
-    el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(link) });
-    el.createEl('p', { text: `First sync: ${syncSummaryText(r.summary)}.` });
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(this.link) });
+    el.createEl('p', { text: `${what}: ${syncSummaryText(r.summary)}.` });
+    if (r.merged && r.merged.length) {
+      el.createEl('p', { text: `${driveCount(r.merged.length, 'note')} differed and ${r.merged.length === 1 ? 'was' : 'were'} merged line by line. ${r.merged.length === 1 ? 'Its version' : 'Their versions'} from before the merge ${r.merged.length === 1 ? 'is' : 'are'} kept for thirty days in Scriptorium’s folder of replaced files (“Replaced files…” in the status window):` });
+      el.createEl('pre', { cls: 'scriptorium-setup-plan', text: syncListText(r.merged, 100) });
+    }
     if (r.renamed.length) {
       el.createEl('p', { text: `${driveCount(r.renamed.length, 'file')} differed and ${r.renamed.length === 1 ? 'was' : 'were'} kept twice. This computer’s version is now:` });
-      el.createEl('pre', { cls: 'scriptorium-setup-plan', text: r.renamed.slice(0, 100).map(x => x[1]).join('\n') });
+      el.createEl('pre', { cls: 'scriptorium-setup-plan', text: syncListText(r.renamed.map(x => x[1]), 100) });
     }
-    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'From now on the status bar at the bottom says “Drive: synced” and the time. Click it to sync at once, or to see conflicts and problems.' });
+    return el;
+  }
+
+  /* ----- Merging both sides of a vault that is synced already ----- */
+
+  /* What "Merge with Google Drive" will do, and a button to do it. Nothing is changed before the writer confirms. */
+  async mergePreview() {
+    const k = this.kit, link = this.link;
+    this.wait(`Looking at both sides: this vault, and ${syncWhere(link)}…`);
+    await this.plugin.engine.running;   // a run that is going ends first: what is compared is what it left
+    if (!this.alive()) return;
+    const settings = syncSettings(this.plugin.settings);
+    const pv = await syncPreview({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, signal: this.stop.signal });
+    if (!this.alive()) return;
+    const plan = syncMergePlan(pv), el = this.page();
+    if (!pv.onlyLocal && !pv.onlyDrive && !plan.notes.length && !plan.twice.length) {
+      el.createEl('p', { text: 'This vault and its Drive folder hold the same files: there is nothing to merge.' });
+      el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(link) });
+      this.closeButton(this.buttons());
+      return;
+    }
+    el.createEl('p', { text: 'Merging keeps everything from both sides and deletes nothing. This is what it will do; nothing has been changed yet.' });
+    el.createEl('p', { cls: 'scriptorium-setup-where', text: syncWhere(link) });
+    const ul = el.createEl('ul', { cls: 'scriptorium-drive-plan' });
+    if (pv.onlyLocal) ul.createEl('li', { text: `${driveCount(pv.onlyLocal, 'file is', 'files are')} only on this computer: copied up to Drive.` });
+    if (pv.onlyDrive) ul.createEl('li', { text: `${driveCount(pv.onlyDrive, 'file is', 'files are')} only in the Drive folder: copied down to this vault.` });
+    if (pv.same) ul.createEl('li', { text: `${driveCount(pv.same, 'file is', 'files are')} the same on both sides: left alone.` });
+    const listed = (li, names) => {
+      const d = li.createEl('details', { cls: 'scriptorium-drive-skipped' });
+      d.createEl('summary', { text: 'Which files' });
+      d.createEl('pre', { cls: 'scriptorium-setup-plan', text: syncListText(names, 300) });
+    };
+    if (plan.notes.length) {
+      listed(ul.createEl('li', { text: `${driveCount(plan.notes.length, 'note differs', 'notes differ')}: merged line by line into one note, on both sides. ${SYNC_UNION_HOW} This computer’s version from before the merge is kept for thirty days in Scriptorium’s folder of replaced files. (A note larger than 2 MB, or not plain text, is kept twice instead.)` }), plan.notes);
+    }
+    if (plan.twice.length) {
+      listed(ul.createEl('li', { text: `${driveCount(plan.twice.length, 'other file differs', 'other files differ')}: kept twice. Drive’s version keeps the name; this computer’s is kept beside it, with “conflict1” before the extension (“picture.conflict1.png”).` }), plan.twice);
+    }
+    el.createEl('p', { cls: 'scriptorium-setup-problem', text: 'Files deleted on one side since the last sync come back: merging copies whatever is on only one side to the other, whatever the reason it is missing. Delete them again afterwards if you do not want them.' });
+    el.createEl('p', { cls: 'scriptorium-setup-note', text: 'Afterwards the sync goes on by itself as before.' });
+    const row = this.buttons();
+    row.createEl('button', { cls: 'mod-cta', text: 'Merge' }).addEventListener('click', () => this.go(() => this.merge(pv)));
+    this.closeButton(row, 'Cancel');
+  }
+
+  async merge(pv) {
+    const k = this.kit, link = this.link, settings = syncSettings(this.plugin.settings);
+    const p = this.progress('Merging both sides…');
+    await this.plugin.engine.running;   // a timer's run ends first
+    const r = await syncFirst({ api: this.api, fs: k.fs, path: k.path, paths: k.paths, id: k.id, dir: k.dir, link, settings, differ: pv.differ, unread: pv.unread, taken: pv.taken, keep: 'union',
+      now: () => Date.now(), pid: process.pid, alive: k.alive, onLine: p.onLine, signal: this.stop.signal });
+    this.plugin.syncNote('merge', [`Both sides merged: ${driveCount(r.merged.length, 'note')} merged, ${driveCount(r.renamed.length, 'file')} kept twice.`]);
+    this.plugin.engine.set({ status: 'idle', last: Date.now(), summary: r.summary, problem: null });
+    this.plugin.engine.start(false);
+    if (!this.contentEl.isConnected) return;
+    this.finished(r, 'Merge');
+    this.contentEl.createEl('p', { cls: 'scriptorium-setup-note', text: 'The sync goes on by itself as before.' });
     const row = this.buttons();
     row.createEl('button', { cls: 'mod-cta', text: 'Done' }).addEventListener('click', () => this.close());
   }
@@ -5355,6 +5825,7 @@ class Scriptorium extends Plugin {
       ['drive-back-up', 'setup', 'Sync this vault with Google Drive (set up, or see how it is doing)'],
       ['drive-retrieve', 'retrieve', 'Retrieve a vault from Google Drive'],
       ['drive-connect', 'connect', 'Connect to Google Drive (sign in to Google)'],
+      ['drive-merge', 'merge', 'Merge with Google Drive (keep everything from both sides)'],
     ]) this.addCommand({ id, name, callback: () => new SyncModal(this, mode).open() });
     this.addCommand({ id: 'drive-sync-now', name: 'Sync now with Google Drive', callback: () => this.syncNowCommand() });
     this.addCommand({ id: 'drive-report', name: 'Copy the Google Drive diagnostic report', callback: () => this.copyDriveReport() });
@@ -6217,5 +6688,7 @@ Object.assign(module.exports, {
   syncLogLine, rcloneExec, syncConfRead, syncConnection, syncConfPrepare, syncParseClient, syncFilters, syncTarget, syncWhere, syncFolderName, syncParseDirs,
   syncParseCheck, syncConflictName, syncBisyncArgs, syncSummary, syncSummaryText, syncExplain, rcloneApi, syncLock, syncUnlock, syncClearStale, syncPrune, syncOnce, syncStamp,
   SYNC_PHASES, syncPhaseOf, syncPhases, syncPhasesText, goUnquote, syncListTime, syncParseListing, syncReadListing, syncSettled, syncPollQueries, syncPollChanged, syncFoldersKey, SYNC_TRANSFER, SYNC_RETRIES,
-  inkSlant, uprightMissing, syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser
+  inkSlant, uprightMissing, syncPreview, syncFirst, syncTooLong, SyncEngine, syncStatusText, driveRedact, syncNameless, syncReport, driveTargetProblem, driveBytes, driveCount, SyncBrowser,
+  SYNC_UNION_TEXT, SYNC_UNION_MAX, SYNC_UNION_EDITS, syncUnionable, syncTextOf, syncSplitLines, syncFrontmatter, syncLineMatches, syncUnionStretch, syncUnionLines, syncUnionText,
+  syncKeepAside, syncMergePlan, syncUnionPlan, syncConflictPairs, syncMergeConflicts, SYNC_KEEP, syncListText
 });
