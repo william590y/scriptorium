@@ -26,7 +26,9 @@
 // Then, in the editor: the cursor in each of the lines concerned, typing in the paragraph and in the list, folding,
 // a long note scrolled away and back, the window resized and zoomed with the note open, the drop cap changed and
 // turned off and on again; Source mode stays plain; an initial that is an image; and the vault's own README at the
-// widths of the two screenshots.
+// widths of the two screenshots. Last, what the owner's vault had on 2026-11-24 (a manuscript snippet from before
+// 1.4.5 with a newer plugin: the README's list drawn through the initial again, in both views), the plugin turned off
+// and on with that note open, and an older Chromium (the fallbacks of the rules it lacks).
 // This cannot run under Node (it needs Obsidian's layout), so it is not part of `node --test`; it is a manual check,
 // or one a machine can run through the DevTools protocol.
 //
@@ -42,7 +44,7 @@
   const options = window.dropcapFollowOptions || {};
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const frame = () => new Promise(r => requestAnimationFrame(r));
-  const plugin = app.plugins.plugins.scriptorium;
+  let plugin = app.plugins.plugins.scriptorium;   // (section 11 turns the plugin off and on: the new one)
   if (!plugin) throw new Error('Scriptorium is not enabled in this vault');
   if (typeof plugin.applyLiveDropcaps !== 'function') throw new Error('This Scriptorium has no drop caps in Live Preview');
   const S = plugin.constructor;
@@ -663,32 +665,138 @@
     const readme = app.vault.getAbstractFileByPath('README.md');
     const shipped = readme ? await app.vault.read(readme) : '';
     const section = shipped.includes('## Drop caps, marginalia and image focus') ? shipped : '';
+    /* The README's list under "Under Settings → Scriptorium:", in one view at one zoom, as the screenshots show it. */
+    const readmeCheck = async (out, mode, zoom) => {
+      if (!section) { out.why.push('the vault has no README.md with the section “Drop caps, marginalia and image focus” (the note the screenshots show)'); return; }
+      await resize(zoom === 1 ? 1180 : 1600);
+      if (webFrame) { webFrame.setZoomFactor(zoom); await sleep(450); }
+      try {
+        await open(section, mode);
+        if (!await bring(mode, 'Under Settings')) { out.why.push('the paragraph “Under Settings → Scriptorium:” was not drawn'); return; }
+        await sleep(250); await quiet();
+        const s = scene(mode, 'Under Settings', 0), view = mode === 'live' ? 'the editor' : 'Reading view';
+        out.why.push(...sound(s, view, { kind: 'list', markers: 3 }, 1));
+        if (s.ink && s.rows.length) {
+          if (!(s.rows[0].left > s.ink.right)) out.why.push('the first item (“Drop cap:”) is not set in past the initial');
+          const bullet = s.markers[0];
+          if (!bullet || bullet.left < s.ink.right) out.why.push(`the first bullet is at ${bullet ? bullet.left.toFixed(0) : 'nowhere'}, the initial ends at ${s.ink.right.toFixed(0)}`);
+          // the item's second line hangs under its first (the editor set it far to the right)
+          const item = s.items.filter(i => i.kind === 'text' && i.top < s.rows[1].top - 2);
+          if (item.length < 2) out.why.push(`the first item has ${item.length} line${item.length === 1 ? '' : 's'} (the screenshots show it on two)`);
+          else if (Math.abs(item[1].left - s.rows[0].left) > 3) out.why.push(`the first item’s second line begins at ${item[1].left.toFixed(1)}, its first at ${s.rows[0].left.toFixed(1)}`);
+          if (Math.abs(s.rows[1].left - s.rows[2].left) > 0.5 || !(s.rows[1].left < s.ink.right)) out.why.push('the second and third items are not back at the margin');
+        }
+      } finally { if (webFrame) { webFrame.setZoomFactor(1); await sleep(300); } await resize(1180); }
+    };
     for (const [name, mode, zoom] of [['the screenshot of the editor: the README’s list under “Under Settings → Scriptorium:” is not drawn through the initial', 'live', 1],
       ['the screenshot of Reading view: the first bullet of the README’s list is not on the initial', 'reading', 1],
       ['the screenshots at the size they were taken (135 %): the editor', 'live', 1.35], ['the screenshots at the size they were taken (135 %): Reading view', 'reading', 1.35]]) {
-      await run(name, async out => {
-        if (!section) { out.why.push('the vault has no README.md with the section “Drop caps, marginalia and image focus” (the note the screenshots show)'); return; }
-        await resize(zoom === 1 ? 1180 : 1600);
-        if (webFrame) { webFrame.setZoomFactor(zoom); await sleep(450); }
-        try {
-          await open(section, mode);
-          if (!await bring(mode, 'Under Settings')) { out.why.push('the paragraph “Under Settings → Scriptorium:” was not drawn'); return; }
-          await sleep(250); await quiet();
-          const s = scene(mode, 'Under Settings', 0), view = mode === 'live' ? 'the editor' : 'Reading view';
-          out.why.push(...sound(s, view, { kind: 'list', markers: 3 }, 1));
-          if (s.ink && s.rows.length) {
-            if (!(s.rows[0].left > s.ink.right)) out.why.push('the first item (“Drop cap:”) is not set in past the initial');
-            const bullet = s.markers[0];
-            if (!bullet || bullet.left < s.ink.right) out.why.push(`the first bullet is at ${bullet ? bullet.left.toFixed(0) : 'nowhere'}, the initial ends at ${s.ink.right.toFixed(0)}`);
-            // the item's second line hangs under its first (the editor set it far to the right)
-            const item = s.items.filter(i => i.kind === 'text' && i.top < s.rows[1].top - 2);
-            if (item.length < 2) out.why.push(`the first item has ${item.length} line${item.length === 1 ? '' : 's'} (the screenshots show it on two)`);
-            else if (Math.abs(item[1].left - s.rows[0].left) > 3) out.why.push(`the first item’s second line begins at ${item[1].left.toFixed(1)}, its first at ${s.rows[0].left.toFixed(1)}`);
-            if (Math.abs(s.rows[1].left - s.rows[2].left) > 0.5 || !(s.rows[1].left < s.ink.right)) out.why.push('the second and third items are not back at the margin');
-          }
-        } finally { if (webFrame) { webFrame.setZoomFactor(1); await sleep(300); } await resize(1180); }
+      await run(name, async out => readmeCheck(out, mode, zoom));
+    }
+
+    // ---- 11. what the owner's vault had (2026-11-24): a manuscript snippet older than the plugin; and an older Chromium ----
+    // The rules for what follows a short opening paragraph came in 1.4.5, in the snippet; the editor's marks are the
+    // plugin's. A vault whose snippet was from before 1.4.5 drew the README's list through the initial again with
+    // 1.5.0, in both views (the editor hung the first item's second line far to the right: Obsidian measured the list's
+    // indent with the float in its way). The plugin now carries the rules in its own styles.css. The snippet's
+    // stylesheet is changed here in the page only (its file is not touched) and put back afterwards.
+    const SECTION = '/* ---------- What follows a short opening paragraph ----------';
+    const BEGIN = '/* scriptorium: from the manuscript snippet, begin */', END = '/* scriptorium: from the manuscript snippet, end */';
+    const sheet = test => Array.from(document.head.querySelectorAll('style')).find(test);
+    const snippetSheet = () => sheet(e => e.textContent.includes('Scriptorium — two manuscript styles') && e.textContent.includes('--scriptorium-initial-size'));
+    const pluginSheet = () => sheet(e => e.textContent.includes(BEGIN));
+    /* The snippet as it was before 1.4.5: no such section, and no depth for any initial. */
+    const before145 = text => {
+      const a = text.indexOf(SECTION), b = a < 0 ? -1 : text.indexOf('/* ---------- ', a + SECTION.length);
+      return (a < 0 ? text : text.slice(0, a) + text.slice(b)).replace(/^[ \t]*--scriptorium-initial-depth:[^\n]*\n/gm, '');
+    };
+    const withoutCarried = text => { const a = text.indexOf(BEGIN), b = text.indexOf(END); return a < 0 || b < 0 ? text : text.slice(0, a) + text.slice(b); };
+    /* body with the snippet's stylesheet (and, if both, the plugin's carried rules) as old ones, then put back; the
+       editor measures its list lines again as it does when a snippet is loaded. */
+    const olderSnippet = async (out, both, body) => {
+      const el = snippetSheet(), mine = both ? pluginSheet() : null, was = el ? el.textContent : null, mineWas = mine ? mine.textContent : null;
+      if (!el) { out.why.push('the manuscript snippet’s stylesheet was not found in the page'); return; }
+      if (both && !mine) { out.why.push('the plugin’s stylesheet with the rules it carries was not found in the page'); return; }
+      try {
+        el.textContent = before145(was);
+        if (el.textContent.includes(SECTION)) { out.why.push('the section could not be taken out of the snippet'); return; }
+        if (mine) mine.textContent = withoutCarried(mineWas);
+        app.workspace.trigger('css-change');
+        await sleep(300); await quiet();
+        await body();
+      } finally {
+        if (el.isConnected && el.textContent !== was) el.textContent = was;
+        if (mine && mine.isConnected && mine.textContent !== mineWas) mine.textContent = mineWas;   // (a plugin turned off and on has a new one)
+        app.workspace.trigger('css-change');
+        await sleep(300); await quiet();
+      }
+    };
+    for (const [mode, label] of [['live', 'the editor'], ['reading', 'Reading view']]) {
+      await run(`a vault whose manuscript snippet is from before 1.4.5 (the owner’s, 2026-11-24): the README’s list is clear of the initial in ${label}`, async out => {
+        await olderSnippet(out, false, () => readmeCheck(out, mode, 1));
       });
     }
+    await run('a vault whose manuscript snippet is from before 1.4.5: what begins below the initial still does, for each initial (their depths come with the plugin)', async out => {
+      await olderSnippet(out, false, async () => {
+        const f = FOLLOWERS.find(x => x.name === 'a quotation');
+        for (const initials of ['yinit', 'goudy', 'plain']) {
+          await plugin.updateSettings({ initials, fancyMode: false, liveDropcaps: true }); await sleep(300);
+          const s = await both(noteOf(SHORT, f), 0);
+          out.why.push(...[...sound(s.live, 'the editor', f, 1), ...sound(s.reading, 'Reading view', f, 1)].map(w => `${initials}: ${w}`));
+        }
+        await plugin.updateSettings({ initials: 'yinit' }); await sleep(300);
+      });
+    });
+    await run('a vault whose snippet is from before 1.4.5, and the plugin brought up to date with the note open (turned off and on): the editor measures the list again', async out => {
+      await olderSnippet(out, true, async () => {
+        await open(section, 'live');
+        if (!await bring('live', 'Under Settings')) { out.why.push('the paragraph “Under Settings → Scriptorium:” was not drawn'); return; }
+        await sleep(250); await quiet();
+        const first = Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).find(l => /Drop cap:/.test(l.textContent));
+        const hung = first ? parseFloat(getComputedStyle(first).textIndent) : 0;
+        if (!(hung < -60)) out.why.push(`(the case did not arise: the first item hangs its marker by ${hung} px, not by the initial’s width)`);
+        // the new plugin: its styles.css (read again from the vault, with the rules) and its code
+        await app.plugins.disablePlugin('scriptorium'); await app.plugins.enablePlugin('scriptorium');
+        plugin = app.plugins.plugins.scriptorium;
+        await sleep(600); await quiet();
+        if (!pluginSheet()) out.why.push('the plugin’s stylesheet did not come back');
+        await readmeCheck(out, 'live', 1);
+      });
+    });
+    await run('an older Chromium (no display: flow-root list-item, no lh unit, no float: inline-start): the fallbacks keep the README’s list and what begins below clear of the initial', async out => {
+      // what such a Chromium computes from the section: the fallback of each rule it lacks, and nothing of the rule
+      // (Obsidian 1.15 in the shell of its 1.4.16 installer, Chromium 114, and of its 1.1.16 one, Chromium 106, were
+      // checked as well: see the pull request that brought this case)
+      const text = (snippetSheet() || { textContent: '' }).textContent;
+      const a = text.indexOf(SECTION);
+      let body = a < 0 ? '' : text.slice(a, text.indexOf('/* ---------- ', a + SECTION.length)).replace(/\/\*[\s\S]*?\*\//g, '');
+      const parse = t => [...t.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(m => ({ sel: m[1].trim().replace(/\s+/g, ' '), decls: m[2].split(';').map(d => d.trim()).filter(Boolean).map(d => [d.slice(0, d.indexOf(':')).trim(), d.slice(d.indexOf(':') + 1).trim()]) }));
+      const under = cond => { const out = []; body = body.replace(new RegExp(`@supports ${cond.replace(/[()]/g, '\\$&')} \\{((?:\\s*[^{}]+\\{[^{}]*\\})+)\\s*\\}`, 'g'), (m, inner) => { out.push(...parse(inner)); return ''; }); return out; };
+      const notFlow = under('not (display: flow-root list-item)'), whereLh = under('(height: 1lh)'), rules = parse(body);
+      if (!notFlow.length) { out.why.push('the snippet has no fallback for display: flow-root list-item'); return; }
+      const css = notFlow.map(r => `${r.sel} { display: list-item !important; ${r.decls.map(([p, v]) => `${p}: ${v};`).join(' ')} }`);
+      for (const r of whereLh) {   // not applied there: what the same rule says outside @supports holds
+        const main = rules.find(x => x.sel === r.sel);
+        for (const [prop] of r.decls) { const d = main && main.decls.filter(([p]) => p === prop).pop(); if (d) css.push(`${r.sel} { ${prop}: ${d[1]} !important; }`); else out.why.push(`no fallback for ${prop} under @supports (height: 1lh)`); }
+      }
+      for (const r of rules) {
+        r.decls.forEach(([prop, value], i) => {
+          if (/\dlh\b/.test(value) && r.decls[i - 1] && r.decls[i - 1][0] === prop) css.push(`${r.sel} { ${prop}: ${r.decls[i - 1][1]} !important; }`);
+          if (prop === 'float' && value === 'inline-start') css.push(`${r.sel} { float: left !important; }`);
+        });
+      }
+      if (css.length < 6) out.why.push(`only ${css.length} fallbacks were found`);
+      const style = document.head.appendChild(document.createElement('style'));
+      style.id = 'dropcap-followers-older-chromium'; style.textContent = css.join('\n');
+      try {
+        app.workspace.trigger('css-change'); await sleep(300); await quiet();
+        for (const mode of ['live', 'reading']) await readmeCheck(out, mode, 1);
+        for (const name of ['a numbered list', 'a quotation', 'a list of bullets']) {
+          const f = FOLLOWERS.find(x => x.name === name), s = await both(noteOf(SHORT, f), 0);
+          out.why.push(...[...sound(s.live, 'the editor', f, 1), ...sound(s.reading, 'Reading view', f, 1)].map(w => `${name}: ${w}`));
+        }
+      } finally { style.remove(); app.workspace.trigger('css-change'); await sleep(300); }
+    });
   } finally {
     await plugin.updateSettings({ initials: saved.initials, fancyMode: saved.fancy, liveDropcaps: saved.live });
     try { if (webFrame) webFrame.setZoomFactor(layout.zoom || 1); if (win && layout.bounds) win.setBounds(layout.bounds); } catch (e) { /* as it is */ }
