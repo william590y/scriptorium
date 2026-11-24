@@ -1240,6 +1240,9 @@ test('what follows a short opening paragraph: the snippet keeps it clear of the 
   for (const line of css.split('\n')) if (/scriptorium-(?:opening-end|beside-initial|under-initial)/.test(line) && /[{,]\s*$/.test(line)) assert.ok(line.includes('.is-live-preview '), line.slice(0, 160));
   const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
   for (const cls of ['scriptorium-opening-end', 'scriptorium-beside-initial', 'scriptorium-under-initial']) assert.ok(src.includes(`'${cls}'`), cls);
+  // a line beside the initial is a formatting context by its own mark too: Obsidian measures a list line's hanging
+  // indent from the page, and loads the plugin's styles.css only after the plugin has started
+  assert.match(src, /Decoration\.line\(\{ class: 'scriptorium-beside-initial', attributes: \{ style: 'display: flow-root' \} \}\)/);
   assert.match(src, /if \(o\.standing\) continue;/, 'a standing initial has nothing beside it');
 });
 

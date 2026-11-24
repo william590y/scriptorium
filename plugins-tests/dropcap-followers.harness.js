@@ -748,20 +748,26 @@
       });
     });
     await run('a vault whose snippet is from before 1.4.5, and the plugin brought up to date with the note open (turned off and on): the editor measures the list again', async out => {
-      await olderSnippet(out, true, async () => {
-        await open(section, 'live');
-        if (!await bring('live', 'Under Settings')) { out.why.push('the paragraph “Under Settings → Scriptorium:” was not drawn'); return; }
-        await sleep(250); await quiet();
-        const first = Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).find(l => /Drop cap:/.test(l.textContent));
-        const hung = first ? parseFloat(getComputedStyle(first).textIndent) : 0;
-        if (!(hung < -60)) out.why.push(`(the case did not arise: the first item hangs its marker by ${hung} px, not by the initial’s width)`);
-        // the new plugin: its styles.css (read again from the vault, with the rules) and its code
-        await app.plugins.disablePlugin('scriptorium'); await app.plugins.enablePlugin('scriptorium');
-        plugin = app.plugins.plugins.scriptorium;
-        await sleep(600); await quiet();
-        if (!pluginSheet()) out.why.push('the plugin’s stylesheet did not come back');
-        await readmeCheck(out, 'live', 1);
-      });
+      // the plugin as 1.4.5 to 1.5.0 had it: its mark on a line beside the initial was a class only, drawn by the snippet
+      const older = document.head.appendChild(document.createElement('style'));
+      older.textContent = '.markdown-source-view.mod-cm6 .cm-line.scriptorium-beside-initial { display: block !important; }';
+      try {
+        await olderSnippet(out, true, async () => {
+          await open(section, 'live');
+          if (!await bring('live', 'Under Settings')) { out.why.push('the paragraph “Under Settings → Scriptorium:” was not drawn'); return; }
+          await sleep(250); await quiet();
+          const first = Array.from(cmOf().contentDOM.querySelectorAll('.cm-line')).find(l => /Drop cap:/.test(l.textContent));
+          const hung = first ? parseFloat(getComputedStyle(first).textIndent) : 0;
+          if (!(hung < -60)) out.why.push(`(the case did not arise: the first item hangs its marker by ${hung} px, not by the initial’s width)`);
+          // the new plugin: its code, then its styles.css (read again from the vault, with the rules)
+          older.remove();
+          await app.plugins.disablePlugin('scriptorium'); await app.plugins.enablePlugin('scriptorium');
+          plugin = app.plugins.plugins.scriptorium;
+          await sleep(600); await quiet();
+          if (!pluginSheet()) out.why.push('the plugin’s stylesheet did not come back');
+          await readmeCheck(out, 'live', 1);
+        });
+      } finally { older.remove(); }
     });
     await run('an older Chromium (no display: flow-root list-item, no lh unit, no float: inline-start): the fallbacks keep the README’s list and what begins below clear of the initial', async out => {
       // what such a Chromium computes from the section: the fallback of each rule it lacks, and nothing of the rule

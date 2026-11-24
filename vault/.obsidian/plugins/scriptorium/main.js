@@ -1349,7 +1349,12 @@ function dropcapExtension(plugin) {
   };
   const gap = Decoration.mark({ class: 'scriptorium-opening-gap' });   // the space after an initial that is a word by itself
   const below = Decoration.line({ class: 'scriptorium-opening-end' });   // the paragraph's last line, where what follows begins below the initial
-  const beside = Decoration.line({ class: 'scriptorium-beside-initial' });   // a line of the list that follows the paragraph
+  // A line of the list that follows the paragraph. It is a formatting context of its own (the snippet's rule, and the
+  // plugin's copy of it), and says so itself as well: Obsidian measures how far a list line hangs its marker from the
+  // page, and a line measured while the initial's float pushed its words keeps that measure. Obsidian loads the
+  // plugin's styles.css only after the plugin has started, and the vault's snippet can be older than the plugin, so
+  // the mark is not left to wait for a stylesheet.
+  const beside = Decoration.line({ class: 'scriptorium-beside-initial', attributes: { style: 'display: flow-root' } });
   const decorate = (state, value) => {
     const ranges = [], froms = [], lists = [];
     if (value.openings.length) {
@@ -5741,7 +5746,8 @@ class Scriptorium extends Plugin {
     // the line's text or the CSS changes (not when the line's class does). A line measured while the initial's float
     // pushed its words (as it did with a snippet older than the rules for what follows a short opening paragraph)
     // went on hanging its further lines far to the right once the rules were there. As a change of CSS would, this
-    // has Obsidian measure them again (the plugin's own styles.css comes with its code, and says nothing of it).
+    // has Obsidian measure them again (Obsidian loads the plugin's styles.css after this, and says nothing of it; the
+    // lines beside the initial are formatting contexts by their own mark, so the new measure is right without it).
     try { this.app.workspace.trigger('css-change'); } catch (e) { /* the measures are as they were */ }
   }
 
