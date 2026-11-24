@@ -439,3 +439,157 @@ body.theme-dark.scriptorium-image-focus .markdown-source-view.mod-cm6 .cm-conten
 .scriptorium-tikz-error { text-align: start; font-size: 0.9em; color: var(--text-muted); border-left: 2px solid var(--text-error, var(--text-faint)); padding: 0.2em 0 0.2em 0.8em; margin: 0.4em 0; }
 .scriptorium-tikz-error > strong { display: block; font-weight: 600; color: var(--text-normal); }
 .scriptorium-tikz-error > pre { margin: 0.3em 0 0; padding: 0; background: none; border: 0; white-space: pre-wrap; font-size: 0.85em; color: var(--text-muted); }
+
+/* ==========================================================
+   What follows a short opening paragraph: the manuscript snippet's rules, carried by the plugin
+   The editor's lines are marked by this plugin (openingPlan, dropcapExtension), and the marks are drawn by the
+   rules below; Reading view and an exported PDF are set by them too. They are the snippet's section of the same
+   name, word for word (plugins-tests/scriptorium.test.js checks it), and they are here as well because Obsidian
+   loads a plugin's styles.css with its code, always of the same version, whereas the vault's snippet is a file of
+   its own that can be older: Scriptorium 1.5.0 with a snippet from before 1.4.5 drew the list after "Under
+   Settings → Scriptorium:" through the initial again, in both views, exactly as 1.4.4 did. Where the snippet
+   has the rules too, they are the same rules twice, and nothing changes; where it does not, these are the rules.
+   The depth of each initial (what the float lacks of three lines is measured from it) is carried the same way.
+   The snippet is never written to by the plugin: a writer's own changes to it stay.
+   ========================================================== */
+/* scriptorium: from the manuscript snippet, begin */
+body.scriptorium-initials-goudy,
+.el-p.scriptorium-dropcap-goudy,
+.cm-line.scriptorium-dropcap-goudy {
+  --scriptorium-initial-depth: 4.155em;
+}
+body.scriptorium-initials-plain,
+.el-p.scriptorium-dropcap-plain,
+.cm-line.scriptorium-dropcap-plain {
+  --scriptorium-initial-depth: 4.271em;
+}
+.el-p.scriptorium-dropcap-yinit,
+.cm-line.scriptorium-dropcap-yinit {
+  --scriptorium-initial-depth: 3.96em;
+}
+.el-p.scriptorium-dropcap-image,
+.cm-line.scriptorium-dropcap-image {
+  --scriptorium-initial-depth: 4.43em;
+}
+/* ---------- What follows a short opening paragraph ----------
+   An initial is three lines deep. A paragraph of one line or two is not, so whatever comes after it is beside the
+   initial, and a float pushes only the text of what follows: a list's bullets and numbers were drawn on the
+   initial, a quotation's bar and a callout's slip began under it or against it, and in the editor (where every line
+   of the note is a block of its own, and a list's line hangs its marker by a negative indent) the text of a list or
+   of a quotation was drawn through it. What a compositor does, in both views:
+     - a paragraph goes round the initial, as the opening paragraph's own lines do (nothing to add: the float does it);
+     - a list goes round it too, but item by item: an item beside the initial is set in past it, marker and all,
+       with its further lines hung under its first, and the items below the initial are back at the margin. Each
+       item of the list is given a formatting context of its own, which is what keeps a box clear of a float, and
+       its indent is moved inside the item (padding for margin), so that the marker is inside the box that is kept
+       clear. An item below the initial is set exactly as before;
+     - everything else begins below the initial, on the fourth line: a quotation, a callout, code, a table, a
+       heading, an image, mathematics, a rule, centred or right-aligned text, and the end of the note. The opening
+       paragraph is made three lines deep for that (never less than the initial itself), by an empty block at its
+       end that clears the float: its height is what the initial's float lacks of three lines
+       (--scriptorium-initial-depth is the float's depth, top margin and all), and the same amount of negative margin
+       takes it back where there is no float beside it, so a paragraph of three lines or more is not changed.
+   In Reading view (and in an exported PDF) the rules below read what follows from the blocks themselves. In the
+   editor the Scriptorium plugin reads it from the note's lines (openingPlan) and marks the paragraph's last line
+   .scriptorium-opening-end where what follows begins below, and the first lines of a list .scriptorium-beside-initial.
+   The space is the paragraph's own in both views (not a clearance between blocks), so the editor's measure of its
+   lines stays true. A list after an opening paragraph stands one line below it in Reading view, as the blank line
+   sets it in the editor, so that the same items are beside the initial in both.
+   The Scriptorium plugin carries this section too, word for word, in its own styles.css (its tests check that the
+   two are the same): the plugin's marks in the editor mean nothing without these rules, and a vault's snippet can be
+   older than its plugin (a snippet from before 1.4.5 with a newer plugin drew the list through the initial again, in
+   both views). And Obsidian updates itself but not the Chromium its installer came with: with an installer from
+   2023 (Chromium 114) Reading view drew the first bullet on the initial even with these rules. So each thing an
+   older Chromium lacks has a fallback: the lh unit (Chromium 109) a length from the text's line height (declared
+   before it, or under @supports where the rule has var() in it), float: inline-start (118) float: left, and a list
+   item that is a formatting context of its own (display: flow-root list-item, 115) layout containment, which makes
+   one as well. (Without :has(), 105, what follows a short paragraph begins below the initial.) */
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) > p::after,
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening-end::after {
+  content: "";
+  display: block;
+  clear: left;
+  pointer-events: none;
+  height: max(0px, calc(3em * var(--line-height-normal, 1.45) - var(--scriptorium-initial-depth, 3.96em)));
+  margin-top: min(0px, calc(var(--scriptorium-initial-depth, 3.96em) - 3em * var(--line-height-normal, 1.45)));
+}
+@supports (height: 1lh) {   /* (not a declaration after the fallback: one with var() in it is kept, and fails only when it is used) */
+  .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) > p::after,
+  .markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening-end::after {
+    height: max(0px, calc(3lh - var(--scriptorium-initial-depth, 3.96em)));
+    margin-top: min(0px, calc(var(--scriptorium-initial-depth, 3.96em) - 3lh));
+  }
+}
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align):has(+ .el-p:not(.scriptorium-align), + .el-ul, + .el-ol) > p::after {
+  content: none;                                         /* a paragraph or a list follows: it goes round the initial */
+}
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align):has(+ .el-p > p > :is(.internal-embed, img):first-child) > p::after {
+  content: "";                                           /* ...unless that paragraph is an image */
+}
+/* Two short paragraphs can both be beside the initial (Reading view sets no gap between paragraphs; a third begins
+   on the third line and ends below it): what follows the last of them begins below the initial too. */
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-p:not(.scriptorium-align):not(:has(+ .el-p:not(.scriptorium-align))) > p::after,
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-p:not(.scriptorium-align) + .el-p:not(.scriptorium-align):not(:has(+ .el-p:not(.scriptorium-align))) > p::after {
+  content: "";
+  display: block;
+  clear: left;
+}
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + :is(.el-ul, .el-ol) > :is(ul, ol) {
+  margin-block-start: calc(1em * var(--line-height-normal, 1.45));
+  margin-block-start: 1lh;
+}
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + :is(.el-ul, .el-ol) > :is(ul, ol) > li {
+  display: flow-root list-item;
+  margin-inline-start: 0;
+  padding-inline-start: 3ch;                             /* Obsidian's indent of an item, as padding */
+}
+@supports not (display: flow-root list-item) {
+  .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + :is(.el-ul, .el-ol) > :is(ul, ol) > li {
+    contain: layout;                                     /* (the item stays a list item, and is kept clear of the float all the same) */
+  }
+}
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-beside-initial {
+  display: flow-root;
+}
+/* A numbered item's number is a marker outside its box, and so outside what is kept clear: the number is set
+   inside the item instead, where the marker stood (in figures, with a full stop, as Obsidian has it). */
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-ol > ol > li {
+  list-style-type: none;
+}
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-ol > ol > li::before {
+  content: counter(list-item) ". ";
+  float: left;
+  float: inline-start;
+  width: 6ch;
+  margin-inline-start: -6ch;
+  text-align: end;
+  white-space: pre;
+  color: var(--list-marker-color);
+  font-variant-numeric: tabular-nums;
+}
+/* A bullet that is the browser's own marker is outside the item's box too: an exported PDF has those (Reading view's
+   bullets are Obsidian's, drawn inside the item). It is drawn inside the item instead, the size of the browser's disc
+   and where the browser sets it (Chromium: a disc of a third of the ascent, 21 px left of the text at this size). */
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-ul > ul:not(.has-list-bullet) > li:not(.task-list-item) {
+  list-style-type: none;
+}
+.markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-ul > ul:not(.has-list-bullet) > li:not(.task-list-item)::before {
+  content: "";
+  float: left;
+  float: inline-start;
+  width: 0.318em;
+  height: 0.318em;
+  margin: calc((1em * var(--line-height-normal, 1.45) - 1.305em) / 2 + 0.552em) 0 0 -0.955em;
+  margin: calc((1lh - 1.305em) / 2 + 0.552em) 0 0 -0.955em;
+  border-radius: 50%;
+  background: var(--list-marker-color);
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+/* In the editor the lines under an item (its further lines, the items set in under it) are lines of their own: the
+   plugin measures how far the item was set in past the initial and sets them in as far (in Reading view they are
+   inside the item). Beside the initial the margin is under the float and changes nothing. */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-under-initial {
+  margin-left: var(--scriptorium-beside-shift, 0px) !important;   /* (Obsidian gives the editor's lines no margin, and says it is important: that is for the margins above and below a line, which the editor does not measure) */
+}
+/* scriptorium: from the manuscript snippet, end */

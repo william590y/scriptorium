@@ -1213,8 +1213,11 @@ test('what follows a short opening paragraph: the snippet keeps it clear of the 
   assert.ok(rule.startsWith(OPEN), 'the rule that makes the paragraph three lines deep');
   const body = rule.slice(0, rule.indexOf('}'));
   assert.match(body, /clear: left;/);
-  assert.match(body, /height: max\(0px, calc\(3lh - var\(--scriptorium-initial-depth, 3\.96em\)\)\);/);
-  assert.match(body, /margin-top: min\(0px, calc\(var\(--scriptorium-initial-depth, 3\.96em\) - 3lh\)\);/, 'taken back where no float is beside it: a long paragraph is not changed');
+  const lh = /@supports \(height: 1lh\) \{[^{}]*\{([^{}]*)\}\s*\}/.exec(rule);
+  assert.ok(lh && rule.indexOf(lh[0]) === rule.indexOf('@supports'), 'where the lh unit is known, the rule right after it says how deep');
+  assert.match(lh[1], /height: max\(0px, calc\(3lh - var\(--scriptorium-initial-depth, 3\.96em\)\)\);/);
+  assert.match(lh[1], /margin-top: min\(0px, calc\(var\(--scriptorium-initial-depth, 3\.96em\) - 3lh\)\);/, 'taken back where no float is beside it: a long paragraph is not changed');
+  assert.match(body, /height: max\(0px, calc\(3em \* var\(--line-height-normal, 1\.45\) - var\(--scriptorium-initial-depth, 3\.96em\)\)\);/, 'and where it is not, the same from the line height');
   assert.ok(css.includes(`${OPEN}:has(+ .el-p:not(.scriptorium-align), + .el-ul, + .el-ol) > p::after {\n  content: none;`), 'not where a paragraph or a list follows');
   assert.ok(css.includes(`${OPEN}:has(+ .el-p > p > :is(.internal-embed, img):first-child) > p::after {\n  content: "";`), 'an image is no paragraph');
   // how deep each initial's float is: size × (1 + top margin + bottom margin), as the rules above it say
@@ -1226,11 +1229,11 @@ test('what follows a short opening paragraph: the snippet keeps it clear of the 
   assert.match(css, /--scriptorium-initial-depth: 4\.43em;\s*\/\* dropped: 4\.15 em of image under 0\.28 em of margin \*\//);
   // a list: each item a box of its own with its indent inside, the number inside too; the editor's lines the same
   assert.ok(css.includes(`${OPEN} + :is(.el-ul, .el-ol) > :is(ul, ol) > li {\n  display: flow-root list-item;\n  margin-inline-start: 0;\n  padding-inline-start: 3ch;`));
-  assert.ok(css.includes(`${OPEN} + :is(.el-ul, .el-ol) > :is(ul, ol) {\n  margin-block-start: 1lh;`), 'a line below the paragraph, as the editor’s blank line');
+  assert.ok(css.includes(`${OPEN} + :is(.el-ul, .el-ol) > :is(ul, ol) {\n  margin-block-start: calc(1em * var(--line-height-normal, 1.45));\n  margin-block-start: 1lh;`), 'a line below the paragraph, as the editor’s blank line');
   assert.ok(css.includes(`${OPEN} + .el-ol > ol > li::before {\n  content: counter(list-item) ". ";`));
   assert.ok(css.includes(`${LP}.scriptorium-beside-initial {\n  display: flow-root;`));
   // an exported PDF has the browser's own bullets, outside the item's box: drawn inside the item there (not a task's checkbox)
-  assert.ok(css.includes(`${OPEN} + .el-ul > ul:not(.has-list-bullet) > li:not(.task-list-item)::before {\n  content: "";\n  float: inline-start;`));
+  assert.ok(css.includes(`${OPEN} + .el-ul > ul:not(.has-list-bullet) > li:not(.task-list-item)::before {\n  content: "";\n  float: left;\n  float: inline-start;`));
   assert.ok(css.includes(`${OPEN} + .el-p:not(.scriptorium-align):not(:has(+ .el-p:not(.scriptorium-align))) > p::after,`), 'what follows a second short paragraph');
   assert.match(css, /\.cm-line\.scriptorium-under-initial \{\s*margin-left: var\(--scriptorium-beside-shift, 0px\) !important;/);
   // nothing here gives the editor's lines a margin above or below, or a clearance between lines: the editor does not measure those
@@ -1238,6 +1241,76 @@ test('what follows a short opening paragraph: the snippet keeps it clear of the 
   const src = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'main.js'), 'utf8');
   for (const cls of ['scriptorium-opening-end', 'scriptorium-beside-initial', 'scriptorium-under-initial']) assert.ok(src.includes(`'${cls}'`), cls);
   assert.match(src, /if \(o\.standing\) continue;/, 'a standing initial has nothing beside it');
+});
+
+test('what follows a short opening paragraph: the plugin carries the snippet’s rules, word for word, so that an older snippet cannot undo them', () => {
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8');
+  const own = fs.readFileSync(path.join(VAULT, '.obsidian', 'plugins', 'scriptorium', 'styles.css'), 'utf8');
+  const start = '/* ---------- What follows a short opening paragraph ----------';
+  const section = css.slice(css.indexOf(start), css.indexOf('/* ---------- ', css.indexOf(start) + start.length)).replace(/\s+$/, '\n');
+  assert.ok(section.length > 4000 && section.includes('.scriptorium-beside-initial'), 'the snippet’s section');
+  const begin = '/* scriptorium: from the manuscript snippet, begin */', end = '/* scriptorium: from the manuscript snippet, end */';
+  assert.equal(own.split(begin).length - 1, 1, 'one copy in the plugin’s styles.css');
+  const carried = own.slice(own.indexOf(begin), own.indexOf(end));
+  assert.ok(carried.includes(section), 'the section is in the plugin’s styles.css as it is in the snippet (copy it across when either changes)');
+  // the depth of each initial, as the snippet has it, for each class the snippet gives it to
+  const depths = text => {
+    const out = {};
+    for (const m of text.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*--scriptorium-initial-depth:\s*([\d.]+em)[^{}]*)\}/g)) {
+      for (const sel of m[1].split(',').map(x => x.trim()).filter(Boolean)) out[sel] = m[3];
+    }
+    return out;
+  };
+  const want = depths(css.replace(/url\("data:[^"]*"\)/g, 'url()')), got = depths(carried);
+  assert.ok(Object.keys(want).length >= 7, JSON.stringify(want));
+  assert.deepEqual(got, want, 'the same depth for the same initial');
+  // the editor's marks are drawn by rules the plugin has itself
+  for (const cls of ['scriptorium-opening-end', 'scriptorium-beside-initial', 'scriptorium-under-initial']) assert.ok(carried.includes(`.cm-line.${cls}`), cls);
+});
+
+test('what follows a short opening paragraph: each rule that an older Chromium may lack has a fallback', () => {
+  // (Obsidian updates itself, but not the Chromium of its installer: an installer from 2023 has Chromium 114, one from early 2023 106)
+  const css = fs.readFileSync(path.join(VAULT, '.obsidian', 'snippets', 'manuscript.css'), 'utf8');
+  const start = '/* ---------- What follows a short opening paragraph ----------';
+  let section = css.slice(css.indexOf(start), css.indexOf('/* ---------- ', css.indexOf(start) + start.length)).replace(/\/\*[\s\S]*?\*\//g, '');
+  const parse = text => [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(m => ({ sel: m[1].trim().replace(/\s+/g, ' '), decls: m[2].split(';').map(d => d.trim()).filter(Boolean).map(d => [d.slice(0, d.indexOf(':')).trim(), d.slice(d.indexOf(':') + 1).trim()]) }));
+  const blocks = cond => { const out = []; section = section.replace(new RegExp(`@supports ${cond.replace(/[()]/g, '\\$&')} \\{((?:\\s*[^{}]+\\{[^{}]*\\})+)\\s*\\}`, 'g'), (m, inner) => { out.push(...parse(inner)); return ''; }); return out; };
+  const whereLh = blocks('(height: 1lh)'), notFlow = blocks('not (display: flow-root list-item)');
+  const rules = parse(section);
+  assert.ok(!/@supports/.test(section), 'every @supports block is one of the two');
+  let lh = 0, floats = 0;
+  const same = (fallback, value) => fallback.replace(/(\d+(?:\.\d+)?)em \* var\(--line-height-normal, 1\.45\)/g, '$1lh').replace(/calc\((\d)lh\)/g, '$1lh') === value;
+  for (const r of rules) {
+    r.decls.forEach(([prop, value], i) => {
+      // the lh unit (Chromium 109): the same length from the text's line height, just before it. A declaration with
+      // var() in it is not dropped where the unit is unknown (it is checked only when it is used, and then fails: the
+      // property is unset): those are under @supports (height: 1lh), below
+      if (/\dlh\b/.test(value)) {
+        lh++;
+        assert.ok(!/var\(/.test(value), `${prop}: ${value} has var() in it and must be under @supports (height: 1lh)`);
+        const before = r.decls[i - 1];
+        assert.ok(before && before[0] === prop && !/\dlh\b/.test(before[1]) && same(before[1], value), `${prop}: ${value} has no fallback just before it`);
+      }
+      // float: inline-start (Chromium 118): float: left just before it
+      if (prop === 'float' && value === 'inline-start') { floats++; assert.deepEqual(r.decls[i - 1], ['float', 'left'], r.sel.slice(-60)); }
+    });
+  }
+  for (const r of whereLh) {
+    const main = rules.find(x => x.sel === r.sel);
+    assert.ok(main, `the rule under @supports (height: 1lh) has one of its own outside it: ${r.sel.slice(-60)}`);
+    for (const [prop, value] of r.decls) {
+      lh++;
+      const fallback = main.decls.filter(([p]) => p === prop).pop();
+      assert.ok(fallback && same(fallback[1], value), `${prop}: ${value}: the rule outside @supports says the same from the line height`);
+    }
+  }
+  assert.ok(lh >= 4 && floats >= 2 && whereLh.length >= 1, `${lh} uses of lh, ${floats} of inline-start`);
+  // a list item that is a formatting context of its own (display: flow-root list-item, Chromium 115): layout containment where that is not known
+  const flow = rules.filter(r => r.decls.some(([p, v]) => p === 'display' && v === 'flow-root list-item'));
+  assert.equal(flow.length, 1);
+  assert.equal(notFlow.length, 1);
+  assert.equal(notFlow[0].sel, flow[0].sel, 'the same items');
+  assert.deepEqual(notFlow[0].decls, [['contain', 'layout']]);
 });
 
 test('drop caps in Live Preview: the plugin registers the extension, never changes the note for it, and previews in the editor too', () => {
@@ -1271,7 +1344,8 @@ test('drop caps in Live Preview: off, nothing is put into the editors; on and of
   };
   try {
     let told = 0;
-    const plugin = { settings: S.normalizeSettings({ liveDropcaps: false }), liveExtensions: made, dropcapLive: null, app: { workspace: { updateOptions: () => { told++; } } } };
+    const events = [];
+    const plugin = { settings: S.normalizeSettings({ liveDropcaps: false }), liveExtensions: made, dropcapLive: null, app: { workspace: { updateOptions: () => { told++; }, trigger: name => events.push(name) } } };
     const apply = () => S.prototype.applyLiveDropcaps.call(plugin);
     apply();
     assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 0], 'turned off: nothing registered, no editor touched');
@@ -1283,11 +1357,13 @@ test('drop caps in Live Preview: off, nothing is put into the editors; on and of
     assert.equal(made.length, 1);
     assert.ok(plugin.dropcapLive && Array.isArray(made[0]) && made[0].length >= 3);
     assert.equal(told, 1, 'the editors are told at once');
+    assert.deepEqual(events, ['css-change'], 'and they measure the list lines’ indents again (Obsidian keeps them until the CSS changes)');
     apply();
     assert.equal(told, 1, 'not again while nothing changed');
+    assert.equal(events.length, 1);
     plugin.settings = S.normalizeSettings({ liveDropcaps: false });
     apply();
-    assert.deepEqual([made.length, plugin.dropcapLive, told], [0, null, 2], 'off again: taken out of the editors');
+    assert.deepEqual([made.length, plugin.dropcapLive, told, events.length], [0, null, 2, 2], 'off again: taken out of the editors');
   } finally { Module._load = realLoad2; }
 });
 

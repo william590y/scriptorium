@@ -400,15 +400,31 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-op
    .scriptorium-opening-end where what follows begins below, and the first lines of a list .scriptorium-beside-initial.
    The space is the paragraph's own in both views (not a clearance between blocks), so the editor's measure of its
    lines stays true. A list after an opening paragraph stands one line below it in Reading view, as the blank line
-   sets it in the editor, so that the same items are beside the initial in both. */
+   sets it in the editor, so that the same items are beside the initial in both.
+   The Scriptorium plugin carries this section too, word for word, in its own styles.css (its tests check that the
+   two are the same): the plugin's marks in the editor mean nothing without these rules, and a vault's snippet can be
+   older than its plugin (a snippet from before 1.4.5 with a newer plugin drew the list through the initial again, in
+   both views). And Obsidian updates itself but not the Chromium its installer came with: with an installer from
+   2023 (Chromium 114) Reading view drew the first bullet on the initial even with these rules. So each thing an
+   older Chromium lacks has a fallback: the lh unit (Chromium 109) a length from the text's line height (declared
+   before it, or under @supports where the rule has var() in it), float: inline-start (118) float: left, and a list
+   item that is a formatting context of its own (display: flow-root list-item, 115) layout containment, which makes
+   one as well. (Without :has(), 105, what follows a short paragraph begins below the initial.) */
 .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) > p::after,
 .markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening-end::after {
   content: "";
   display: block;
   clear: left;
   pointer-events: none;
-  height: max(0px, calc(3lh - var(--scriptorium-initial-depth, 3.96em)));
-  margin-top: min(0px, calc(var(--scriptorium-initial-depth, 3.96em) - 3lh));
+  height: max(0px, calc(3em * var(--line-height-normal, 1.45) - var(--scriptorium-initial-depth, 3.96em)));
+  margin-top: min(0px, calc(var(--scriptorium-initial-depth, 3.96em) - 3em * var(--line-height-normal, 1.45)));
+}
+@supports (height: 1lh) {   /* (not a declaration after the fallback: one with var() in it is kept, and fails only when it is used) */
+  .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) > p::after,
+  .markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-opening-end::after {
+    height: max(0px, calc(3lh - var(--scriptorium-initial-depth, 3.96em)));
+    margin-top: min(0px, calc(var(--scriptorium-initial-depth, 3.96em) - 3lh));
+  }
 }
 .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align):has(+ .el-p:not(.scriptorium-align), + .el-ul, + .el-ol) > p::after {
   content: none;                                         /* a paragraph or a list follows: it goes round the initial */
@@ -425,12 +441,18 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-op
   clear: left;
 }
 .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + :is(.el-ul, .el-ol) > :is(ul, ol) {
+  margin-block-start: calc(1em * var(--line-height-normal, 1.45));
   margin-block-start: 1lh;
 }
 .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + :is(.el-ul, .el-ol) > :is(ul, ol) > li {
   display: flow-root list-item;
   margin-inline-start: 0;
   padding-inline-start: 3ch;                             /* Obsidian's indent of an item, as padding */
+}
+@supports not (display: flow-root list-item) {
+  .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + :is(.el-ul, .el-ol) > :is(ul, ol) > li {
+    contain: layout;                                     /* (the item stays a list item, and is kept clear of the float all the same) */
+  }
 }
 .markdown-source-view.mod-cm6.is-live-preview .cm-line.scriptorium-beside-initial {
   display: flow-root;
@@ -442,6 +464,7 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-op
 }
 .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-ol > ol > li::before {
   content: counter(list-item) ". ";
+  float: left;
   float: inline-start;
   width: 6ch;
   margin-inline-start: -6ch;
@@ -458,9 +481,11 @@ body .markdown-rendered :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-op
 }
 .markdown-rendered :is(:is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens), :is(.mod-header, .el-h1, .el-h2, .el-h6, .scriptorium-opens) + .el-blockquote) + .el-p:not(.scriptorium-align) + .el-ul > ul:not(.has-list-bullet) > li:not(.task-list-item)::before {
   content: "";
+  float: left;
   float: inline-start;
   width: 0.318em;
   height: 0.318em;
+  margin: calc((1em * var(--line-height-normal, 1.45) - 1.305em) / 2 + 0.552em) 0 0 -0.955em;
   margin: calc((1lh - 1.305em) / 2 + 0.552em) 0 0 -0.955em;
   border-radius: 50%;
   background: var(--list-marker-color);

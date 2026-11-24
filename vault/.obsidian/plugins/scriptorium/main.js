@@ -5737,6 +5737,12 @@ class Scriptorium extends Plugin {
       if (on) this.liveExtensions.push(this.dropcapLive.extension);
       this.app.workspace.updateOptions();
     } catch (e) { this.dropcapLive = null; this.liveExtensions.length = 0; console.error('Scriptorium: no drop caps in Live Preview', e); }
+    // Obsidian measures how far each line of a list in the editor hangs its marker once, and keeps the measure until
+    // the line's text or the CSS changes (not when the line's class does). A line measured while the initial's float
+    // pushed its words (as it did with a snippet older than the rules for what follows a short opening paragraph)
+    // went on hanging its further lines far to the right once the rules were there. As a change of CSS would, this
+    // has Obsidian measure them again (the plugin's own styles.css comes with its code, and says nothing of it).
+    try { this.app.workspace.trigger('css-change'); } catch (e) { /* the measures are as they were */ }
   }
 
   /* Has every editor set its opening lines again, and look again at where their first lines break. */
