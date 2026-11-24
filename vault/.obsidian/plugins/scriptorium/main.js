@@ -1353,10 +1353,12 @@ function dropcapExtension(plugin) {
   // plugin's copy of it), and says so itself as well: Obsidian measures how far a list line hangs its marker from the
   // page, and a line measured while the initial's float pushed its words keeps that measure. Obsidian loads the
   // plugin's styles.css only after the plugin has started, and the vault's snippet can be older than the plugin, so
-  // the mark is not left to wait for a stylesheet.
+  // the mark is not left to wait for a stylesheet. (In Live Preview only: Source mode stays plain, and there the mark
+  // is the class alone, which nothing draws.)
   const beside = Decoration.line({ class: 'scriptorium-beside-initial', attributes: { style: 'display: flow-root' } });
+  const besideSource = Decoration.line({ class: 'scriptorium-beside-initial' });
   const decorate = (state, value) => {
-    const ranges = [], froms = [], lists = [];
+    const ranges = [], froms = [], lists = [], lp = live(state);
     if (value.openings.length) {
       const choice = plugin.dropcapChoice(value.shown ? value.shown.which : value.said), path = pathOf(state);
       for (const o of value.openings) {
@@ -1378,7 +1380,7 @@ function dropcapExtension(plugin) {
         else if (o.after === 'list') {
           for (let n = o.list[0]; n <= Math.min(o.list[1], o.list[0] + BESIDE_LINES - 1, state.doc.lines - 1); n++) {
             const item = state.doc.line(n + 1);
-            if (/\S/.test(item.text)) ranges.push(beside.range(item.from));
+            if (/\S/.test(item.text)) ranges.push((lp ? beside : besideSource).range(item.from));
           }
           const at = n => (n < state.doc.lines ? state.doc.line(n + 1).from : -1);
           lists.push({ open: line.from, items: o.items.map(i => ({ at: at(i.line), under: i.under.map(at).filter(p => p >= 0) })).filter(i => i.at >= 0 && i.under.length) });
@@ -1403,6 +1405,7 @@ function dropcapExtension(plugin) {
         else if (e.is(ink)) { next = Object.assign({}, next, { inked: Boolean(e.value) }); again = true; }
       }
       if (!again && tr.selection && value.openings.some(o => o.led)) again = true;
+      if (!again && value.lists.length && live(tr.startState) !== live(tr.state)) again = true;   // Live Preview or Source mode now (the mark of a list line)
       return again ? decorate(tr.state, next) : value;
     },
     provide: f => EditorView.decorations.from(f, value => value.deco),
