@@ -486,6 +486,126 @@ test('two computers on one Drive folder: each sees the other’s work, deletions
   assert.equal(read(path.join(a.paths.kept, a.id, S.syncStamp(new Date())), 'Book/ch3.md'), 'chapter three');
 });
 
+/* Every file's contents on one side of the sync, so that "nothing was deleted" can be checked: each one must still be
+   somewhere on both sides afterwards (merged notes hold its lines instead). */
+const contents = dir => Object.entries(tree(dir)).filter(([rel]) => rel !== S.SYNC_SENTINEL);
+
+test('merging both sides on the first sync: notes merged line by line, other files kept twice, nothing deleted', { skip }, async t => {
+  const d = drive(t), a = computer(t, d, 'a');
+  // two sides that went their own ways
+  write(a.dir, 'Notes/day.md', '# Monday\n\nRain in the morning.\nWrote the first scene.\nLunch.\n', ago(900));
+  write(d.folder, 'Notes/day.md', '# Monday\n\nRain in the morning.\nLunch.\nCalled the printer.\n', ago(600));
+  write(a.dir, 'Notes/list.md', '- bread\n- milk\n- eggs (here)\n', ago(100));
+  write(d.folder, 'Notes/list.md', '- bread\n- milk\n- tea (Drive)\n', ago(200));
+  write(a.dir, 'Notes/props.md', '---\nstatus: draft\ntags: [a]\n---\nBody\nhere\n', ago(800));
+  write(d.folder, 'Notes/props.md', '---\nstatus: done\ntags: [b]\n---\nBody\nthere\n', ago(50));
+  write(a.dir, 'Notes/crlf.md', 'one\r\ntwo\r\n', ago(30));
+  write(d.folder, 'Notes/crlf.md', 'one\nthree\n', ago(30));
+  write(a.dir, 'pic.png', crypto.randomBytes(3000), ago(10));
+  write(d.folder, 'pic.png', crypto.randomBytes(3000), ago(20));
+  write(a.dir, 'board.canvas', '{"nodes":["here"]}', ago(10));
+  write(d.folder, 'board.canvas', '{"nodes":["there"]}', ago(10));
+  write(a.dir, 'same.md', 'same on both'); write(d.folder, 'same.md', 'same on both');
+  write(a.dir, 'only here.md', 'L'); write(d.folder, 'Sub/only in drive.md', 'R');
+  const before = { here: contents(a.dir), there: contents(d.folder) };
+  const texts = {};
+  for (const rel of ['Notes/day.md', 'Notes/list.md', 'Notes/crlf.md']) texts[rel] = [read(a.dir, rel), read(d.folder, rel)];
+  const pv = await a.preview();
+  assert.deepEqual(pv.differ.slice().sort(), ['Notes/crlf.md', 'Notes/day.md', 'Notes/list.md', 'Notes/props.md', 'board.canvas', 'pic.png']);
+  assert.deepEqual(S.syncMergePlan(pv), { notes: pv.differ.filter(n => n.endsWith('.md')), twice: pv.differ.filter(n => !n.endsWith('.md')) });
+  const r = await a.first({ differ: pv.differ, unread: pv.unread, taken: pv.taken, keep: 'union' });
+  assert.ok(r.summary.ok);
+  assert.deepEqual(r.merged.slice().sort(), ['Notes/crlf.md', 'Notes/day.md', 'Notes/list.md', 'Notes/props.md']);
+  assert.deepEqual(r.renamed.slice().sort(), [['board.canvas', 'board.conflict1.canvas'], ['pic.png', 'pic.conflict1.png']]);
+  for (const side of [a.dir, d.folder]) {
+    assert.equal(read(side, 'Notes/day.md'), '# Monday\n\nRain in the morning.\nWrote the first scene.\nLunch.\nCalled the printer.\n');
+    assert.equal(read(side, 'Notes/list.md'), '- bread\n- milk\n- eggs (here)\n- tea (Drive)\n');
+    assert.equal(read(side, 'Notes/props.md'), '---\nstatus: done\ntags: [b]\n---\nBody\nhere\nthere\n', 'Drive’s properties are the newer');
+    assert.equal(read(side, 'Notes/crlf.md'), 'one\r\ntwo\r\nthree\r\n', 'this computer’s line ends');
+    assert.equal(read(side, 'only here.md'), 'L');
+    assert.equal(read(side, 'Sub/only in drive.md'), 'R');
+  }
+  assert.deepEqual(tree(a.dir), tree(d.folder), 'both sides hold the same files');
+  // nothing was deleted: every file of either side is still there on both, whole or as lines of a merged note
+  const after = tree(a.dir), all = Object.values(after);
+  for (const [rel, hash] of before.here.concat(before.there)) {
+    if (S.syncUnionable(rel)) continue;
+    assert.ok(all.includes(hash), `${rel} (${hash}) is still on both sides`);
+  }
+  for (const rel of ['Notes/day.md', 'Notes/list.md', 'Notes/crlf.md']) {
+    const merged = read(a.dir, rel).split(/\r?\n/);
+    for (const l of texts[rel].join('\n').split(/\r?\n/)) assert.ok(merged.includes(l), `${rel}: “${l}” is in the merged note`);
+  }
+  // this computer's versions from before the merge are kept in the folder of replaced files
+  const kept = path.join(a.paths.kept, a.id, S.syncStamp(new Date()));
+  assert.equal(read(kept, 'Notes/day.md'), '# Monday\n\nRain in the morning.\nWrote the first scene.\nLunch.\n');
+  // and then the sync goes on as usual, with nothing left to do
+  const again = await a.sync();
+  assert.equal(S.syncSummaryText(again.summary), 'nothing had changed');
+});
+
+test('“Merge with Google Drive” on a vault that already syncs: notes merged, files deleted on one side come back', { skip }, async t => {
+  const d = drive(t), a = computer(t, d, 'a');
+  write(a.dir, 'ch1.md', 'One.\n'); write(a.dir, 'ch2.md', 'Two.\n'); write(a.dir, 'gone here.md', 'G'); write(a.dir, 'img.jpg', 'jpeg');
+  await a.first({});
+  // the sync is left off for a while (say on another computer, with its own record) and both sides drift
+  fs.unlinkSync(path.join(a.dir, 'gone here.md'));
+  fs.unlinkSync(path.join(d.folder, 'img.jpg'));
+  write(a.dir, 'ch1.md', 'One.\nMore, written here.\n', ago(100));
+  write(d.folder, 'ch1.md', 'One.\nMore, written in Drive.\n', ago(50));
+  write(d.folder, 'ch3.md', 'Three.\n');
+  const pv = await a.preview();
+  assert.deepEqual(S.syncMergePlan(pv), { notes: ['ch1.md'], twice: [] });
+  assert.deepEqual([pv.onlyLocal, pv.onlyDrive], [1, 2]);
+  const r = await a.first({ differ: pv.differ, unread: pv.unread, taken: pv.taken, keep: 'union' });
+  assert.deepEqual(r.merged, ['ch1.md']);
+  for (const side of [a.dir, d.folder]) {
+    assert.equal(read(side, 'ch1.md'), 'One.\nMore, written here.\nMore, written in Drive.\n');
+    assert.equal(read(side, 'gone here.md'), 'G', 'deleted here since the last sync: back');
+    assert.equal(read(side, 'img.jpg'), 'jpeg', 'deleted in Drive since the last sync: back');
+    assert.equal(read(side, 'ch3.md'), 'Three.\n');
+  }
+  assert.deepEqual(tree(a.dir), tree(d.folder));
+  // the regular syncs go on: an edit travels, and nothing else moves
+  write(a.dir, 'ch2.md', 'Two, edited.\n');
+  const next = await a.sync();
+  assert.equal(read(d.folder, 'ch2.md'), 'Two, edited.\n');
+  assert.deepEqual([next.summary.deleted, next.summary.conflicts.length], [0, 0]);
+});
+
+test('a note changed on both sides between syncs is merged when the setting says so; a picture keeps both', { skip }, async t => {
+  const d = drive(t), a = computer(t, d, 'a', { conflicts: 'merge' });
+  write(a.dir, 'Chapter.md', 'Title\n\nFirst words.\n'); write(a.dir, 'pic.png', crypto.randomBytes(100)); write(a.dir, 'other.md', 'x');
+  await a.first({});
+  write(a.dir, 'Chapter.md', 'Title\n\nFirst words.\nWritten on this computer.\n', ago(60));
+  write(d.folder, 'Chapter.md', 'Title\n\nFirst words.\nWritten on the other computer, later.\n', ago(5));
+  write(a.dir, 'pic.png', crypto.randomBytes(100), ago(60));
+  write(d.folder, 'pic.png', crypto.randomBytes(100), ago(5));
+  const r = await a.sync();
+  assert.deepEqual(r.summary.conflicts.slice().sort(), ['Chapter.md', 'pic.png']);
+  assert.deepEqual(r.summary.merged, ['Chapter.md']);
+  assert.match(S.syncSummaryText(r.summary), /1 note changed on both sides \(merged\), 1 file changed on both sides \(both versions kept\)$/);
+  for (const side of [a.dir, d.folder]) {
+    assert.equal(read(side, 'Chapter.md'), 'Title\n\nFirst words.\nWritten on this computer.\nWritten on the other computer, later.\n');
+    assert.ok(!has(side, 'Chapter.conflict1.md'), 'no second copy of the note on either side');
+    assert.ok(has(side, 'pic.png') && has(side, 'pic.conflict1.png'), 'the picture keeps both');
+  }
+  assert.deepEqual(tree(a.dir), tree(d.folder));
+  // the copy that was merged in is kept on this computer, in the folder of replaced files
+  assert.equal(read(path.join(a.paths.kept, a.id, S.syncStamp(new Date())), 'Chapter.conflict1.md'), 'Title\n\nFirst words.\nWritten on this computer.\n');
+  // now this computer's version wins (newer), and is still merged the same way, Drive's lines after it
+  write(d.folder, 'Chapter.md', 'Title\n\nFirst words.\nWritten on the other computer, later.\nAnd more there.\n', ago(40));
+  write(a.dir, 'Chapter.md', 'Title\n\nFirst words.\nWritten on this computer.\nWritten on the other computer, later.\nAnd more here.\n', ago(2));
+  const r2 = await a.sync();
+  assert.deepEqual(r2.summary.merged, ['Chapter.md']);
+  for (const side of [a.dir, d.folder]) {
+    assert.equal(read(side, 'Chapter.md'), 'Title\n\nFirst words.\nWritten on this computer.\nWritten on the other computer, later.\nAnd more here.\nAnd more there.\n');
+    assert.ok(!fs.readdirSync(side).some(n => /^Chapter\.conflict\d+\.md$/.test(n)));
+  }
+  const quiet = await a.sync();
+  assert.equal(S.syncSummaryText(quiet.summary), 'nothing had changed');
+});
+
 test('retrieving: a Drive folder is copied into a new folder, then linked without a second look', { skip }, async t => {
   const d = drive(t), a = computer(t, d, 'a');
   write(a.dir, 'Notes/a.md', 'A'); write(a.dir, 'pic.png', crypto.randomBytes(200000)); write(a.dir, '.obsidian/app.json', '{"x":1}');

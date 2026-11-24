@@ -74,7 +74,8 @@ async function check(vault, user) {
   let saved = null;
   try { saved = JSON.parse(fs.readFileSync(k.data, 'utf8')); } catch (e) { /* said below */ }
   const settings = S.syncSettings(S.normalizeSettings(saved));
-  want(saved && same(settings, SYNC), 'the vault’s sync settings are its own');
+  // every setting saved is read as it was; one that came after 1.5.0 (conflicts) is at its default
+  want(saved && same(settings, Object.assign({}, SYNC, { conflicts: 'both' })), 'the vault’s sync settings are its own');
   want(saved && saved.syncMoveTold === true && same(saved.drive, { folder: 'an older backup' }) && saved.fancyMode === true, 'the plugin’s other settings are the vault’s own');
   want(same(S.syncReadJson(fs, paths.device), DEVICE), 'the path to rclone is kept');
   want(RECORD.every(name => fs.existsSync(path.join(paths.work, id, name))), 'rclone’s record of the last sync is there');

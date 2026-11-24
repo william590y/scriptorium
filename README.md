@@ -757,11 +757,15 @@ there.
 5. **Look at what the first sync will do.** Scriptorium compares the two sides and shows the counts: files only here
    (copied up), files only in Drive (copied down), files that are the same, and files with the same name but different
    contents. For those you choose: **keep both** (the default: Drive's version keeps the name and yours is kept beside
-   it as `name.conflict1.md`), keep this computer's, or keep Drive's. The first sync deletes nothing. Click **Start
-   syncing**.
+   it as `name.conflict1.md`), **merge both sides** (notes are merged line by line, other files are kept twice: see
+   [Merging both sides](#merging-both-sides)), keep this computer's, or keep Drive's. The first sync deletes nothing.
+   Click **Start syncing**.
 
 From then on the status bar says **Drive: synced 14:02**. Click it to sync at once, to see conflicts and problems, to
 choose another folder, or to stop.
+
+**Merging later.** For a vault that already syncs, **Scriptorium: Merge with Google Drive (keep everything from both
+sides)** does the same merge at any time: see [Merging both sides](#merging-both-sides).
 
 **A second computer.** Install Scriptorium there, then either run **Scriptorium: Retrieve a vault from Google Drive**
 (sign in, pick the Drive folder, pick a new folder on the computer: the vault is copied down, set up as a Scriptorium
@@ -794,7 +798,9 @@ computer (and withdraws it at Google where rclone can).
 
 - **Nothing is deleted by the first sync**, and it is only run after you have seen what it will do.
 - **A file changed on both sides keeps both.** The newer one keeps the name; the older becomes `name.conflict1.md`
-  (then `conflict2`, and so on) on both sides. The status window lists these copies until you delete them.
+  (then `conflict2`, and so on) on both sides. The status window lists these copies until you delete them. If you
+  prefer, **Notes changed on both computers between syncs: Merge them** in the settings merges such a note into one
+  instead (see [Merging both sides](#merging-both-sides)); other files always keep both.
 - **A missing side stops the sync instead of emptying the other.** A small file, `.scriptorium-sync`, is kept on both
   sides; a run in which it is missing on either side changes nothing (rclone's `--check-access`). That covers a Drive
   folder that was emptied, moved or replaced, a different Google account, and a vault whose disk is not connected.
@@ -842,6 +848,39 @@ These are not measurements of the real Google Drive, whose delays vary with your
 where the time goes with yours, sync, then run **Copy the Google Drive diagnostic report**: each sync is listed with
 what set it off (a change, the timer, a change in Drive, you) and its steps in seconds (rclone starting and finding the
 folder, reading both sides, copying, writing down the result).
+
+### Merging both sides
+
+A merge keeps everything from both sides and deletes nothing. It is there in three places:
+
+- **On the first sync** (and **Set up the sync again**), as the choice **Merge both sides** for the files that differ.
+- **Scriptorium: Merge with Google Drive (keep everything from both sides)**, for a vault that already syncs. It first
+  compares the two sides and shows what it will do (how many files go up and down, which notes are merged and which
+  files are kept twice); nothing changes until you click **Merge**. Then the regular syncs go on as before.
+- **Settings → Scriptorium → Notes changed on both computers between syncs**: **Keep both copies** (the default, as
+  in every earlier version) or **Merge them**, for a note changed on two computers between two syncs. With **Merge
+  them**, the copy that the sync kept beside the note (`name.conflict1.md`) is merged into it at once and moved to
+  Scriptorium's folder of replaced files, and the merged note goes to Drive in the same run.
+
+What a merge does:
+
+- **A file that is on one side only is copied to the other.** That includes a file deleted on one side since the last
+  sync: a merge cannot tell a deletion from a file that was never there, so **deleted files come back**. The merge
+  command says so before it starts.
+- **A note that differs is merged line by line into one note**, on both sides. The lines both versions have appear
+  once, in their order; where the two differ, this computer's lines come first, then Drive's. No conflict markers are
+  written, and a line that only one side deleted is kept. Two paragraphs written at the same place end up one after
+  the other, without a blank line between them: look the note over afterwards. The properties at the top (YAML front
+  matter) are not mixed line by line, since a key written twice would break them: when they differ, those of the
+  version changed last are kept whole. The line endings (LF or CRLF) and the end of the last line are this computer's.
+- **Only plain text is merged:** notes and text files (`.md`, `.markdown`, `.txt`, `.org`, `.rst`, `.adoc`, `.tex`
+  and the like), in UTF-8, of up to 2 MB on each side, outside `.obsidian`. **Any other file that differs is kept
+  twice**, as **Keep both** keeps it (canvases, bases and JSON too, whose lines cannot be mixed).
+- **This computer's version of each merged note is kept for thirty days** in Scriptorium's folder of replaced files
+  (**Replaced files…** in the status window); Drive keeps the version it replaces in its version history.
+
+Drive's versions of the notes are read through rclone before anything is changed (one listing of them and one copy,
+whatever their number), so a merge that cannot reach Drive changes nothing.
 
 ### What is synced
 
@@ -932,18 +971,23 @@ underneath. The commands keep their places in the palette (and any hotkey you ga
   rclone "alias" remote under the same name): the first sync with each choice, steady syncing, conflicts, deletions,
   the deletion limit and **Sync anyway**, an emptied, missing or swapped side, a run cut off halfway and picked up
   (by a kill, and by Scriptorium's own stop), the lock, the filters and changing them, a 48 MB file, names in several scripts, a path of more than 300
-  characters, names that Windows forbids, two computers on one folder, retrieving, and the sign-in as far as rclone's
-  listener and the address it sends the browser to. GitHub Actions runs it on Linux, Windows and macOS, after
+  characters, names that Windows forbids, two computers on one folder, retrieving, merging both sides (on the first
+  sync, by the merge command on a vault that syncs, and for a note changed on both sides between syncs, with either
+  side's version the newer), and the sign-in as far as rclone's listener and the address it sends the browser to. GitHub Actions runs it on Linux, Windows and macOS, after
   downloading rclone with the plugin's own downloader and SHA-256 check.
 - `plugins-tests/rclone-sync.test.js` tests, with a pretend rclone (`fake-rclone.js`), where things live on each
   system, how rclone is found and run (without a shell; awkward paths), the config file, the folder browser, the
-  commands that are built, every failure message, the timer and the report.
+  commands that are built, every failure message, the timer and the report, and the merge: the line-by-line union
+  (shared lines, edits on both sides, appends, deletions, moved lines, line ends, front matter, very different
+  versions, a long note), which files are merged, how Drive's versions are read, and which copy of a conflict is
+  this computer's.
 - In a real Obsidian 1.15 on Linux the whole flow was driven by hand against the stand-in: download, sign-in page (with
   the real rclone listening, then cancelled), browsing and making a folder, the first-sync page, syncing after an edit
   and on the timer, a conflict, the safety stops, retrieving into a new folder and opening it.
 - The sign-in with the real Google has been run by the author, and works.
 - **Not verified:** the windows themselves on Windows and macOS (the engine is tested there, the Obsidian windows
-  only on Linux).
+  only on Linux), and the merge's windows (the fourth choice of the first sync, the merge command's pages and the
+  setting) in a real Obsidian: their code was run in Node with a stand-in for the page and the pretend rclone.
 
 To check the sign-in yourself, in three steps: (1) run **Scriptorium: Connect to Google Drive (sign in to Google)**
 and finish Google's page; the window should go on to "This computer is signed in to Google Drive". (2) Run **Sync
